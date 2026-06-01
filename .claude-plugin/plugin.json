@@ -1,0 +1,10 @@
+{
+  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
+  "name": "skills",
+  "version": "0.1.0",
+  "description": "Multi-reviewer skills: /validate (fact-check + SOLID review of specs and plans) and /polish-pr (parallel review + fix sweep on a pull request)",
+  "author": {
+    "name": "stavxyz",
+    "email": "smlstvnh@gmail.com"
+  }
+}

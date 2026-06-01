@@ -1,0 +1,19 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "stavxyz",
+  "owner": {
+    "name": "stavxyz",
+    "email": "smlstvnh@gmail.com"
+  },
+  "metadata": {
+    "description": "stavxyz's Claude Code skills: spec/plan validation and PR polishing",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "skills",
+      "source": "./",
+      "description": "Multi-reviewer skills: /validate (fact-check + SOLID review of specs and plans) and /polish-pr (parallel review + fix sweep on a pull request)"
+    }
+  ]
+}

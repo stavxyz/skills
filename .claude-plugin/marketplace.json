@@ -13,8 +13,7 @@
     {
       "name": "skills",
       "source": "./",
-      "description": "Multi-reviewer skills: /validate (fact-check + SOLID review of specs and plans) and /polish-pr (parallel review + fix sweep on a pull request)",
-      "version": "0.1.0"
+      "description": "Multi-reviewer skills: /validate (fact-check + SOLID review of specs and plans) and /polish-pr (parallel review + fix sweep on a pull request)"
     }
   ]
 }

@@ -47,8 +47,16 @@ The last-mile pass before a PR merges. It rebases onto the latest upstream, runs
 
 **`/polish-pr` has prerequisites.** It hard-requires both review systems to be installed and refuses to run in degraded (single-reviewer) mode:
 
-- [`pr-review-toolkit`](https://github.com/anthropics/claude-code) — provides the `pr-review-toolkit:code-reviewer` agent / `review-pr` skill.
+- [`pr-review-toolkit`](https://github.com/anthropics/claude-plugins-public/tree/main/plugins/pr-review-toolkit) — provides the `pr-review-toolkit:code-reviewer` agent / `review-pr` skill.
 - [`superpowers`](https://github.com/obra/superpowers) — provides `superpowers:requesting-code-review` (5.1.0+).
+
+Both are available from Anthropic's official plugin marketplace:
+
+```text
+/plugin marketplace add anthropics/claude-plugins-official
+/plugin install pr-review-toolkit@claude-plugins-official
+/plugin install superpowers@claude-plugins-official
+```
 
 If either is missing, `/polish-pr` stops and tells you what to install.
 
@@ -56,10 +64,10 @@ If either is missing, `/polish-pr` stops and tells you what to install.
 
 These skills target **Claude Code**. Two layers are worth distinguishing:
 
-- The **packaging** (`.claude-plugin/marketplace.json` + `/plugin install`) is Claude Code's plugin format. GitHub Copilot CLI reads the same format, and Gemini CLI / Codex can consume skills via tool-name mapping.
+- The **packaging** (`.claude-plugin/marketplace.json` + `/plugin install`) is Claude Code's plugin format. Some other agentic CLIs are converging on compatible plugin/skill formats, but support and exact semantics vary by tool — verify against your tool's own docs before assuming portability.
 - The **skill content** uses Claude-Code-specific tool names (`Task`, `AskUserQuestion`, `Edit`/`Write`, the `general-purpose` subagent type) and frontmatter (`disable-model-invocation`). Running these under another agent would require the tool-mapping shims that ecosystems like [superpowers](https://github.com/obra/superpowers) ship.
 
-In short: out of the box, use these with Claude Code (or Copilot CLI). Other tools need adaptation.
+In short: out of the box, use these with Claude Code. Other tools may need adaptation.
 
 ## Manual install (without the plugin system)
 
@@ -67,6 +75,8 @@ If you'd rather not use the marketplace, symlink the skills into your user skill
 
 ```bash
 git clone https://github.com/stavxyz/skills.git
+# The clone creates ./skills (the repo), and the skills themselves live under
+# its skills/ subdirectory — hence the intentional skills/skills/ below.
 ln -s "$PWD/skills/skills/validate"  ~/.claude/skills/validate
 ln -s "$PWD/skills/skills/polish-pr" ~/.claude/skills/polish-pr
 ```
@@ -80,12 +90,13 @@ ln -s "$PWD/skills/skills/polish-pr" ~/.claude/skills/polish-pr
 ├── .claude-plugin/
 │   ├── marketplace.json   # registers this repo as the "stavxyz" marketplace
 │   └── plugin.json        # defines the "skills" plugin
-└── skills/
-    ├── validate/
-    │   ├── SKILL.md
-    │   ├── fact-check-reviewer.md
-    │   ├── solid-hygiene-reviewer.md
-    │   └── __fixtures__/
-    └── polish-pr/
-        └── SKILL.md
+├── skills/                # distributed to installers
+│   ├── validate/
+│   │   ├── SKILL.md
+│   │   ├── fact-check-reviewer.md
+│   │   └── solid-hygiene-reviewer.md
+│   └── polish-pr/
+│       └── SKILL.md
+└── tests/                 # dev-only, not part of the installed plugin
+    └── validate-fixtures/ # sample specs for exercising /validate by hand
 ```

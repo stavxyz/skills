@@ -22,14 +22,14 @@ Adjust these after inaugural runs reveal real-world thresholds:
 
 Verify in order, exiting on the first failure:
 
-1. `$ARGUMENTS` resolves to an existing file. Run `ls "$ARGUMENTS"` via Bash. If exit code is non-zero, report `⛔ /validate: <path> does not exist.` and exit.
-2. The path ends in `.md`. If not, report `⛔ /validate: <path> is not a markdown file.` and exit.
-3. The file's directory (or its nearest ancestor that is a git repo) is a git repository. Run `git -C "$(dirname "$ARGUMENTS")" rev-parse HEAD` via Bash and capture the SHA as `HEAD_SHA`. If the command fails, report `⛔ /validate: not in a git repository (cannot fact-check against HEAD).` and exit.
+1. `$ARGUMENTS` resolves to an existing file. Run `ls "$ARGUMENTS"` via Bash. If exit code is non-zero, report `⛔ validate: <path> does not exist.` and exit.
+2. The path ends in `.md`. If not, report `⛔ validate: <path> is not a markdown file.` and exit.
+3. The file's directory (or its nearest ancestor that is a git repo) is a git repository. Run `git -C "$(dirname "$ARGUMENTS")" rev-parse HEAD` via Bash and capture the SHA as `HEAD_SHA`. If the command fails, report `⛔ validate: not in a git repository (cannot fact-check against HEAD).` and exit.
 4. Both reviewer template files exist alongside this `SKILL.md`. First resolve the skill directory into `SKILL_DIR`, supporting either install method:
    - **Plugin install:** if the `$CLAUDE_PLUGIN_ROOT` environment variable is set, `SKILL_DIR="$CLAUDE_PLUGIN_ROOT/skills/validate"`.
    - **Manual install:** otherwise `SKILL_DIR` is the directory containing this `SKILL.md` (e.g. `~/.claude/skills/validate` when symlinked into the user skills folder).
 
-   Then run `ls "$SKILL_DIR/fact-check-reviewer.md" "$SKILL_DIR/solid-hygiene-reviewer.md"` via Bash. If either file is missing, report `⛔ /validate: reviewer template <filename> missing from skill folder. Reinstall the skill or restore from version control.` and exit.
+   Then run `ls "$SKILL_DIR/fact-check-reviewer.md" "$SKILL_DIR/solid-hygiene-reviewer.md"` via Bash. If either file is missing, report `⛔ validate: reviewer template <filename> missing from skill folder. Reinstall the skill or restore from version control.` and exit.
 5. Capture `REPO_ROOT` via `git -C "$(dirname "$ARGUMENTS")" rev-parse --show-toplevel`.
 
 ## Detect kind
@@ -65,7 +65,7 @@ For each, substitute these placeholders by literal find-and-replace (no templati
 - `{head_sha}` → `$HEAD_SHA` from preconditions
 - `{kind}` → `$KIND` from kind detection
 
-After substitution, verify no `{` followed by a known placeholder name remains in either template. If any placeholder substitution missed (typo in placeholder name, etc.), report `⛔ /validate: prompt template <filename> has unfilled placeholder <name>. Aborting before dispatch.` and exit.
+After substitution, verify no `{` followed by a known placeholder name remains in either template. If any placeholder substitution missed (typo in placeholder name, etc.), report `⛔ validate: prompt template <filename> has unfilled placeholder <name>. Aborting before dispatch.` and exit.
 
 In a **single message**, dispatch BOTH reviewers via the Task tool. Both Task calls go in the same message (multiple tool_use blocks in one assistant message) so they execute concurrently:
 
@@ -129,7 +129,7 @@ Two findings count as contradictory if:
 
 Crossing the same location from different angles is normal (e.g., a fact-check finding about a file path AND a SOLID finding about the design at that same path); those proceed as independent findings. But low-similarity findings at the same location may indicate the reviewers disagree about the underlying premise (one assumes X is true, the other's design feedback assumes X is false).
 
-For each contradictory pair, surface to the operator before triage. Call AskUserQuestion: question = "Reviewers disagree about <location>. Reviewer A (fact-check) says: <fact-check claim>. Reviewer B (SOLID) says: <SOLID concern>. Which finding should /validate proceed with?", header = "Conflict", options = `[{label: "Apply fact-check finding (skip SOLID)"}, {label: "Apply SOLID finding (skip fact-check)"}, {label: "Skip both — manual triage"}]`. Apply only the chosen finding (or neither); log the choice in the report's "Conflict resolutions" subsection.
+For each contradictory pair, surface to the operator before triage. Call AskUserQuestion: question = "Reviewers disagree about <location>. Reviewer A (fact-check) says: <fact-check claim>. Reviewer B (SOLID) says: <SOLID concern>. Which finding should validate proceed with?", header = "Conflict", options = `[{label: "Apply fact-check finding (skip SOLID)"}, {label: "Apply SOLID finding (skip fact-check)"}, {label: "Skip both — manual triage"}]`. Apply only the chosen finding (or neither); log the choice in the report's "Conflict resolutions" subsection.
 
 ### Overload check
 
@@ -141,10 +141,10 @@ Compute:
 If `CI_COUNT > OVERLOAD_CRITICAL_IMPORTANT` OR `TOTAL_COUNT > OVERLOAD_TOTAL`, abort before any edits. Report:
 
 ```
-⛔ /validate: spec drifted significantly from the codebase. <CI_COUNT> Critical+Important findings, <TOTAL_COUNT> total. Consider rebasing the spec via brainstorming before re-running /validate.
+⛔ validate: spec drifted significantly from the codebase. <CI_COUNT> Critical+Important findings, <TOTAL_COUNT> total. Consider rebasing the spec via brainstorming before re-running validate.
 ```
 
-Then exit. Operator can take the spec back to brainstorming for a refresh, or re-run /validate after manual triage.
+Then exit. Operator can take the spec back to brainstorming for a refresh, or re-run validate after manual triage.
 
 ### Gates: ask before deferring, before applying Critical, before SOLID-net-negative
 
@@ -165,22 +165,22 @@ If user picks `Address`: continue to next gate; the edit phase will redesign the
 If user picks `Accept`: record acceptance in the finding's metadata; the edit phase will append an "Accepted net-negative tradeoff" annotation to the spec section.
 If user picks `Escalate`: see "Escalate path" below.
 
-**Gate 3 — Critical fact-check findings.** For each finding with `source: fact-check` AND `severity: Critical`, call AskUserQuestion: question = "Critical fact-check finding: <finding's summary>. The reviewer says <claim> in the spec is incorrect; reality per the codebase is <reality>. Apply the suggested correction, skip this finding (treat as advisory), or abort the run?", header = "Critical fact-check", options = `[{label: "Apply suggested correction"}, {label: "Skip this finding (treat as advisory)"}, {label: "Abort /validate"}]`.
+**Gate 3 — Critical fact-check findings.** For each finding with `source: fact-check` AND `severity: Critical`, call AskUserQuestion: question = "Critical fact-check finding: <finding's summary>. The reviewer says <claim> in the spec is incorrect; reality per the codebase is <reality>. Apply the suggested correction, skip this finding (treat as advisory), or abort the run?", header = "Critical fact-check", options = `[{label: "Apply suggested correction"}, {label: "Skip this finding (treat as advisory)"}, {label: "Abort validate"}]`.
 
 If user picks `Apply`: proceed to edit phase, which will apply the correction.
 If user picks `Skip`: the finding is downgraded to Low-severity advisory; no edit is applied.
-If user picks `Abort`: report `⛔ /validate aborted by operator at Critical fact-check gate.` and exit. Frontmatter is NOT updated.
+If user picks `Abort`: report `⛔ validate aborted by operator at Critical fact-check gate.` and exit. Frontmatter is NOT updated.
 
 ### Escalate path
 
-If user picks `Escalate` on any net-negative gate, /validate aborts before edits. Steps:
+If user picks `Escalate` on any net-negative gate, validate aborts before edits. Steps:
 
 1. Compute `SHORT_SHA` = first 8 chars of `HEAD_SHA`.
 2. Compute `FINDINGS_PATH` = `<spec_path>.validate-findings-<SHORT_SHA>.md`.
 3. Write the full findings list (both reviewers, all severities, all gate statuses) to `FINDINGS_PATH` as Markdown. Format: a header section explaining the file's purpose, then the structured findings, then a brief "next steps" section directing the operator to invoke `superpowers:brainstorming` with this file as context.
 4. Report:
    ```
-   ⛔ /validate escalated <spec_path>: design needs re-brainstorming. Findings saved to <FINDINGS_PATH>.
+   ⛔ validate escalated <spec_path>: design needs re-brainstorming. Findings saved to <FINDINGS_PATH>.
    ```
 5. Do NOT update the spec's frontmatter (no partial-validation trace).
 6. Exit.
@@ -196,10 +196,10 @@ CURRENT_MTIME=$(stat -f "%m" "$ARGUMENTS" 2>/dev/null || stat -c "%Y" "$ARGUMENT
 If `CURRENT_MTIME != INITIAL_MTIME`, abort with:
 
 ```
-⛔ /validate: spec was modified externally during validation. Re-run /validate after the changes settle.
+⛔ validate: spec was modified externally during validation. Re-run validate after the changes settle.
 ```
 
-After the first Edit call begins, /validate's own writes will advance mtime — no further re-stats are meaningful.
+After the first Edit call begins, validate's own writes will advance mtime — no further re-stats are meaningful.
 
 For each finding to apply (after gating resolutions), apply this loop:
 
@@ -236,7 +236,7 @@ For each finding in `FINDINGS` after triage:
    - Diff the spec's section at the finding's `location` between pre-edit and post-edit content (compare the section's text before and after the Edit phase).
    - If unchanged, block with:
      ```
-     ⛔ /validate blocked: <finding's concern>. User selected `address`, but the spec section at <location> is unchanged. Re-run /validate after manually addressing this finding.
+     ⛔ validate blocked: <finding's concern>. User selected `address`, but the spec section at <location> is unchanged. Re-run validate after manually addressing this finding.
      ```
    - If changed, the user's choice was honored; continue.
 
@@ -247,7 +247,7 @@ For each finding in `FINDINGS` after triage:
 3. **Findings in `HALLUCINATED_FINDINGS`** (claim text not found verbatim):
    - Always block. Report:
      ```
-     ⛔ /validate: <count> findings could not be auto-edited because reviewer claims didn't match spec text. Manual triage required. See report below for the affected findings.
+     ⛔ validate: <count> findings could not be auto-edited because reviewer claims didn't match spec text. Manual triage required. See report below for the affected findings.
      ```
 
 4. **All other findings (advisory, mechanical, substantive, Critical fact-check applied):**
@@ -262,13 +262,13 @@ If all checks pass, the spec is BLESSED. Proceed to the report. If any block fir
 If verification passed (spec is blessed), print:
 
 ```
-✅ /validate blessed <spec_path> against <SHORT_SHA>
+✅ validate blessed <spec_path> against <SHORT_SHA>
 ```
 
 If verification failed (any block fired), print:
 
 ```
-⛔ /validate blocked <spec_path>: <description of the first block that fired>
+⛔ validate blocked <spec_path>: <description of the first block that fired>
 ```
 
 ### Print the counts table
@@ -312,7 +312,7 @@ validated:
   net_negative_remaining: <count of accepted net-negatives>
 ```
 
-If a `validated:` block already exists from a prior /validate run, replace it (the new block always reflects the most recent run).
+If a `validated:` block already exists from a prior validate run, replace it (the new block always reflects the most recent run).
 
 ### Persist the spec file
 
@@ -328,7 +328,7 @@ Exit code 0 means gitignored.
 - **If tracked:** create an atomic commit:
   ```bash
   git -C "$REPO_ROOT" add "$ARGUMENTS"
-  git -C "$REPO_ROOT" commit -m "docs(spec): /validate findings addressed for <topic>"
+  git -C "$REPO_ROOT" commit -m "docs(spec): validate findings addressed for <topic>"
   ```
   Where `<topic>` is derived from the spec's filename (strip the date prefix and `-design.md` suffix; replace dashes with spaces). Print: `Spec committed: <commit_sha>.`
 
@@ -336,4 +336,4 @@ No Claude attribution in the commit message — never `Co-Authored-By` or `Gener
 
 ### Done
 
-The skill exits after the report. Operator can re-run /validate at any time; subsequent runs are stateless and re-scan against the current `HEAD`.
+The skill exits after the report. Operator can re-run validate at any time; subsequent runs are stateless and re-scan against the current `HEAD`.

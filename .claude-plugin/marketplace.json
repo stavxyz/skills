@@ -1,6 +1,6 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
-  "name": "stavxyz",
+  "name": "skills",
   "owner": {
     "name": "stavxyz",
     "email": "smlstvnh@gmail.com"
@@ -11,9 +11,9 @@
   },
   "plugins": [
     {
-      "name": "skills",
+      "name": "stavxyz",
       "source": "./",
-      "description": "Multi-reviewer skills: /validate (fact-check + SOLID review of specs and plans) and /polish-pr (parallel review + fix sweep on a pull request)"
+      "description": "Multi-reviewer skills: /stavxyz:validate (fact-check + SOLID review of specs and plans) and /stavxyz:polish-pr (parallel review + fix sweep on a pull request)"
     }
   ]
 }

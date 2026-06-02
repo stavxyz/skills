@@ -4,30 +4,30 @@ A small [Claude Code](https://claude.com/claude-code) plugin marketplace with tw
 
 | Skill | Command | What it does |
 | --- | --- | --- |
-| **validate** | `/validate <path-to-spec-or-plan.md>` | Runs two reviewers in parallel against your codebase — a **fact-check** pass (are the spec's claims about existing code true?) and a **SOLID / hygiene** pass (is the design direction sound?) — then addresses the findings in-spec, with gates for deferrals, Critical corrections, and net-negative design. |
-| **polish-pr** | `/polish-pr <PR#>` | Rebases a PR, runs two independent code reviews in parallel, addresses **every** finding at every severity in-PR, updates docs, runs a test plan, and pushes. |
+| **validate** | `/stavxyz:validate <path-to-spec-or-plan.md>` | Runs two reviewers in parallel against your codebase — a **fact-check** pass (are the spec's claims about existing code true?) and a **SOLID / hygiene** pass (is the design direction sound?) — then addresses the findings in-spec, with gates for deferrals, Critical corrections, and net-negative design. |
+| **polish-pr** | `/stavxyz:polish-pr <PR#>` | Rebases a PR, runs two independent code reviews in parallel, addresses **every** finding at every severity in-PR, updates docs, runs a test plan, and pushes. |
 
 ## Install
 
 ```text
 /plugin marketplace add stavxyz/skills
-/plugin install skills@stavxyz
+/plugin install stavxyz@skills
 ```
 
-The first command registers this repo as a marketplace named `stavxyz`; the second installs the `skills` plugin from it. After installing, `/validate` and `/polish-pr` are available as slash commands.
+The first command registers this repo as a marketplace named `skills`; the second installs the `stavxyz` plugin from it. Plugin skills are namespaced by the plugin name, so after installing they're invoked as `/stavxyz:validate` and `/stavxyz:polish-pr`.
 
 To update later:
 
 ```text
-/plugin marketplace update stavxyz
+/plugin marketplace update skills
 ```
 
 ## The skills
 
-### `/validate`
+### `/stavxyz:validate`
 
 ```text
-/validate docs/specs/2026-05-31-my-feature-design.md
+/stavxyz:validate docs/specs/2026-05-31-my-feature-design.md
 ```
 
 Validates a **spec or plan** markdown file against the current `HEAD` of its git repo. It dispatches two `general-purpose` subagents in parallel using the bespoke reviewer prompts shipped alongside the skill:
@@ -37,15 +37,15 @@ Validates a **spec or plan** markdown file against the current `HEAD` of its git
 
 Findings are deduped, triaged, and addressed in-place in the spec. Three conditions gate on your approval before edits proceed: deferral candidates, Critical fact-check findings, and net-negative design findings. On success the spec's frontmatter gets a `validated:` block recording the SHA, date, and finding counts.
 
-### `/polish-pr`
+### `/stavxyz:polish-pr`
 
 ```text
-/polish-pr 142
+/stavxyz:polish-pr 142
 ```
 
 The last-mile pass before a PR merges. It rebases onto the latest upstream, runs **two** code reviews in parallel (from `pr-review-toolkit` and `superpowers`), and fixes every finding in-PR rather than deferring. It also updates all docs, builds a test plan into the PR description, sweeps the branch for stray AI-attribution lines, and pushes.
 
-**`/polish-pr` has prerequisites.** It hard-requires both review systems to be installed and refuses to run in degraded (single-reviewer) mode:
+**`/stavxyz:polish-pr` has prerequisites.** It hard-requires both review systems to be installed and refuses to run in degraded (single-reviewer) mode:
 
 - [`pr-review-toolkit`](https://github.com/anthropics/claude-plugins-public/tree/main/plugins/pr-review-toolkit) — provides the `pr-review-toolkit:code-reviewer` agent / `review-pr` skill.
 - [`superpowers`](https://github.com/obra/superpowers) — provides `superpowers:requesting-code-review` (5.1.0+).
@@ -58,7 +58,7 @@ Both are available from Anthropic's official plugin marketplace:
 /plugin install superpowers@claude-plugins-official
 ```
 
-If either is missing, `/polish-pr` stops and tells you what to install.
+If either is missing, `/stavxyz:polish-pr` stops and tells you what to install.
 
 ## Compatibility
 
@@ -81,15 +81,15 @@ ln -s "$PWD/skills/skills/validate"  ~/.claude/skills/validate
 ln -s "$PWD/skills/skills/polish-pr" ~/.claude/skills/polish-pr
 ```
 
-`/validate` resolves its reviewer templates relative to the installed skill directory, so it works under either install method.
+Installed this way they are **user skills**, which are not namespaced — so you invoke them by bare name (`/validate`, `/polish-pr`) rather than the `/stavxyz:` prefix used for the plugin install. `validate` resolves its reviewer templates relative to the installed skill directory, so it works under either install method.
 
 ## Repository layout
 
 ```text
 .
 ├── .claude-plugin/
-│   ├── marketplace.json   # registers this repo as the "stavxyz" marketplace
-│   └── plugin.json        # defines the "skills" plugin
+│   ├── marketplace.json   # registers this repo as the "skills" marketplace
+│   └── plugin.json        # defines the "stavxyz" plugin
 ├── skills/                # distributed to installers
 │   ├── validate/
 │   │   ├── SKILL.md
@@ -98,5 +98,5 @@ ln -s "$PWD/skills/skills/polish-pr" ~/.claude/skills/polish-pr
 │   └── polish-pr/
 │       └── SKILL.md
 └── tests/                 # dev-only, not part of the installed plugin
-    └── validate-fixtures/ # sample specs for exercising /validate by hand
+    └── validate-fixtures/ # sample specs for exercising validate by hand
 ```

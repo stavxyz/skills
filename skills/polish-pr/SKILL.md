@@ -81,7 +81,7 @@ Any GitHub issues closed by this PR should be referred to in the PR description 
 
 The user's standing rule is **zero Claude attribution on any commit, ever.** No `Co-Authored-By: Claude` lines. No `🤖 Generated with Claude Code` footers. This applies to the polish-pr round's own commits AND every commit already on the branch (from earlier subagents, prior development, anything).
 
-This is a separate enforcement step because the prose elsewhere in this skill is not enough — both /polish-pr v1 rounds run on PR #141 missed 14 attributed commits because the rule lived in passive prose under "Execution standards." Treat this section as a hard gate, not a recommendation.
+This is a separate enforcement step because the prose elsewhere in this skill is not enough — both polish-pr v1 rounds run on PR #141 missed 14 attributed commits because the rule lived in passive prose under "Execution standards." Treat this section as a hard gate, not a recommendation.
 
 ### Step 1 — Propagate the rule to every subagent you dispatch
 

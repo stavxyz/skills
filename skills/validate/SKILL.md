@@ -364,20 +364,21 @@ The operator drives the next step by hand. This preserves a human checkpoint whe
 
 No confirmation prompt — announce, then immediately invoke the next skill. But guard the handoff first: the auto-continue depends on the next-stage skill being model-invocable, and that is not guaranteed.
 
-1. **Resolve the next-stage skill** from `KIND`:
-   - `KIND == spec` → `superpowers:writing-plans`
-   - `KIND == plan` → `superpowers:subagent-driven-development`
+1. **Resolve the next-stage skill** from `KIND`. Two names refer to it: `<target>` is the fully-qualified, invocable skill id; `<next stage>` is its bare name (used only in the green banner).
+   - `KIND == spec` → `<target>` = `superpowers:writing-plans`, `<next stage>` = `writing-plans`
+   - `KIND == plan` → `<target>` = `superpowers:subagent-driven-development`, `<next stage>` = `subagent-driven-development`
 
-2. **Confirm the target is model-invocable BEFORE announcing.** The handoff calls the next skill via the Skill tool, which can only invoke skills that are available to you as a model. A skill whose frontmatter sets `disable-model-invocation: true` is **user-only** — it is excluded from your invocable-skills list and the Skill tool cannot call it; the same is true if the skill isn't installed at all. If the resolved target is not in your available (model-invocable) skills, do NOT print the clean-bless banner and do NOT silently stop. Fall back to the manual path:
+2. **Confirm the target is model-invocable BEFORE announcing.** Base this on one observable fact: **does `<target>` appear in the list of skills you can invoke via the Skill tool (the model-invocable skills enumerated in your context)?** You cannot read other skills' frontmatter — you only see presence or absence. A skill is absent from that list when it isn't installed, or when its frontmatter sets `disable-model-invocation: true` (making it user-only); either way the Skill tool cannot call it. If `<target>` is **absent**, do NOT print the clean-bless banner and do NOT silently stop — take the **manual-fallback** path (below), then stop. Only the automatic handoff is skipped; the bless and frontmatter update are unaffected.
+
+   **Manual-fallback (canonical).** Print this `🟡` line, substituting `<reason>`, then stop:
 
    ```
-   🟡 validate: clean bless, but auto-continue is unavailable — <target> can't be invoked automatically (not installed, or model-invocation disabled). The bless stands; run the next stage yourself:
-     <target> on <absolute path of the blessed file>
+   🟡 validate: auto-continue unavailable (the bless itself is clean) — <reason>. Run the next stage yourself: invoke <target>, pointing it at <absolute path of the blessed file>.
    ```
 
-   Then stop. Only the automatic handoff is skipped — the bless and frontmatter update are unaffected.
+   For the absent-target case, `<reason>` = `<target> isn't an invocable skill (not installed, or model-invocation disabled)`. This `🟡` is intentionally distinct from the "blessed with caveats" `🟡` earlier: that one means the bless had caveats; this one means the bless was clean but the handoff couldn't run. Keep the two separate — do not collapse them.
 
-3. **If the target is invocable, print the banner** (substitute `<next stage>` — `writing-plans` for a spec, `subagent-driven-development` for a plan):
+3. **If `<target>` is invocable, print the banner:**
 
    ```
    🟢 validate: clean bless, maximum confidence — auto-continuing to <next stage>.
@@ -388,7 +389,7 @@ No confirmation prompt — announce, then immediately invoke the next skill. But
    - `KIND == spec` → invoke `superpowers:writing-plans` with input: the absolute spec path plus "build the implementation plan from this spec." The plan it produces can itself be re-validated by re-running this skill on the plan.
    - `KIND == plan` → invoke `superpowers:subagent-driven-development` with input: the absolute plan path plus "execute this plan."
 
-   Auto-continue proceeds whether the spec was committed (tracked path) or merely saved to disk (gitignored path) in "Persist the spec file" — in both cases a stable, blessed file is on disk for the downstream skill to read. If the Skill invocation itself errors at runtime (target not found or refuses), fall back to the same `🟡` manual line from step 2 rather than leaving the run in an ambiguous state.
+   Auto-continue proceeds whether the spec was committed (tracked path) or merely saved to disk (gitignored path) in "Persist the spec file" — in both cases a stable, blessed file is on disk for the downstream skill to read. If the invocation fails **after** the banner — the Skill call errors, the target isn't found, or it returns without acting on the input — take the **manual-fallback** path from step 2 with `<reason>` = `the handoff failed after it was announced`, so the run doesn't end in an ambiguous state.
 
 ### Plan→implementation override
 

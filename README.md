@@ -37,6 +37,8 @@ Validates a **spec or plan** markdown file against the current `HEAD` of its git
 
 Findings are deduped, triaged, and addressed in-place in the spec. Three conditions gate on your approval before edits proceed: deferral candidates, Critical fact-check findings, and net-negative design findings. On success the spec's frontmatter gets a `validated:` block recording the SHA, date, and finding counts.
 
+On a **clean bless** — blessed with zero caveats (no deferrals, accepted net-negatives, skipped Criticals, hallucinated quotes, or parse failures, and both reviewers ran) — validate auto-continues to the next stage of the pipeline: a blessed **spec** flows straight into `superpowers:writing-plans`, and a blessed **plan** flows straight into `superpowers:subagent-driven-development`. It announces this with a banner and proceeds without a prompt. If the bless carries any caveat, validate stops and recommends the next step for you to run by hand.
+
 ### `/stavxyz:polish-pr`
 
 ```text

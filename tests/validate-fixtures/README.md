@@ -9,7 +9,7 @@ Each fixture is a minimal `type: spec` markdown file that drives a different
 
 | Fixture | Exercises |
 | --- | --- |
-| `fixture-clean.md` | A spec whose claims match the codebase — expect a clean bless with no findings. |
+| `fixture-clean.md` | A spec whose claims match the codebase — expect a clean bless with no findings. Because the bless is caveat-free, validate will then **auto-continue into `superpowers:writing-plans`** (the fixture is `type: spec`); stop there if you only meant to exercise validation. |
 | `fixture-drift.md` | A spec containing stale/incorrect claims — expect fact-check findings. |
 | `fixture-net-negative.md` | A spec whose design direction is net-negative — expect a SOLID/hygiene `net-negative` gate. |
 

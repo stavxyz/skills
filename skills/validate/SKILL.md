@@ -346,8 +346,9 @@ A bless is **clean** only when the spec/plan is blessed AND every one of these c
 - Accepted net-negatives (`net_negative_remaining`, from Gate 2 `Accept`) = 0
 - Skipped Critical fact-checks (Gate 3 `Skip`, downgraded to advisory) = 0
 - Hallucinated findings (`HALLUCINATED_FINDINGS`) = 0
-- Parse failures (blocks that failed the `### <Severity>:` match) = 0
-- Contradictions resolved as "Skip both — manual triage" = 0
+- Parse failures = 0 — counting BOTH classes from "Parse findings": a `### ` block whose heading failed the `^### (Critical|Important|Medium|Low|Nitpick):` match, AND any finding surfaced as raw text because a required field was missing/malformed
+- Reviewer contradictions that reached the contradiction gate ("Detect contradictions") = 0 — ANY operator resolution counts as a caveat, including picking a side (`Apply fact-check finding (skip SOLID)` / `Apply SOLID finding (skip fact-check)`), not only `Skip both — manual triage`. A triggered contradiction gate means the reviewers disagreed about an underlying premise and human judgment was required — that is less than maximal confidence regardless of how it was resolved.
+- `KIND` was determined by frontmatter, path, or content shape — NOT by the tie-break AskUserQuestion ("Detect kind" step 4). A tie-broken kind means the artifact's identity was itself ambiguous; do not auto-continue (especially into implementation) off a guess.
 - Both reviewers ran to completion — NOT degraded/single-reviewer mode (the dispatch-failure fallback was not taken)
 
 If the bless is **not** clean (any caveat above is present), do NOT auto-continue. After the normal report, print one line recommending the next step and stop:
@@ -363,7 +364,7 @@ The operator drives the next step by hand. This preserves a human checkpoint whe
 
 No confirmation prompt — announce, then immediately invoke the next skill.
 
-1. Print the banner (substitute the next stage for `KIND`):
+1. Print the banner (substitute `<next stage>` per `KIND`, using the mapping below):
 
    ```
    🟢 validate: clean bless, maximum confidence — auto-continuing to <next stage>.
@@ -371,10 +372,12 @@ No confirmation prompt — announce, then immediately invoke the next skill.
 
    Where `<next stage>` is `writing-plans` when `KIND == spec`, or `subagent-driven-development` when `KIND == plan`.
 
-2. Immediately invoke the next skill via the Skill tool, passing the blessed file's absolute path (`$ARGUMENTS`) as context so the downstream skill operates on it:
+2. Immediately invoke the next skill via the Skill tool. For the skill's input, provide the blessed file's **resolved absolute path** — the same absolute path computed for `{spec_path}` during "Dispatch reviewers in parallel" (via `realpath` or `cd $(dirname) && pwd`), NOT the raw `$ARGUMENTS`, which may be relative — together with a one-line instruction telling the downstream skill to operate on that file (skills take free-form input text, not a path argument):
 
-   - `KIND == spec` → invoke `superpowers:writing-plans` with the blessed spec path. The plan it produces can itself be re-validated by re-running this skill on the plan.
-   - `KIND == plan` → invoke `superpowers:subagent-driven-development` with the blessed plan path.
+   - `KIND == spec` → invoke `superpowers:writing-plans` with input: the absolute spec path plus "build the implementation plan from this spec." The plan it produces can itself be re-validated by re-running this skill on the plan.
+   - `KIND == plan` → invoke `superpowers:subagent-driven-development` with input: the absolute plan path plus "execute this plan."
+
+   Auto-continue proceeds whether the spec was committed (tracked path) or merely saved to disk (gitignored path) in "Persist the spec file" — in both cases a stable, blessed file is on disk for the downstream skill to read.
 
 ### Plan→implementation override
 

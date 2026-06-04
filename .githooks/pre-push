@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+#
+# pre-push hook: require a plugin version bump whenever shipped skill content
+# changes.
+#
+# Why: Claude Code caches installed plugins under a version-stamped path
+# (~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/). If skills/ content
+# changes but .claude-plugin/plugin.json "version" does NOT, users who run
+# `/plugin marketplace update` + `/plugin update` can keep serving the cached
+# (stale) content — a known Claude Code cache bug. Bumping the patch version
+# changes the cache path and forces a clean fetch. See RELEASING.md.
+#
+# Install (per clone): git config core.hooksPath .githooks
+# Bypass intentionally:  git push --no-verify
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+PLUGIN_JSON="$REPO_ROOT/.claude-plugin/plugin.json"
+
+read_version() { # reads "version" from a plugin.json passed on stdin
+  sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1
+}
+
+# Pick a base to diff against: prefer origin/main, fall back to local main.
+base=""
+if git rev-parse --verify --quiet origin/main >/dev/null; then
+  base="$(git merge-base origin/main HEAD)"
+elif git rev-parse --verify --quiet main >/dev/null; then
+  base="$(git merge-base main HEAD)"
+else
+  exit 0 # nothing to compare against; don't block
+fi
+
+# Did shipped skill content change between the base and what we're pushing?
+if git diff --quiet "$base" HEAD -- skills/; then
+  exit 0 # no skills/ changes — no bump required
+fi
+
+old_ver="$(git show "$base:.claude-plugin/plugin.json" 2>/dev/null | read_version || true)"
+new_ver="$(read_version < "$PLUGIN_JSON")"
+
+if [ -n "$new_ver" ] && [ "$old_ver" = "$new_ver" ]; then
+  cat >&2 <<EOF
+✗ pre-push blocked: skills/ content changed but the plugin version is still $new_ver.
+
+  Bump the patch version so users' caches refresh (see RELEASING.md):
+    - .claude-plugin/plugin.json     "version"
+    - .claude-plugin/marketplace.json metadata.version  (keep in sync)
+
+  e.g. $old_ver -> ${old_ver%.*}.$(( ${old_ver##*.} + 1 ))
+
+  To bypass intentionally: git push --no-verify
+EOF
+  exit 1
+fi
+
+exit 0

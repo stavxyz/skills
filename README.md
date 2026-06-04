@@ -20,7 +20,13 @@ To update later:
 
 ```text
 /plugin marketplace update skills
+/plugin update
 ```
+
+Updates aren't automatic — run those when a new version ships. Because Claude
+Code caches plugins under a version-stamped path, every content change ships
+with a version bump; see [RELEASING.md](RELEASING.md) for the why and the
+contributor workflow.
 
 ## The skills
 
@@ -92,6 +98,9 @@ Installed this way they are **user skills**, which are not namespaced — so you
 ├── .claude-plugin/
 │   ├── marketplace.json   # registers this repo as the "skills" marketplace
 │   └── plugin.json        # defines the "stavxyz" plugin
+├── .githooks/
+│   └── pre-push           # blocks pushes that change skills/ without a version bump
+├── RELEASING.md           # versioning rule + contributor release checklist
 ├── skills/                # distributed to installers
 │   ├── validate/
 │   │   ├── SKILL.md
@@ -102,3 +111,6 @@ Installed this way they are **user skills**, which are not namespaced — so you
 └── tests/                 # dev-only, not part of the installed plugin
     └── validate-fixtures/ # sample specs for exercising validate by hand
 ```
+
+Contributing: enable the release guard once per clone with
+`git config core.hooksPath .githooks`. See [RELEASING.md](RELEASING.md).

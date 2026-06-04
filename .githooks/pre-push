@@ -1,57 +1,86 @@
 #!/usr/bin/env bash
 #
 # pre-push hook: require a plugin version bump whenever shipped skill content
-# changes.
+# (skills/) changes, and keep the plugin + marketplace versions in lockstep.
 #
 # Why: Claude Code caches installed plugins under a version-stamped path
 # (~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/). If skills/ content
-# changes but .claude-plugin/plugin.json "version" does NOT, users who run
-# `/plugin marketplace update` + `/plugin update` can keep serving the cached
-# (stale) content — a known Claude Code cache bug. Bumping the patch version
-# changes the cache path and forces a clean fetch. See RELEASING.md.
+# changes but the version does NOT, users who run `/plugin marketplace update`
+# + `/plugin update` can keep serving the cached (stale) content — a known
+# Claude Code cache behavior. Bumping the patch version changes the cache path
+# and forces a clean fetch. See RELEASING.md.
 #
-# Install (per clone): git config core.hooksPath .githooks
-# Bypass intentionally:  git push --no-verify
+# Scope & limits (by design):
+#   - Gates on `skills/` only — the shipped/cached content. Docs-only changes
+#     (README, RELEASING, this hook) are exempt and need no bump.
+#   - Compares the locally checked-out HEAD against origin/main (falling back to
+#     local main). It does NOT parse the refs git passes on stdin, so it assumes
+#     you are pushing the branch you have checked out — the workflow here. On a
+#     fresh clone with no origin/main or main ref, it no-ops (does not block).
+#   - Local and opt-in: only runs after `git config core.hooksPath .githooks`,
+#     and is bypassable with `git push --no-verify`. It is a best-effort local
+#     backstop, not server-side enforcement.
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 PLUGIN_JSON="$REPO_ROOT/.claude-plugin/plugin.json"
+MARKETPLACE_JSON="$REPO_ROOT/.claude-plugin/marketplace.json"
 
-read_version() { # reads "version" from a plugin.json passed on stdin
+read_version() { # prints the first "version": "..." value from stdin
   sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1
 }
 
+fail() { printf '✗ pre-push blocked: %s\n' "$1" >&2; exit 1; }
+
 # Pick a base to diff against: prefer origin/main, fall back to local main.
-base=""
 if git rev-parse --verify --quiet origin/main >/dev/null; then
   base="$(git merge-base origin/main HEAD)"
 elif git rev-parse --verify --quiet main >/dev/null; then
   base="$(git merge-base main HEAD)"
 else
-  exit 0 # nothing to compare against; don't block
+  exit 0 # no base to compare against (e.g. a fresh clone) — don't block
 fi
 
-# Did shipped skill content change between the base and what we're pushing?
+# Nothing to enforce unless shipped skill content changed.
 if git diff --quiet "$base" HEAD -- skills/; then
-  exit 0 # no skills/ changes — no bump required
+  exit 0
 fi
 
 old_ver="$(git show "$base:.claude-plugin/plugin.json" 2>/dev/null | read_version || true)"
-new_ver="$(read_version < "$PLUGIN_JSON")"
+plugin_ver="$(read_version < "$PLUGIN_JSON" || true)"
+market_ver="$(read_version < "$MARKETPLACE_JSON" || true)"
 
-if [ -n "$new_ver" ] && [ "$old_ver" = "$new_ver" ]; then
-  cat >&2 <<EOF
-✗ pre-push blocked: skills/ content changed but the plugin version is still $new_ver.
+# An unreadable version is suspicious, not safe — block rather than fail open.
+[ -n "$plugin_ver" ] || fail "skills/ changed but no \"version\" could be read from .claude-plugin/plugin.json."
+
+# Suggest the next patch, but only when the base version is plain numeric semver
+# (avoids a set -u crash on pre-release suffixes like 0.1.0-rc1).
+patch="${old_ver##*.}"
+if [ -n "$old_ver" ] && [[ "$patch" =~ ^[0-9]+$ ]]; then
+  suggestion="${old_ver%.*}.$(( patch + 1 ))"
+else
+  suggestion="the next patch"
+fi
+
+if [ "$old_ver" = "$plugin_ver" ]; then
+  fail "skills/ content changed but the plugin version is still $plugin_ver.
 
   Bump the patch version so users' caches refresh (see RELEASING.md):
-    - .claude-plugin/plugin.json     "version"
+    - .claude-plugin/plugin.json     \"version\"
     - .claude-plugin/marketplace.json metadata.version  (keep in sync)
 
-  e.g. $old_ver -> ${old_ver%.*}.$(( ${old_ver##*.} + 1 ))
+  e.g. $old_ver -> $suggestion
 
-  To bypass intentionally: git push --no-verify
-EOF
-  exit 1
+  To bypass intentionally: git push --no-verify"
+fi
+
+# plugin.json was bumped — make sure marketplace.json was bumped in lockstep.
+if [ "$plugin_ver" != "$market_ver" ]; then
+  fail "version mismatch: plugin.json is $plugin_ver but marketplace.json metadata.version is ${market_ver:-<unreadable>}.
+
+  Bump both to the same value (see RELEASING.md).
+
+  To bypass intentionally: git push --no-verify"
 fi
 
 exit 0

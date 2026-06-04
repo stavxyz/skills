@@ -56,8 +56,12 @@ Bumping the patch version changes the cache path, which forces a clean fetch.
 
 ## The pre-push guard
 
-`.githooks/pre-push` enforces the rule locally: it blocks a push when `skills/`
-content changed (relative to `origin/main`) but the plugin version did not.
+`.githooks/pre-push` enforces the rule locally. When `skills/` content changed
+(relative to `origin/main`, falling back to local `main`) it blocks the push
+unless **both** of these hold:
+
+1. the plugin version was bumped (differs from the base commit's), and
+2. `plugin.json` `version` and `marketplace.json` `metadata.version` agree.
 
 Enable it once per clone:
 
@@ -67,3 +71,14 @@ git config core.hooksPath .githooks
 
 Bypass intentionally (e.g. a docs-only change you've decided not to version)
 with `git push --no-verify`.
+
+**Known limits.** The guard is a best-effort *local* backstop, not server-side
+enforcement (this repo intentionally has no CI):
+
+- It only runs after you set `core.hooksPath` above, and `--no-verify` skips it.
+  Edits made through the GitHub web UI never see it.
+- It compares the checked-out `HEAD`, not the refs being pushed, so it assumes
+  you push the branch you have checked out.
+- On a fresh clone with no `origin/main` or `main` ref, it no-ops (won't block).
+
+The real backstop remains PR review — keep an eye on the version bump there.

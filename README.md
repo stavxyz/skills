@@ -24,9 +24,9 @@ To update later:
 ```
 
 Updates aren't automatic — run those when a new version ships. Because Claude
-Code caches plugins under a version-stamped path, every content change ships
-with a version bump; see [RELEASING.md](RELEASING.md) for the why and the
-contributor workflow.
+Code caches plugins under a version-stamped path, every change to shipped skill
+content (`skills/`) ships with a version bump; see [RELEASING.md](RELEASING.md)
+for the why and the contributor workflow.
 
 ## The skills
 

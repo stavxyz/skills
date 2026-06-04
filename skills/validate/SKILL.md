@@ -1,6 +1,6 @@
 ---
 name: validate
-description: Validate a spec or plan against the codebase via parallel multi-reviewer pass — fact-check claims, audit SOLID/hygiene direction, address findings in-spec
+description: Validate a spec or plan against the codebase via parallel multi-reviewer pass — fact-check claims, audit SOLID/hygiene direction, address findings in-spec. On a clean, caveat-free bless, auto-continues a spec to writing-plans and a plan to subagent-driven-development.
 disable-model-invocation: false
 ---
 
@@ -333,6 +333,55 @@ Exit code 0 means gitignored.
   Where `<topic>` is derived from the spec's filename (strip the date prefix and `-design.md` suffix; replace dashes with spaces). Print: `Spec committed: <commit_sha>.`
 
 No Claude attribution in the commit message — never `Co-Authored-By` or `Generated with Claude Code` lines.
+
+## Auto-continue on clean bless
+
+This section runs ONLY after a successful bless. If any block fired during "Verify net-positive," the skill already stopped — there is no auto-continue. Auto-continue is strictly downstream of an already-successful bless and changes none of the reviewing, parsing, gating, or bless logic above.
+
+### Define "clean bless" (maximum confidence)
+
+A bless is **clean** only when the spec/plan is blessed AND every one of these caveat counts is zero (and both reviewers ran):
+
+- Deferred findings (Gate 1 deferrals) = 0
+- Accepted net-negatives (`net_negative_remaining`, from Gate 2 `Accept`) = 0
+- Skipped Critical fact-checks (Gate 3 `Skip`, downgraded to advisory) = 0
+- Hallucinated findings (`HALLUCINATED_FINDINGS`) = 0
+- Parse failures = 0 — counting BOTH classes from "Parse findings": a `### ` block whose heading failed the `^### (Critical|Important|Medium|Low|Nitpick):` match, AND any finding surfaced as raw text because a required field was missing/malformed
+- Reviewer contradictions that reached the contradiction gate ("Detect contradictions") = 0 — ANY operator resolution counts as a caveat, including picking a side (`Apply fact-check finding (skip SOLID)` / `Apply SOLID finding (skip fact-check)`), not only `Skip both — manual triage`. A triggered contradiction gate means the reviewers disagreed about an underlying premise and human judgment was required — that is less than maximal confidence regardless of how it was resolved.
+- `KIND` was determined by frontmatter, path, or content shape — NOT by the tie-break AskUserQuestion ("Detect kind" step 4). A tie-broken kind means the artifact's identity was itself ambiguous; do not auto-continue (especially into implementation) off a guess.
+- Both reviewers ran to completion — NOT degraded/single-reviewer mode (the dispatch-failure fallback was not taken)
+
+If the bless is **not** clean (any caveat above is present), do NOT auto-continue. After the normal report, print one line recommending the next step and stop:
+
+```
+🟡 validate: blessed with caveats — recommend running the next stage manually after reviewing the deferred/accepted/skipped items above.
+  Next stage: <superpowers:writing-plans if KIND==spec, else superpowers:subagent-driven-development>
+```
+
+The operator drives the next step by hand. This preserves a human checkpoint whenever confidence is anything less than maximal.
+
+### On a clean bless, announce then proceed
+
+No confirmation prompt — announce, then immediately invoke the next skill.
+
+1. Print the banner (substitute `<next stage>` per `KIND`, using the mapping below):
+
+   ```
+   🟢 validate: clean bless, maximum confidence — auto-continuing to <next stage>.
+   ```
+
+   Where `<next stage>` is `writing-plans` when `KIND == spec`, or `subagent-driven-development` when `KIND == plan`.
+
+2. Immediately invoke the next skill via the Skill tool. For the skill's input, provide the blessed file's **resolved absolute path** — the same absolute path computed for `{spec_path}` during "Dispatch reviewers in parallel" (via `realpath` or `cd $(dirname) && pwd`), NOT the raw `$ARGUMENTS`, which may be relative — together with a one-line instruction telling the downstream skill to operate on that file (skills take free-form input text, not a path argument):
+
+   - `KIND == spec` → invoke `superpowers:writing-plans` with input: the absolute spec path plus "build the implementation plan from this spec." The plan it produces can itself be re-validated by re-running this skill on the plan.
+   - `KIND == plan` → invoke `superpowers:subagent-driven-development` with input: the absolute plan path plus "execute this plan."
+
+   Auto-continue proceeds whether the spec was committed (tracked path) or merely saved to disk (gitignored path) in "Persist the spec file" — in both cases a stable, blessed file is on disk for the downstream skill to read.
+
+### Plan→implementation override
+
+On this clean-bless auto-continue path, validate goes STRAIGHT into `superpowers:subagent-driven-development` for a blessed plan. It does NOT present the usual "Subagent-Driven vs Direct Implementation" choice. This is a deliberate, scoped override of that default workflow ask: a clean bless on a plan is the explicit signal to proceed with subagent-driven execution. The ask still applies anywhere outside this auto-continue path (e.g., a blessed-with-caveats plan, where the operator drives the next step manually).
 
 ### Done
 

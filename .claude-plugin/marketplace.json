@@ -7,7 +7,7 @@
   },
   "metadata": {
     "description": "stavxyz's Claude Code skills: spec/plan validation and PR polishing",
-    "version": "0.1.2"
+    "version": "0.1.3"
   },
   "plugins": [
     {

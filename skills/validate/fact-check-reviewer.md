@@ -60,6 +60,22 @@ After all findings, an optional Suggestions section:
 
 (Optional. Brief notes on design observations you noticed but won't address — leave for the SOLID reviewer.)
 
+## Repeated-pattern sweep — REQUIRED
+
+<!-- Repeated-pattern sweep: the core invariant (don't stop at the first instance; one finding per location, at the same severity; no inflation, no collapsing) is intentionally duplicated in skills/validate/fact-check-reviewer.md, skills/validate/solid-hygiene-reviewer.md, and skills/polish-pr/SKILL.md. The examples and grep target ("the spec/plan {kind}" here vs "the diff" in polish-pr) are deliberately tailored per reviewer; keep the invariant in sync across all three when editing any one. -->
+
+When you identify a finding that names an **anti-pattern** (e.g., "import from wrong helper path," "wrong SQL column name," "uses `body:` instead of `json:`," "wrong workspace mount point," "stale extension suffix," "redeclared regex that already exists upstream"), do NOT stop at the first instance. **Grep the rest of the spec/plan document (`{kind}`) — every section, and for a plan every `### Task N:` block and the code snippets inside them — for the same anti-pattern, and emit one finding per location, at the same severity.** Your grep target is the document at `{spec_path}`, not the codebase.
+
+The reason: operators apply fixes surgically (one `Edit` per finding). If three locations exhibit the same bug and you report only one, the surgical fix covers only the named site and the other two ship broken — a class of recurrence already observed in practice. Each location must be named explicitly so it gets its own Edit.
+
+Examples of repeated patterns to sweep for once you've spotted them (all within the spec/plan):
+- The same wrong claim about existing code asserted in multiple sections or `### Task N:` blocks → one finding per location.
+- A wrong import path or symbol the plan references repeated across several tasks → one finding per task.
+- A wrong API option name (e.g., `body:` instead of `json:`) appearing in the plan's code snippets across M tasks → M findings.
+- A `c.name` vs `c.label` column error quoted in N task queries → N findings.
+
+If the anti-pattern appears once, that's one finding — no inflation. If it appears N times, that's N findings — no collapsing. The calling workflow only dedups true cross-reviewer duplicates (the same location flagged by both reviewers); findings at distinct locations are never collapsed, so enumerate every instance you can see.
+
 ## Begin
 
 Read `{spec_path}`, then verify its claims against the codebase rooted at `{repo_root}` at SHA `{head_sha}`. Output your findings in the format above. If the {kind} has zero verifiable claims about existing code, output a single line: `No claims to verify.`

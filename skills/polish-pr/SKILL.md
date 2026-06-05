@@ -79,7 +79,7 @@ Any GitHub issues closed by this PR should be referred to in the PR description 
 
 ### How to monitor CI checks
 
-Do NOT write an inline `awk` / `grep` watcher over `gh pr checks` — `gh pr checks` is **tab-delimited**, and any check name containing a space ("E2E (Playwright)", "Code Quality - Python", etc.) will be silently mis-parsed by `awk '{print $2}'` (which splits on whitespace, not tab). The mis-parsed status row gets read as "pass" when it's really "pending", and the watcher exits "green" while multi-word checks are still running — leading to a premature browser-open before CI has actually settled. This has bitten polish-pr runs more than once.
+Do NOT write an inline `awk` / `grep` watcher over the default `gh pr checks` output. That output is human-formatted text (not a stable contract), and a naive `awk '{print $2}'` splits any check name containing a space ("E2E (Playwright)", "Code Quality - Python", etc.) on whitespace, reading the status column wrong — a row that's really "pending" gets read as "pass", and the watcher exits "green" while multi-word checks are still running, triggering a premature browser-open before CI has settled. This has bitten polish-pr runs more than once. The bundled script avoids the problem entirely by reading `gh pr checks --json bucket` (a documented, stable enum) instead of parsing columns.
 
 Use the bundled watcher script. From a Bash tool call inside this skill, run:
 
@@ -90,10 +90,10 @@ Use the bundled watcher script. From a Bash tool call inside this skill, run:
 If `$CLAUDE_PLUGIN_ROOT` is unset (some skill installations), resolve the skill's directory by reading the path of this SKILL.md file at invocation time and use the sibling `wait-for-pr-checks.sh`.
 
 The script polls every 20s by default (override with `--interval N`), times out at 1800s (override with `--timeout N`), and exits:
-- `0` — all checks settled, none failed (green)
-- `1` — at least one check reported `fail` or `cancelled`
+- `0` — all checks settled, none failed (green) — **also** the exit when the PR has no checks at all (nothing to wait for, so proceed)
+- `1` — at least one check is in the `fail` or `cancel` bucket
 - `2` — timed out before all checks settled
-- `3` — usage / `gh` invocation error
+- `3` — usage error, `gh` missing, or a real `gh` invocation failure (auth, bad PR)
 
 Run it with `run_in_background: true` so the harness notifies you on completion instead of blocking the conversation. Do not poll, do not chain sleeps — wait for the completion notification, then read the output file. When it exits 0, proceed to the browser-open gate; on non-zero, surface the failed-check list to the user before doing anything else.
 

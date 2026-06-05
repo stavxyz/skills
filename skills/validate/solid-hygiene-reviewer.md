@@ -72,17 +72,19 @@ After all findings, an optional Suggestions section:
 
 ## Repeated-pattern sweep — REQUIRED
 
-When you identify a finding that names a **structural anti-pattern** (e.g., "module boundary leaked into a route handler," "responsibility duplicated across two callers," "shortcut codifies a coupling future work will undo"), do NOT stop at the first instance. **Grep the rest of the `{kind}` for the same anti-pattern and emit one finding per location, at the same severity.**
+<!-- Repeated-pattern sweep: the core invariant (don't stop at the first instance; one finding per location, at the same severity; no inflation, no collapsing) is intentionally duplicated in skills/validate/solid-hygiene-reviewer.md, skills/validate/fact-check-reviewer.md, and skills/polish-pr/SKILL.md. The examples and grep target ("the spec/plan {kind}" here vs "the diff" in polish-pr) are deliberately tailored per reviewer; keep the invariant in sync across all three when editing any one. -->
+
+When you identify a finding that names a **structural anti-pattern** (e.g., "module boundary leaked into a route handler," "responsibility duplicated across two callers," "shortcut codifies a coupling future work will undo"), do NOT stop at the first instance. **Grep the rest of the spec/plan document (`{kind}`) — every section, and for a plan every `### Task N:` block — for the same anti-pattern, and emit one finding per location, at the same severity.** Your grep target is the document at `{spec_path}`, not the codebase.
 
 The reason: operators apply fixes surgically (one `Edit` per finding). If three locations exhibit the same design defect and you report only one, the surgical fix covers only the named site and the other two ship with the same defect — a class of recurrence already observed in practice. Each location must be named explicitly so it gets its own Edit.
 
-Examples of structural patterns to sweep for once you've spotted them:
-- A shared primitive being re-implemented inline at multiple call sites → one finding per call site.
-- A wrong worker-mount target used across multiple new routes → one finding per route.
-- A new component built bespoke when an existing primitive exists → one finding per component.
-- An invariant owned in two places instead of one → one finding per owner.
+Examples of structural patterns to sweep for once you've spotted them (all within the spec/plan):
+- A shared primitive the design re-implements inline across multiple `### Task N:` blocks → one finding per block.
+- A wrong worker-mount or coupling target specified for multiple new routes in the plan → one finding per route.
+- A new component specced bespoke when an existing primitive exists, repeated across tasks → one finding per component.
+- An invariant the design places in two owners instead of one → one finding per owner.
 
-If the anti-pattern appears once, that's one finding — no inflation. If it appears N times, that's N findings — no collapsing. The dedup logic in the calling workflow will catch true duplicates from cross-reviewer overlap; your job is to enumerate every instance you can see.
+If the anti-pattern appears once, that's one finding — no inflation. If it appears N times, that's N findings — no collapsing. The calling workflow only dedups true cross-reviewer duplicates (the same location flagged by both reviewers); findings at distinct locations are never collapsed, so enumerate every instance you can see.
 
 ## Begin
 

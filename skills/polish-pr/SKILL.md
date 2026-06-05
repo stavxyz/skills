@@ -42,13 +42,15 @@ The two reviews must be dispatched **in parallel** (single message, multiple Tas
 
 ### Append the repeated-pattern sweep instruction to every reviewer dispatch
 
-Polish-pr's controller does NOT own the reviewer prompt templates (they live inside `pr-review-toolkit` and `superpowers:requesting-code-review`). It DOES own the prompt envelope it sends to each reviewer. When dispatching either reviewer, append the verbatim block below to the prompt envelope:
+Polish-pr's controller does NOT own the reviewer prompt templates (they live inside `pr-review-toolkit` and `superpowers:requesting-code-review`). It DOES own the prompt envelope it sends to each reviewer. When dispatching either reviewer, append the block below (copy it exactly as written) to the prompt envelope:
+
+<!-- Repeated-pattern sweep: the core invariant (don't stop at the first instance; one finding per location, at the same severity; no inflation, no collapsing) is intentionally duplicated in skills/polish-pr/SKILL.md, skills/validate/fact-check-reviewer.md, and skills/validate/solid-hygiene-reviewer.md. The examples and grep target ("the diff" here vs "the spec/plan {kind}" in validate) are deliberately tailored per reviewer; keep the invariant in sync across all three when editing any one. -->
 
 > **Repeated-pattern sweep — REQUIRED.** When you identify a finding that names an anti-pattern (e.g., "imports from wrong path," "uses wrong API option," "mounts on root app instead of sub-router," "redeclared regex that already exists upstream"), do NOT stop at the first instance. **Grep the rest of the diff for the same anti-pattern and emit one finding per location, at the same severity.** Operators apply fixes surgically (one Edit per finding); if N locations exhibit the same bug and you report only one, the surgical fix covers only the named site and the other N-1 ship broken. Each location must be named explicitly so it gets its own Edit. If the anti-pattern appears once, that's one finding — no inflation. If it appears N times, that's N findings — no collapsing.
 
 Why this exists: polish-pr v2 on PR stavxyz/already.events#264 caught a mount-point anti-pattern at one task site but missed three other sites in the same diff with the identical bug. The surgical fix shipped, the siblings did not, and a follow-up validate caught the rest. The sweep instruction makes the reviewer responsible for enumerating every instance up front so the operator's first round of edits covers all of them.
 
-Apply this to both Reviewer A and Reviewer B dispatches. It composes with whatever finding format their internal templates already prescribe — it asks the reviewer to multiply findings, not to change the format.
+Apply this to both Reviewer A and Reviewer B, in whatever form each is dispatched — the `pr-review-toolkit:code-reviewer` Task prompt, the `general-purpose` subagent prompt you assemble from `superpowers:requesting-code-review`'s template, or (deprecated path) the `superpowers:code-reviewer` Task prompt. It composes with whatever finding format their internal templates already prescribe — it asks the reviewer to multiply findings, not to change the format.
 
 ## Default disposition: address every finding in this PR
 

@@ -18,6 +18,8 @@ Adjust these after inaugural runs reveal real-world thresholds:
 - `OVERLOAD_TOTAL = 100` — same abort condition, total finding count.
 - `DEDUPE_SIMILARITY = 0.8` — Levenshtein-style similarity threshold for treating two findings at the same location as duplicates. Above threshold = duplicate (keep more specific); below = independent.
 
+Note: the reviewer templates' **repeated-pattern sweep** (see `fact-check-reviewer.md` / `solid-hygiene-reviewer.md`) deliberately emits one finding per location for a recurring anti-pattern, so a single systemic root cause can legitimately raise the counts above. Tripping the overload abort on such a pattern is defensible (a pattern at many sites *is* significant drift), but re-tune both `OVERLOAD_*` constants once real runs show how often the sweep pushes one genuine root cause past the threshold.
+
 ## Preconditions
 
 Verify in order, exiting on the first failure:

@@ -60,6 +60,20 @@ After all findings, an optional Suggestions section:
 
 (Optional. Brief notes on design observations you noticed but won't address — leave for the SOLID reviewer.)
 
+## Repeated-pattern sweep — REQUIRED
+
+When you identify a finding that names an **anti-pattern** (e.g., "import from wrong helper path," "wrong SQL column name," "uses `body:` instead of `json:`," "wrong workspace mount point," "stale extension suffix," "redeclared regex that already exists upstream"), do NOT stop at the first instance. **Grep the rest of the `{kind}` for the same anti-pattern and emit one finding per location, at the same severity.**
+
+The reason: operators apply fixes surgically (one `Edit` per finding). If three locations exhibit the same bug and you report only one, the surgical fix covers only the named site and the other two ship broken — a class of recurrence already observed in practice. Each location must be named explicitly so it gets its own Edit.
+
+Examples of repeated patterns to sweep for once you've spotted them:
+- A wrong import path used in multiple files → one finding per file.
+- A `c.name` vs `c.label` column error in N SQL queries → N findings.
+- A wrong API option name (e.g., `body:` instead of `json:`) used in M call sites → M findings.
+- An anti-pattern coupling (e.g., new routes mounted on root `app` instead of a sub-router) that recurs in K tasks → K findings.
+
+If the anti-pattern appears once, that's one finding — no inflation. If it appears N times, that's N findings — no collapsing. The dedup logic in the calling workflow will catch true duplicates from cross-reviewer overlap; your job is to enumerate every instance you can see.
+
 ## Begin
 
 Read `{spec_path}`, then verify its claims against the codebase rooted at `{repo_root}` at SHA `{head_sha}`. Output your findings in the format above. If the {kind} has zero verifiable claims about existing code, output a single line: `No claims to verify.`

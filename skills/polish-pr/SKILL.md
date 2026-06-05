@@ -77,6 +77,26 @@ Use atomic commits and push to the PR when finished.
 
 Any GitHub issues closed by this PR should be referred to in the PR description so that they automatically close when the PR gets merged. Once the PR is created/updated, monitor CI checks in the background to ensure they pass.
 
+### How to monitor CI checks
+
+Do NOT write an inline `awk` / `grep` watcher over `gh pr checks` — `gh pr checks` is **tab-delimited**, and any check name containing a space ("E2E (Playwright)", "Code Quality - Python", etc.) will be silently mis-parsed by `awk '{print $2}'` (which splits on whitespace, not tab). The mis-parsed status row gets read as "pass" when it's really "pending", and the watcher exits "green" while multi-word checks are still running — leading to a premature browser-open before CI has actually settled. This has bitten polish-pr runs more than once.
+
+Use the bundled watcher script. From a Bash tool call inside this skill, run:
+
+```bash
+"$CLAUDE_PLUGIN_ROOT/skills/polish-pr/wait-for-pr-checks.sh" <PR_NUMBER>
+```
+
+If `$CLAUDE_PLUGIN_ROOT` is unset (some skill installations), resolve the skill's directory by reading the path of this SKILL.md file at invocation time and use the sibling `wait-for-pr-checks.sh`.
+
+The script polls every 20s by default (override with `--interval N`), times out at 1800s (override with `--timeout N`), and exits:
+- `0` — all checks settled, none failed (green)
+- `1` — at least one check reported `fail` or `cancelled`
+- `2` — timed out before all checks settled
+- `3` — usage / `gh` invocation error
+
+Run it with `run_in_background: true` so the harness notifies you on completion instead of blocking the conversation. Do not poll, do not chain sleeps — wait for the completion notification, then read the output file. When it exits 0, proceed to the browser-open gate; on non-zero, surface the failed-check list to the user before doing anything else.
+
 ## Mandatory attribution sweep — DO THIS, do not skip
 
 The user's standing rule is **zero Claude attribution on any commit, ever.** No `Co-Authored-By: Claude` lines. No `🤖 Generated with Claude Code` footers. This applies to the polish-pr round's own commits AND every commit already on the branch (from earlier subagents, prior development, anything).

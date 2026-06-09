@@ -1,0 +1,5 @@
+# Local reference docs dropped at the repo root (guides, etc.) — not plugin content.
+/*.pdf
+
+# macOS
+.DS_Store

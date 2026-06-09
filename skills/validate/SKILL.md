@@ -1,6 +1,16 @@
 ---
 name: validate
-description: Validate a spec or plan against the codebase via parallel multi-reviewer pass — fact-check claims, audit SOLID/hygiene direction, address findings in-spec. On a clean, caveat-free bless, auto-continues a spec to writing-plans and a plan to subagent-driven-development.
+description: Validate a spec or plan (a markdown design or implementation-plan
+  doc) against the current codebase before building. Runs two reviewers in
+  parallel — a fact-check pass (are the doc's claims about existing code true?)
+  and a SOLID/hygiene pass (is the design direction sound?) — addresses the
+  findings in-place, and on a clean, caveat-free bless auto-continues a spec to
+  writing-plans and a plan to subagent-driven-development. Use when the user has
+  a spec or plan and says things like "validate this spec," "check my plan
+  against the codebase," "fact-check this design doc," or "review my plan before
+  I build." Operates on .md spec/plan files (e.g. under docs/superpowers/specs/
+  or docs/superpowers/plans/). Not for validating data, forms, schemas, or code
+  output — only design specs and implementation plans.
 disable-model-invocation: false
 ---
 

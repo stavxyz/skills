@@ -91,6 +91,8 @@ ln -s "$PWD/skills/skills/polish-pr" ~/.claude/skills/polish-pr
 
 Installed this way they are **user skills**, which are not namespaced — so you invoke them by bare name (`/validate`, `/polish-pr`) rather than the `/stavxyz:` prefix used for the plugin install. `validate` resolves its reviewer templates relative to the installed skill directory, so it works under either install method.
 
+> **Recommended for development.** The symlinks point at your live working tree, so editing a skill and running `/reload-plugins` (or starting a new session) picks the change up instantly — no version bump, no `/plugin marketplace update`. Reserve the versioned plugin/marketplace flow (see [RELEASING.md](RELEASING.md)) for distributing to others.
+
 ## Repository layout
 
 ```text

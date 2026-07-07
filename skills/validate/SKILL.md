@@ -399,13 +399,15 @@ No confirmation prompt — announce, then immediately invoke the next skill. But
 4. **Invoke the next skill via the Skill tool.** For the skill's input, provide the blessed file's **resolved absolute path** — the same absolute path computed for `{spec_path}` during "Dispatch reviewers in parallel" (via `realpath` or `cd $(dirname) && pwd`), NOT the raw `$ARGUMENTS`, which may be relative — together with a one-line instruction telling the downstream skill to operate on that file (skills take free-form input text, not a path argument):
 
    - `KIND == spec` → invoke `superpowers:writing-plans` with input: the absolute spec path plus "build the implementation plan from this spec." The plan it produces can itself be re-validated by re-running this skill on the plan.
-   - `KIND == plan` → invoke `superpowers:subagent-driven-development` with input: the absolute plan path plus "execute this plan."
+   - `KIND == plan` → invoke `superpowers:subagent-driven-development` with input: the absolute plan path plus "execute this plan, and when implementation is complete and green, ALWAYS finish by pushing the branch and opening a pull request — never merge, and never leave the work only on a local branch. Opening a PR is a hard requirement for any validate-driven auto-execution."
 
    Auto-continue proceeds whether the spec was committed (tracked path) or merely saved to disk (gitignored path) in "Persist the spec file" — in both cases a stable, blessed file is on disk for the downstream skill to read. If the invocation fails **after** the banner — the Skill call errors, the target isn't found, or it returns without acting on the input — take the **manual-fallback** path from step 2 with `<reason>` = `the handoff failed after it was announced`, so the run doesn't end in an ambiguous state.
 
 ### Plan→implementation override
 
 On this clean-bless auto-continue path, validate goes STRAIGHT into `superpowers:subagent-driven-development` for a blessed plan. It does NOT present the usual "Subagent-Driven vs Direct Implementation" choice. This is a deliberate, scoped override of that default workflow ask: a clean bless on a plan is the explicit signal to proceed with subagent-driven execution. The ask still applies anywhere outside this auto-continue path (e.g., a blessed-with-caveats plan, where the operator drives the next step manually).
+
+**Always finish with a PR.** Because this path runs autonomously end-to-end with no operator checkpoint before integration, the subagent-driven execution MUST conclude by pushing the branch and opening a pull request (via `superpowers:finishing-a-development-branch` / `gh pr create`). It must NEVER merge to the default branch and NEVER stop with the work only on a local branch. The operator reviews and merges the PR; auto-execution never merges. This holds even if the implementation, reviews, and tests are all green — green means "ready for a PR," not "ready to merge."
 
 ### Done
 

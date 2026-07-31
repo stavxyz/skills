@@ -1,3 +1,18 @@
+---
+type: plan
+validated:
+  sha: ae741bbf03671eadb6e5318199f119b534aba33c
+  date: 2026-07-31T05:38:39Z
+  reviewers: [fact-check, solid-hygiene]
+  findings:
+    critical: 2
+    important: 1
+    medium: 5
+    low: 5
+    nitpick: 1
+  net_negative_remaining: 0
+---
+
 # /reboot-ready Skill Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
@@ -28,7 +43,8 @@
 - `skills/reboot-ready/SKILL.md` — model instructions: run the script, summarize sessions from transcripts, write manifests, print go/no-go.
 - `tests/reboot-ready/test-census.sh` — automated bash test (sandboxed under `mktemp -d`; not distributed with the plugin, same as `tests/validate-fixtures/`).
 - `tests/reboot-ready/README.md` — how to run the test.
-- `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` — description strings enumerate skills; add reboot-ready.
+- `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` — description strings enumerate skills (add reboot-ready to both), and versions must bump `0.1.6` → `0.1.7` per RELEASING.md (any `skills/` content change requires a patch bump; installed users never receive the new skill otherwise).
+- `README.md` — skill count, table, invocation examples, and layout tree enumerate the skills; add reboot-ready.
 
 ---
 
@@ -75,7 +91,7 @@ py_assert() {
 test_sessions_and_probes() {
   local cdir="$TMP/claude" root="$TMP/empty-root" out
   mkdir -p "$cdir/jobs/job1" "$root"
-  printf '{"sessionId":"sess-abc","cwd":"/Users/nobody/proj"}' > "$cdir/jobs/job1/state.json"
+  printf '{"sessionId":"sess-abc","cwd":"/Users/nobody/.claude/worktrees/proj"}' > "$cdir/jobs/job1/state.json"
 
   out=$(CLAUDE_DIR="$cdir" bash "$CENSUS" "$root") || fail "census exited non-zero"
   py_assert "$out" 'd["probes"]["jobs_scan"] == "ran"'
@@ -85,7 +101,7 @@ test_sessions_and_probes() {
   py_assert "$out" 'd["checkouts"] == [] and d["not_parked"] == []'
   py_assert "$out" 'd["sessions"]["jobs"][0]["id"] == "job1"'
   py_assert "$out" 'd["sessions"]["jobs"][0]["session_id"] == "sess-abc"'
-  py_assert "$out" 'd["sessions"]["jobs"][0]["transcript"].endswith("projects/-Users-nobody-proj/sess-abc.jsonl")'
+  py_assert "$out" 'd["sessions"]["jobs"][0]["transcript"].endswith("projects/-Users-nobody--claude-worktrees-proj/sess-abc.jsonl")'
   py_assert "$out" 'isinstance(d["sessions"]["jobs"][0]["mtime"], int)'
   py_assert "$out" 'isinstance(d["sessions"]["processes"], list)'
 
@@ -140,8 +156,14 @@ set -uo pipefail
 
 usage() { echo "usage: census.sh [--park] [ROOT ...]" >&2; exit 2; }
 
+# json_escape — the SINGLE encoder for all string fields in this script;
+# every value that reaches the JSON output must pass through here. Control
+# characters with no short JSON escape are deleted (paths and branch names
+# should never contain them; deletion keeps the document parseable even if
+# one sneaks in).
 json_escape() {
   local s=${1-}
+  s=$(printf '%s' "$s" | tr -d '\000-\010\013\014\016-\037')
   s=${s//\\/\\\\}
   s=${s//\"/\\\"}
   s=${s//$'\n'/\\n}
@@ -185,15 +207,18 @@ if [[ -d "$CLAUDE_DIR/jobs" ]]; then
     session_id=""
     job_cwd=""
     if [[ -f "$d/state.json" ]]; then
-      session_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("sessionId",""))' "$d/state.json" 2>/dev/null) || { session_id=""; jobs_status="errored"; }
-      job_cwd=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("cwd",""))' "$d/state.json" 2>/dev/null) || { job_cwd=""; jobs_status="errored"; }
+      # one parse for both fields: line 1 = sessionId, line 2 = cwd
+      state_fields=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("sessionId","")); print(d.get("cwd",""))' "$d/state.json" 2>/dev/null) || { state_fields=""; jobs_status="errored"; }
+      { IFS= read -r session_id; IFS= read -r job_cwd; } <<<"$state_fields"
     fi
     # Transcript path is DERIVED (verified 2026-07-31): job dirs hold
     # state.json, not a transcript; the transcript lives under
-    # ~/.claude/projects/<cwd-with-slashes-as-dashes>/<sessionId>.jsonl
+    # ~/.claude/projects/<slug>/<sessionId>.jsonl where <slug> is the cwd
+    # with EVERY non-alphanumeric character replaced by '-' (dots and
+    # slashes both become dashes; consecutive dashes are preserved).
     transcript=""
     if [[ -n "$session_id" && -n "$job_cwd" ]]; then
-      slug=${job_cwd//\//-}
+      slug=$(printf '%s' "$job_cwd" | tr -c 'A-Za-z0-9' '-')
       transcript="$CLAUDE_DIR/projects/$slug/$session_id.jsonl"
     fi
     jobs_entries+=("{\"id\":\"$(json_escape "$id")\",\"mtime\":$mtime,\"session_id\":\"$(json_escape "$session_id")\",\"cwd\":\"$(json_escape "$job_cwd")\",\"transcript\":\"$(json_escape "$transcript")\"}")
@@ -207,12 +232,15 @@ procs_status="ran"
 proc_entries=()
 proc_cwds=()
 if command -v lsof >/dev/null 2>&1; then
-  # -F pn emits "p<pid>" then "n<cwd>" line pairs. lsof exits 1 when nothing
-  # matches — that is a legitimate "no sessions running"; only exit > 1 (or
-  # a usage failure) is an error.
-  lsof_out=$(lsof -a -d cwd -c claude -F pn 2>/dev/null)
+  # -F pn emits "p<pid>", "fcwd", "n<cwd>" line groups per process; we key on
+  # the p and n lines and ignore the f field line. macOS lsof exits 1 for
+  # BOTH "no matches" and real errors, so the exit code alone distinguishes
+  # nothing: capture stderr separately — silence there means a legitimately
+  # empty result; output there means the probe itself failed.
+  lsof_err=$(mktemp)
+  lsof_out=$(lsof -a -d cwd -c claude -F pn 2>"$lsof_err")
   rc=$?
-  if [[ $rc -gt 1 ]]; then
+  if [[ $rc -ne 0 && -s "$lsof_err" ]]; then
     procs_status="errored"
   else
     pid=""
@@ -227,6 +255,7 @@ if command -v lsof >/dev/null 2>&1; then
       esac
     done <<<"$lsof_out"
   fi
+  rm -f "$lsof_err"
 else
   procs_status="unavailable"
 fi
@@ -271,6 +300,8 @@ Expected: `ALL PASS`, exit 0. (The `lsof` probe assertion accepts any enum value
 git add skills/reboot-ready/census.sh tests/reboot-ready/test-census.sh
 git commit -m "feat(reboot-ready): sessions census with probe statuses and JSON output"
 ```
+
+> **Design note (2026-07-31):** JSON serialization stays in bash rather than adding a second python3 emit stage: python3 remains parse-only, and `json_escape` is the one trusted encoder every string field must pass through (now also stripping non-escapable control characters). One language owns the output pipeline; escaping correctness is concentrated at a single choke point.
 
 ---
 
@@ -441,6 +472,8 @@ git add skills/reboot-ready/census.sh tests/reboot-ready/test-census.sh
 git commit -m "feat(reboot-ready): checkout census — worktrees, dirty state, live labels, unpushed branches"
 ```
 
+> **Design note (2026-07-31):** The 11-field checkout entry is assembled inline at the one site where all per-checkout data is in scope; every string field passes through `json_escape` (single-encoder rule, see the Task 1 design note). The bare-interpolated fields (`$is_worktree`, `$ahead`, `$behind`, `$live`, `${dirty:-0}`) are shell-computed booleans/numbers never sourced from repo content, so they cannot need escaping by construction.
+
 ---
 
 ### Task 3: census.sh — opt-in parking via temporary-index rescue refs
@@ -450,8 +483,8 @@ git commit -m "feat(reboot-ready): checkout census — worktrees, dirty state, l
 - Test: `tests/reboot-ready/test-census.sh` (add `test_park`)
 
 **Interfaces:**
-- Consumes: the per-checkout loop from Task 2 (`p`, `dirty`, `rescue_ref`, `park_error`, `not_parked_entries`), `PARK`, `TS`, `json_escape`.
-- Produces: rescue refs named `refs/rescue/pre-reboot/<sanitized-basename>-<TS>`; `not_parked` JSON entries `{path, error}`. SKILL.md (Task 4) relies on `rescue_ref` being non-empty exactly when parking succeeded.
+- Consumes: the per-checkout loop from Task 2 (`p`, `dirty`, `not_parked_entries`), `PARK`, `TS`, `json_escape`.
+- Produces: `park_checkout <path>` — the single mutating entry point, reporting via globals `PARK_REF` (ref name on success, else empty) and `PARK_ERROR` (failure reason, else empty). Rescue refs are named `refs/rescue/pre-reboot/<sanitized-basename>-<TS>`; `not_parked` JSON entries are `{path, error}`. SKILL.md (Task 4) relies on `rescue_ref` being non-empty exactly when parking succeeded.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -504,6 +537,7 @@ test_park() {
   # dirty LINKED WORKTREE parks too (spec's canonical test case): the temp
   # index must work when -C points at a worktree, not just a primary
   git -C "$repo" worktree add -q "$repo/.claude/worktrees/wtpark" -b wtpark
+  echo wt-tracked-edit > "$repo/.claude/worktrees/wtpark/tracked.txt"
   echo wt-untracked > "$repo/.claude/worktrees/wtpark/wtfile.txt"
   before=$(git -C "$repo/.claude/worktrees/wtpark" status --porcelain)
   out=$(CLAUDE_DIR="$TMP/does-not-exist" bash "$CENSUS" --park "$root") || fail "census exited non-zero (worktree park)"
@@ -515,6 +549,11 @@ test_park() {
     pass "worktree rescue ref captured untracked file"
   else
     fail "untracked file missing from worktree rescue ref"
+  fi
+  if [[ "$(git -C "$repo" show "$ref:tracked.txt" 2>/dev/null)" == "wt-tracked-edit" ]]; then
+    pass "worktree rescue ref captured tracked edit"
+  else
+    fail "tracked edit missing from worktree rescue ref"
   fi
 
   # unborn HEAD (repo with no commits) degrades into not_parked
@@ -541,7 +580,46 @@ Expected: FAIL on "no rescue ref after --park" and the rescue-ref content assert
 
 - [ ] **Step 3: Write the implementation**
 
-In `skills/reboot-ready/census.sh`, inside the checkout loop, replace:
+In `skills/reboot-ready/census.sh`, first insert this function immediately after the `add_checkout` function definition (before the `for root in` discovery loop) — parking gets a named boundary so the checkout loop stays pure reporting:
+
+```bash
+# park_checkout <path> — the ONLY mutating code in this script (--park only).
+# Builds a rescue commit via a TEMPORARY index: the real index, working
+# tree, branches, and `git status` output are byte-for-byte unchanged, so
+# this is safe even on a checkout a live agent is editing. Never pushes;
+# writes refs only, under refs/rescue/pre-reboot/.
+# Results via globals: PARK_REF (ref name on success, else "") and
+# PARK_ERROR (failure reason, else "").
+park_checkout() {
+  local p=$1 name ref tmpidx commit
+  PARK_REF=""
+  PARK_ERROR=""
+  name=$(printf '%s' "$(basename "$p")" | tr -cs 'A-Za-z0-9._-' '-')
+  ref="refs/rescue/pre-reboot/$name-$TS"
+  if ! git -C "$p" rev-parse --verify -q HEAD >/dev/null 2>&1; then
+    PARK_ERROR="no commits yet (unborn HEAD)"
+    return 0
+  fi
+  tmpidx=$(mktemp)
+  # the subshell scopes GIT_INDEX_FILE so it cannot leak into later git
+  # calls — do not "simplify" the export out of the subshell
+  commit=$(
+    export GIT_INDEX_FILE="$tmpidx"
+    git -C "$p" read-tree HEAD 2>/dev/null &&
+    git -C "$p" add -A 2>/dev/null &&
+    tree=$(git -C "$p" write-tree 2>/dev/null) &&
+    git -C "$p" commit-tree "$tree" -p HEAD -m "rescue: pre-reboot park $TS" 2>/dev/null
+  )
+  rm -f "$tmpidx"
+  if [[ -n "$commit" ]] && git -C "$p" update-ref "$ref" "$commit" 2>/dev/null; then
+    PARK_REF="$ref"
+  else
+    PARK_ERROR="rescue commit failed"
+  fi
+}
+```
+
+Then, inside the checkout loop, replace:
 
 ```bash
   rescue_ref=""
@@ -551,33 +629,12 @@ In `skills/reboot-ready/census.sh`, inside the checkout loop, replace:
 with:
 
 ```bash
-  # --- parking (the ONLY mutating code in this script; --park opt-in) -------
-  # Builds a rescue commit via a TEMPORARY index: the real index, working
-  # tree, branches, and `git status` output are byte-for-byte unchanged, so
-  # this is safe even on a checkout a live agent is editing.
   rescue_ref=""
   park_error=""
   if [[ $PARK -eq 1 && ${dirty:-0} -gt 0 ]]; then
-    name=$(printf '%s' "$(basename "$p")" | tr -cs 'A-Za-z0-9._-' '-')
-    ref="refs/rescue/pre-reboot/$name-$TS"
-    if git -C "$p" rev-parse --verify -q HEAD >/dev/null 2>&1; then
-      tmpidx=$(mktemp)
-      commit=$(
-        export GIT_INDEX_FILE="$tmpidx"
-        git -C "$p" read-tree HEAD 2>/dev/null &&
-        git -C "$p" add -A 2>/dev/null &&
-        tree=$(git -C "$p" write-tree 2>/dev/null) &&
-        git -C "$p" commit-tree "$tree" -p HEAD -m "rescue: pre-reboot park $TS" 2>/dev/null
-      )
-      if [[ -n "$commit" ]] && git -C "$p" update-ref "$ref" "$commit" 2>/dev/null; then
-        rescue_ref="$ref"
-      else
-        park_error="rescue commit failed"
-      fi
-      rm -f "$tmpidx"
-    else
-      park_error="no commits yet (unborn HEAD)"
-    fi
+    park_checkout "$p"
+    rescue_ref=$PARK_REF
+    park_error=$PARK_ERROR
     if [[ -n "$park_error" ]]; then
       echo "census: NOT parked: $p — $park_error" >&2
       not_parked_entries+=("{\"path\":\"$(json_escape "$p")\",\"error\":\"$(json_escape "$park_error")\"}")
@@ -601,6 +658,10 @@ Expected: valid JSON; your real repos under `~/src` appear in `checkouts`; both 
 git add skills/reboot-ready/census.sh tests/reboot-ready/test-census.sh
 git commit -m "feat(reboot-ready): opt-in --park rescue refs via temporary index"
 ```
+
+> **Design note (2026-07-31):** Parking lives behind the named `park_checkout` function instead of a block spliced into the reporting loop: the mutating code has one entry point, the loop reads as pure reporting, and the Task 2→Task 3 seam is a function signature rather than a shared-variable convention.
+
+> **Design note (2026-07-31):** `not_parked` entries follow the single-encoder rule — both fields pass through `json_escape` — and are appended at the reporting site so `park_checkout` stays free of serialization concerns.
 
 ---
 
@@ -740,15 +801,16 @@ git commit -m "feat(reboot-ready): SKILL.md judgment layer — manifests and go/
 ### Task 5: Plugin metadata + test docs
 
 **Files:**
-- Modify: `.claude-plugin/plugin.json` (description string)
-- Modify: `.claude-plugin/marketplace.json` (plugin description string)
+- Modify: `.claude-plugin/plugin.json` (description string, version bump)
+- Modify: `.claude-plugin/marketplace.json` (both description strings, version bump)
+- Modify: `README.md` (skill count, table, invocation examples, layout tree)
 - Create: `tests/reboot-ready/README.md`
 
 **Interfaces:**
 - Consumes: skill name `reboot-ready` from Task 4; test entry point `tests/reboot-ready/test-census.sh` from Tasks 1–3.
 - Produces: accurate plugin metadata; developer docs.
 
-- [ ] **Step 1: Update plugin.json description**
+- [ ] **Step 1: Update plugin.json description and bump the version**
 
 In `.claude-plugin/plugin.json`, replace:
 
@@ -762,7 +824,19 @@ with:
   "description": "Multi-reviewer and ops skills: /stavxyz:validate (fact-check + SOLID review of specs and plans), /stavxyz:polish-pr (parallel review + fix sweep on a pull request), and /stavxyz:reboot-ready (pre-reboot session census, rescue-ref parking, resume manifest)",
 ```
 
-- [ ] **Step 2: Update marketplace.json description**
+Then, per RELEASING.md (any change to `skills/` content requires a patch version bump — Claude Code caches installed plugins under a version-stamped path, so without a bump installed users never receive the new skill), replace:
+
+```json
+  "version": "0.1.6",
+```
+
+with:
+
+```json
+  "version": "0.1.7",
+```
+
+- [ ] **Step 2: Update marketplace.json descriptions and bump the version**
 
 In `.claude-plugin/marketplace.json`, replace:
 
@@ -774,6 +848,24 @@ with:
 
 ```json
       "description": "Multi-reviewer and ops skills: /stavxyz:validate (fact-check + SOLID review of specs and plans), /stavxyz:polish-pr (parallel review + fix sweep on a pull request), and /stavxyz:reboot-ready (pre-reboot session census, rescue-ref parking, resume manifest)"
+```
+
+Also update the marketplace's own metadata block (its `description` enumerates the skills too, and its `version` must match the plugin bump). Replace:
+
+```json
+  "metadata": {
+    "description": "stavxyz's Claude Code skills: spec/plan validation and PR polishing",
+    "version": "0.1.6"
+  },
+```
+
+with:
+
+```json
+  "metadata": {
+    "description": "stavxyz's Claude Code skills: spec/plan validation, PR polishing, and pre-reboot sweeps",
+    "version": "0.1.7"
+  },
 ```
 
 - [ ] **Step 3: Write tests/reboot-ready/README.md**
@@ -803,19 +895,92 @@ These files live outside `skills/` so they are not distributed with the
 installed plugin (same convention as `tests/validate-fixtures/`).
 ```
 
-- [ ] **Step 4: Verify JSON validity of both metadata files**
+- [ ] **Step 4: Update the repo README.md**
+
+`README.md` enumerates the plugin's skills in four places; update each with a surgical replacement.
+
+Replace:
+
+```markdown
+A small [Claude Code](https://claude.com/claude-code) plugin marketplace with two multi-reviewer skills:
+```
+
+with:
+
+```markdown
+A small [Claude Code](https://claude.com/claude-code) plugin marketplace with three skills:
+```
+
+Replace the polish-pr table row:
+
+```markdown
+| **polish-pr** | `/stavxyz:polish-pr <PR#>` | Rebases a PR, runs two independent code reviews in parallel, addresses **every** finding at every severity in-PR, updates docs, runs a test plan, and pushes. |
+```
+
+with the same row plus a new one:
+
+```markdown
+| **polish-pr** | `/stavxyz:polish-pr <PR#>` | Rebases a PR, runs two independent code reviews in parallel, addresses **every** finding at every severity in-PR, updates docs, runs a test plan, and pushes. |
+| **reboot-ready** | `/stavxyz:reboot-ready` | Pre-reboot sweep: censuses running Claude Code sessions, dirty worktrees, and unpushed branches, parks dirty checkouts as zero-touch rescue refs, and writes a resume manifest to `~/.claude/reboot-manifest.md` + `.json`. |
+```
+
+Replace:
+
+```markdown
+they're invoked as `/stavxyz:validate` and `/stavxyz:polish-pr`.
+```
+
+with:
+
+```markdown
+they're invoked as `/stavxyz:validate`, `/stavxyz:polish-pr`, and `/stavxyz:reboot-ready`.
+```
+
+In the "Repository layout" tree, replace:
+
+```text
+│   └── polish-pr/
+│       └── SKILL.md
+```
+
+with:
+
+```text
+│   ├── polish-pr/
+│   │   └── SKILL.md
+│   └── reboot-ready/
+│       ├── SKILL.md
+│       └── census.sh
+```
+
+and replace:
+
+```text
+    └── validate-fixtures/ # sample specs for exercising validate by hand
+```
+
+with:
+
+```text
+    ├── validate-fixtures/ # sample specs for exercising validate by hand
+    └── reboot-ready/      # automated tests for census.sh
+```
+
+- [ ] **Step 5: Verify JSON validity of both metadata files**
 
 Run: `python3 -m json.tool .claude-plugin/plugin.json >/dev/null && python3 -m json.tool .claude-plugin/marketplace.json >/dev/null && echo OK`
 Expected: `OK`
 
-- [ ] **Step 5: Run the full test suite one final time**
+- [ ] **Step 6: Run the full test suite one final time**
 
 Run: `bash tests/reboot-ready/test-census.sh`
 Expected: `ALL PASS`, exit 0.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add .claude-plugin/plugin.json .claude-plugin/marketplace.json tests/reboot-ready/README.md
-git commit -m "chore(reboot-ready): plugin metadata and test docs"
+git add .claude-plugin/plugin.json .claude-plugin/marketplace.json README.md tests/reboot-ready/README.md
+git commit -m "chore(reboot-ready): version bump, plugin metadata, README, and test docs"
 ```
+
+> **Design note (2026-07-31):** `plugin.json` and `marketplace.json` carry hand-synced description/version pairs; this plan follows the existing convention rather than fixing it here. Future chore candidate: a check asserting the paired strings stay in sync, so a fourth skill can't silently drift them.

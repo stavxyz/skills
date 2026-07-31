@@ -11,6 +11,15 @@ FAILS=0
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
+# park_checkout's commit-tree call has no -c user.name/user.email of its own
+# (it shells out to plain `git commit-tree`), so it falls back to git's
+# configured identity. Export it here rather than relying on the machine
+# having one set — a fresh/CI machine with no global git identity would
+# otherwise fail every parking assertion in this file for a reason that has
+# nothing to do with census.sh's correctness.
+export GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@test
+export GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=test@test
+
 fail() { echo "FAIL: $*" >&2; FAILS=$((FAILS + 1)); }
 pass() { echo "ok: $*"; }
 
@@ -223,6 +232,9 @@ test_park_ref_collision() {
 # `git status` failure (unreadable index) must degrade — never read as clean.
 test_git_status_failure() {
   local root="$TMP/root6" repo out errfile err
+  # root reads through chmod 000 (CAP_DAC_OVERRIDE / superuser), so this
+  # assertion's premise ("unreadable index") doesn't hold when run as root.
+  [[ $EUID -eq 0 ]] && { echo "skip: running as root, chmod 000 is not enforced"; return; }
   mkdir -p "$root"
   repo="$root/broken"
   make_repo "$repo"
@@ -242,12 +254,77 @@ test_git_status_failure() {
   chmod 644 "$repo/.git/index"
 }
 
+# ahead/behind orientation: a checkout with LOCAL commits not yet pushed
+# (ahead) and a REMOTE commit fetched-but-not-merged (behind) must report
+# each count on its own side — a swapped left/right in the rev-list format
+# string would silently transpose these and no other assertion catches it.
+test_ahead_behind() {
+  local root="$TMP/root7" bare work other out
+  mkdir -p "$root"
+  bare="$root/origin.git"
+  git init -q --bare "$bare"
+  work="$root/work"
+  git clone -q "$bare" "$work"
+  git -C "$work" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+  git -C "$work" push -q -u origin HEAD
+
+  # a second clone simulates another contributor pushing a commit to origin
+  # that "work" has not seen yet
+  other="$TMP/ahead-behind-other"
+  git clone -q "$bare" "$other"
+  git -C "$other" -c user.email=t@t -c user.name=t commit -q --allow-empty -m remote-only
+  git -C "$other" push -q origin HEAD
+
+  # 2 local unpushed commits in "work", then fetch (never merge) the
+  # remote-only commit — this is the canonical diverged-branch shape
+  git -C "$work" -c user.email=t@t -c user.name=t commit -q --allow-empty -m local-1
+  git -C "$work" -c user.email=t@t -c user.name=t commit -q --allow-empty -m local-2
+  git -C "$work" fetch -q origin
+
+  out=$(CLAUDE_DIR="$TMP/does-not-exist" bash "$CENSUS" "$root") || fail "census exited non-zero (ahead/behind)"
+  py_assert "$out" '[c["ahead"] for c in d["checkouts"] if c["path"].endswith("/work")] == [2]'
+  py_assert "$out" '[c["behind"] for c in d["checkouts"] if c["path"].endswith("/work")] == [1]'
+}
+
+# discovery failure: an unreadable .git dir must degrade into a not_parked
+# entry, not vanish silently from the census.
+test_discovery_failure() {
+  local root="$TMP/root8" repo out
+  # root reads through chmod 000, so the premise doesn't hold as superuser.
+  [[ $EUID -eq 0 ]] && { echo "skip: running as root, chmod 000 is not enforced"; return; }
+  mkdir -p "$root"
+  repo="$root/lockedout"
+  make_repo "$repo"
+  chmod 000 "$repo/.git"
+
+  out=$(CLAUDE_DIR="$TMP/does-not-exist" bash "$CENSUS" "$root" 2>/dev/null) || fail "census exited non-zero (discovery failure)"
+  py_assert "$out" 'any("worktree list failed" in n["error"] for n in d["not_parked"])'
+
+  chmod 755 "$repo/.git"
+}
+
+# hostile path: a checkout dir containing a space AND a double quote must
+# round-trip through JSON exactly — this is the one case json_escape's
+# quote-escaping exists for.
+test_hostile_path() {
+  local root="$TMP/root9" repo out
+  mkdir -p "$root"
+  repo="$root/we\"ird dir"
+  make_repo "$repo"
+
+  out=$(CLAUDE_DIR="$TMP/does-not-exist" bash "$CENSUS" "$root") || fail "census exited non-zero (hostile path)"
+  py_assert "$out" 'any(c["path"].endswith("we\"ird dir") for c in d["checkouts"])'
+}
+
 test_sessions_and_probes
 test_checkouts
 test_checkouts_sibling
 test_park
 test_park_ref_collision
 test_git_status_failure
+test_ahead_behind
+test_discovery_failure
+test_hostile_path
 
 echo
 if [[ $FAILS -eq 0 ]]; then echo "ALL PASS"; exit 0; else echo "$FAILS failure(s)"; exit 1; fi

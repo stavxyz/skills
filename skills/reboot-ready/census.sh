@@ -7,10 +7,10 @@
 #   ROOT    directories swept for git repos (default: ~/src). Each root is
 #           searched to -maxdepth 2 for .git directories/gitfiles.
 #   --park  additionally create a rescue ref
-#           (refs/rescue/pre-reboot/<name>-<timestamp>) for every dirty
-#           checkout, built via a TEMPORARY index — the real index, working
-#           tree, and branches are never touched. Without --park the run is
-#           a pure read-only census.
+#           (refs/rescue/pre-reboot/<name>-<pathhash>-<timestamp>) for every
+#           dirty checkout, built via a TEMPORARY index — the real index,
+#           working tree, and branches are never touched. Without --park the
+#           run is a pure read-only census.
 #
 # Output: one JSON document on stdout; diagnostics on stderr.
 # Exit codes:
@@ -20,10 +20,24 @@
 # Env:
 #   CLAUDE_DIR — override ~/.claude (used by tests)
 #
+# Deps: git (required); python3 (required, for state.json parsing); ps and
+# lsof (optional — the process probe degrades to "unavailable" without them).
+#
+# Security note: sweeping runs read-only git commands (status, rev-list,
+# for-each-ref, worktree list, ...) inside every repo found under the swept
+# roots. A repo with a hostile `core.fsmonitor`/hook config is an arbitrary-
+# command vector once git touches it — only point this at roots you trust.
+#
 # Why `set -uo pipefail` and NOT -e: the spec requires degrade-don't-abort.
 # A partial census before a reboot beats a crashed one, so failures land in
 # the JSON (probe statuses, not_parked entries) instead of killing the sweep.
 set -uo pipefail
+
+# Prevent git from taking opportunistic locks (index refresh, fsmonitor
+# hook writes) while sweeping — this script promises the real index is
+# never modified, and a live agent may be mid-operation in the same repo.
+# Requires git >= 2.15.
+export GIT_OPTIONAL_LOCKS=0
 
 usage() { echo "usage: census.sh [--park] [ROOT ...]" >&2; exit 2; }
 
@@ -43,7 +57,17 @@ json_escape() {
   printf '%s' "$s"
 }
 
-mtime_of() { stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0; }
+# mtime_of — GNU stat's `-f` means --file-system (dumps a multi-line report
+# to stdout instead of failing), so BSD's `-c` (which cleanly fails with
+# empty stdout on GNU) must be tried FIRST or the file-system report's junk
+# lands unquoted in the JSON. The numeric guard is the real backstop either
+# way.
+mtime_of() {
+  local m
+  m=$(stat -c %Y "$1" 2>/dev/null) || m=$(stat -f %m "$1" 2>/dev/null)
+  [[ "$m" =~ ^[0-9]+$ ]] || m=0
+  printf '%s' "$m"
+}
 
 # join_json <elem>... — comma-join pre-rendered JSON fragments
 join_json() { local IFS=,; printf '%s' "$*"; }
@@ -79,60 +103,95 @@ if [[ -d "$CLAUDE_DIR/jobs" ]]; then
     mtime=$(mtime_of "$d")
     session_id=""
     job_cwd=""
+    job_state=""
+    updated_at=""
+    link_scan_path=""
     if [[ -f "$d/state.json" ]]; then
-      # one parse for both fields: line 1 = sessionId, line 2 = cwd
-      state_fields=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("sessionId","")); print(d.get("cwd",""))' "$d/state.json" 2>/dev/null) || { state_fields=""; jobs_status="errored"; }
-      { IFS= read -r session_id; IFS= read -r job_cwd; } <<<"$state_fields"
+      # mtime reflects state.json's OWN last write, the actual "last
+      # activity" signal — not the job dir's, which some filesystems never
+      # bump on writes to files inside it.
+      mtime=$(mtime_of "$d/state.json")
+      # one parse for all five fields, one per line, in this order:
+      # sessionId, cwd, state, updatedAt, linkScanPath (empty string when a
+      # key is absent or explicitly null).
+      state_fields=$(python3 -c 'import json,sys
+j=json.load(open(sys.argv[1]))
+for k in ("sessionId","cwd","state","updatedAt","linkScanPath"):
+    print(j.get(k,"") or "")' "$d/state.json" 2>/dev/null) || { state_fields=""; jobs_status="errored"; }
+      { IFS= read -r session_id; IFS= read -r job_cwd; IFS= read -r job_state; IFS= read -r updated_at; IFS= read -r link_scan_path; } <<<"$state_fields"
     fi
-    # Transcript path is DERIVED (verified 2026-07-31): job dirs hold
-    # state.json, not a transcript; the transcript lives under
+    # Transcript path: state.json's own linkScanPath wins when present.
+    # Otherwise DERIVE it (verified 2026-07-31): job dirs hold state.json,
+    # not always a usable transcript path; the transcript lives under
     # ~/.claude/projects/<slug>/<sessionId>.jsonl where <slug> is the cwd
     # with EVERY non-alphanumeric character replaced by '-' (dots and
     # slashes both become dashes; consecutive dashes are preserved).
-    transcript=""
-    if [[ -n "$session_id" && -n "$job_cwd" ]]; then
+    transcript="$link_scan_path"
+    if [[ -z "$transcript" && -n "$session_id" && -n "$job_cwd" ]]; then
       slug=$(printf '%s' "$job_cwd" | tr -c 'A-Za-z0-9' '-')
       transcript="$CLAUDE_DIR/projects/$slug/$session_id.jsonl"
     fi
-    jobs_entries+=("{\"id\":\"$(json_escape "$id")\",\"mtime\":$mtime,\"session_id\":\"$(json_escape "$session_id")\",\"cwd\":\"$(json_escape "$job_cwd")\",\"transcript\":\"$(json_escape "$transcript")\"}")
+    jobs_entries+=("{\"id\":\"$(json_escape "$id")\",\"mtime\":$mtime,\"session_id\":\"$(json_escape "$session_id")\",\"cwd\":\"$(json_escape "$job_cwd")\",\"state\":\"$(json_escape "$job_state")\",\"updated_at\":\"$(json_escape "$updated_at")\",\"transcript\":\"$(json_escape "$transcript")\"}")
   done
 else
   jobs_status="unavailable"
 fi
 
-# --- sessions probe 2: live claude processes (lsof) ------------------------
+# --- sessions probe 2: live claude processes (ps + lsof) --------------------
+# Current Claude Code installs exec a VERSIONED binary
+# (~/.local/share/claude/versions/<X.Y.Z>), so the kernel command name lsof
+# sees is a bare version string like "2.1.220" — `lsof -c claude` matches
+# almost nothing (verified live: 1 of ~14 claude-ish processes). The macOS
+# desktop app binary is `Claude` (capitalized), which a case-sensitive `-c`
+# also misses. So: select candidate pids from `ps` (whose `comm` on macOS is
+# the full executable path, so the versioned path and the app binary both
+# still contain "claude" case-insensitively), then ask lsof only for THEIR
+# cwds.
 procs_status="ran"
 proc_entries=()
 proc_cwds=()
-if command -v lsof >/dev/null 2>&1; then
-  # -F pn emits "p<pid>", "fcwd", "n<cwd>" line groups per process; we key on
-  # the p and n lines and ignore the f field line. macOS lsof exits 1 for
-  # BOTH "no matches" and real errors, so the exit code alone distinguishes
-  # nothing: capture stderr separately — silence there means a legitimately
-  # empty result; output there means the probe itself failed.
-  lsof_err=$(mktemp)
-  lsof_out=$(lsof -a -d cwd -c claude -F pn 2>"$lsof_err")
-  rc=$?
-  if [[ $rc -ne 0 && -s "$lsof_err" ]]; then
-    procs_status="errored"
+if command -v ps >/dev/null 2>&1; then
+  proc_pids=()
+  while IFS= read -r pid; do
+    [[ -n "$pid" ]] && proc_pids+=("$pid")
+  done < <(ps -axo pid=,comm= 2>/dev/null | awk 'tolower($0) ~ /claude/ {print $1}')
+
+  if [[ ${#proc_pids[@]} -eq 0 ]]; then
+    procs_status="ran"
+  elif command -v lsof >/dev/null 2>&1; then
+    # -F pn emits "p<pid>", "fcwd", "n<cwd>" line groups per process; we key
+    # on the p and n lines and ignore the f field line. macOS lsof exits 1
+    # for BOTH "no matches" and real errors, so the exit code alone
+    # distinguishes nothing: capture stderr separately — silence there means
+    # a legitimately empty result; output there means the probe itself
+    # failed.
+    pidlist=$(join_json "${proc_pids[@]}")
+    lsof_err=$(mktemp)
+    lsof_out=$(lsof -a -d cwd -p "$pidlist" -F pn 2>"$lsof_err")
+    rc=$?
+    if [[ $rc -ne 0 && -s "$lsof_err" ]]; then
+      procs_status="errored"
+    else
+      pid=""
+      while IFS= read -r line; do
+        case "$line" in
+          p*) pid=${line#p} ;;
+          n*)
+            cwd=${line#n}
+            # macOS lsof can suffix an unreadable cwd with " (stat: Permission
+            # denied)" — trim it so the JSON cwd stays a clean path and the
+            # live-prefix match below keeps working.
+            cwd=${cwd%% (stat:*}
+            proc_entries+=("{\"pid\":${pid:-0},\"cwd\":\"$(json_escape "$cwd")\"}")
+            proc_cwds+=("$cwd")
+            ;;
+        esac
+      done <<<"$lsof_out"
+    fi
+    rm -f "$lsof_err"
   else
-    pid=""
-    while IFS= read -r line; do
-      case "$line" in
-        p*) pid=${line#p} ;;
-        n*)
-          cwd=${line#n}
-          # macOS lsof can suffix an unreadable cwd with " (stat: Permission
-          # denied)" — trim it so the JSON cwd stays a clean path and the
-          # live-prefix match below keeps working.
-          cwd=${cwd%% (stat:*}
-          proc_entries+=("{\"pid\":${pid:-0},\"cwd\":\"$(json_escape "$cwd")\"}")
-          proc_cwds+=("$cwd")
-          ;;
-      esac
-    done <<<"$lsof_out"
+    procs_status="unavailable"
   fi
-  rm -f "$lsof_err"
 else
   procs_status="unavailable"
 fi

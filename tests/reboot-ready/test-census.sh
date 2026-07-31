@@ -46,7 +46,39 @@ test_sessions_and_probes() {
   py_assert "$out" 'd["sessions"]["jobs"] == []'
 }
 
+# make_repo <path> — init a repo with one commit, identity preset
+make_repo() {
+  git init -q "$1"
+  git -C "$1" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+}
+
+test_checkouts() {
+  local root="$TMP/root2" repo out
+  mkdir -p "$root"
+  repo="$root/demo"
+  make_repo "$repo"
+  printf '.claude/\n' > "$repo/.gitignore"
+  git -C "$repo" add .gitignore
+  git -C "$repo" -c user.email=t@t -c user.name=t commit -q -m gitignore
+  git -C "$repo" worktree add -q "$repo/.claude/worktrees/wt1" -b wt1
+  echo dirty > "$repo/.claude/worktrees/wt1/file.txt"
+
+  out=$(CLAUDE_DIR="$TMP/does-not-exist" bash "$CENSUS" "$root") || fail "census exited non-zero (checkouts)"
+  py_assert "$out" 'len(d["checkouts"]) == 2'
+  py_assert "$out" 'sorted(c["is_worktree"] for c in d["checkouts"]) == [False, True]'
+  py_assert "$out" '[c["dirty_count"] for c in d["checkouts"] if c["is_worktree"]] == [1]'
+  py_assert "$out" '[c["dirty_count"] for c in d["checkouts"] if not c["is_worktree"]] == [0]'
+  py_assert "$out" '[c["branch"] for c in d["checkouts"] if c["is_worktree"]] == ["wt1"]'
+  py_assert "$out" 'all(c["live"] in (True, False) for c in d["checkouts"])'
+  py_assert "$out" 'all(c["ahead"] is None and c["behind"] is None for c in d["checkouts"])'
+  # no remote → every local branch counts as unpushed, on the primary only
+  py_assert "$out" '"wt1" in [b for c in d["checkouts"] if not c["is_worktree"] for b in c["unpushed_branches"]]'
+  py_assert "$out" '[c["unpushed_branches"] for c in d["checkouts"] if c["is_worktree"]] == [[]]'
+  py_assert "$out" 'all(c["rescue_ref"] == "" and c["park_error"] == "" for c in d["checkouts"])'
+}
+
 test_sessions_and_probes
+test_checkouts
 
 echo
 if [[ $FAILS -eq 0 ]]; then echo "ALL PASS"; exit 0; else echo "$FAILS failure(s)"; exit 1; fi

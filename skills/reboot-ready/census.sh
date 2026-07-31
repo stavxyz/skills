@@ -131,9 +131,86 @@ else
   procs_status="unavailable"
 fi
 
-# --- checkouts (filled in by the repo/worktree sweep) -----------------------
+# --- checkouts: discover repos and their linked worktrees -------------------
 checkout_entries=()
 not_parked_entries=()
+co_paths=()
+co_primaries=()
+
+# add_checkout <path> <primary> — dedupe on path (a worktree can be reached
+# both by find and via `git worktree list` from its primary)
+add_checkout() {
+  local p
+  for p in ${co_paths[@]+"${co_paths[@]}"}; do
+    [[ "$p" == "$1" ]] && return 0
+  done
+  co_paths+=("$1")
+  co_primaries+=("$2")
+}
+
+for root in "${ROOTS[@]}"; do
+  if [[ ! -d "$root" ]]; then
+    echo "census: root not found: $root" >&2
+    continue
+  fi
+  while IFS= read -r gitpath; do
+    repo=$(cd "$(dirname "$gitpath")" && pwd -P)
+    # worktree list from the primary catches nested .claude/worktrees/* that
+    # -maxdepth 2 cannot see
+    while IFS= read -r wtline; do
+      case "$wtline" in
+        "worktree "*) add_checkout "${wtline#worktree }" "$repo" ;;
+      esac
+    done < <(git -C "$repo" worktree list --porcelain 2>/dev/null)
+  done < <(find "$root" -maxdepth 2 -name .git 2>/dev/null)
+done
+
+i=0
+while [[ $i -lt ${#co_paths[@]} ]]; do
+  p=${co_paths[$i]}
+  primary=${co_primaries[$i]}
+  i=$((i + 1))
+
+  branch=$(git -C "$p" rev-parse --abbrev-ref HEAD 2>/dev/null) || branch="(unknown)"
+  # pwd -P canonicalizes symlinks; mktemp paths on macOS are /var (symlink) but
+  # git worktree list returns /private/var (real path), so both must resolve the same way
+  dirty=$(git -C "$p" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+
+  ahead=null
+  behind=null
+  if git -C "$p" rev-parse --abbrev-ref '@{upstream}' >/dev/null 2>&1; then
+    counts=$(git -C "$p" rev-list --left-right --count '@{upstream}...HEAD' 2>/dev/null) || counts=""
+    if [[ -n "$counts" ]]; then
+      # output is "<behind><whitespace><ahead>" — strip on [[:space:]] so no
+      # literal tab character has to survive copy/paste
+      behind=${counts%%[[:space:]]*}
+      ahead=${counts##*[[:space:]]}
+    fi
+  fi
+
+  live=false
+  for c in ${proc_cwds[@]+"${proc_cwds[@]}"}; do
+    if [[ "$c" == "$p" || "$c" == "$p"/* ]]; then live=true; break; fi
+  done
+
+  is_worktree=true
+  [[ "$p" == "$primary" ]] && is_worktree=false
+
+  # unpushed local branches: reported once, on the primary checkout
+  unpushed=()
+  if [[ "$p" == "$primary" ]]; then
+    while IFS=$'\t' read -r br up track; do
+      if [[ -z "$up" || "$track" == *ahead* ]]; then
+        unpushed+=("\"$(json_escape "$br")\"")
+      fi
+    done < <(git -C "$p" for-each-ref refs/heads --format='%(refname:short)%09%(upstream:short)%09%(upstream:track)' 2>/dev/null)
+  fi
+
+  rescue_ref=""
+  park_error=""
+
+  checkout_entries+=("{\"path\":\"$(json_escape "$p")\",\"primary\":\"$(json_escape "$primary")\",\"is_worktree\":$is_worktree,\"branch\":\"$(json_escape "$branch")\",\"dirty_count\":${dirty:-0},\"ahead\":$ahead,\"behind\":$behind,\"live\":$live,\"unpushed_branches\":[$(join_json ${unpushed[@]+"${unpushed[@]}"})],\"rescue_ref\":\"$(json_escape "$rescue_ref")\",\"park_error\":\"$(json_escape "$park_error")\"}")
+done
 
 # --- emit -------------------------------------------------------------------
 roots_json=()

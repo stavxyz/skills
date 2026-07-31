@@ -53,9 +53,16 @@ to stderr.
   *(Verified 2026-07-31: was incorrect — job dirs hold `state.json` /
   `timeline.jsonl`, not a transcript path; the transcript must be derived
   from `sessionId` + `cwd`.)*
-- Live processes: `lsof -a -d cwd -c claude` — pid and cwd for every
-  running claude process (background jobs, interactive tabs, desktop app).
-  This is the full running-session census.
+- Live processes: select claude pids from `ps -axo pid=,comm=` (matching
+  `claude` case-insensitively against the executable *path*), then
+  `lsof -a -d cwd -p <pids>` for each pid's cwd — background jobs,
+  interactive tabs, and the desktop app. This is the full running-session
+  census.
+  *(Verified 2026-07-31: was `lsof -c claude`, which was incorrect —
+  current installs exec a versioned binary (`~/.local/share/claude/
+  versions/<X.Y.Z>`), so the kernel command name contains no "claude" and
+  `-c` matched almost nothing; the desktop app's `Claude` also failed the
+  case-sensitive match. Pids are now selected by executable path first.)*
 - The JSON records a per-probe status (`ran` / `unavailable` / `errored`)
   for the jobs-dir scan and the `lsof` sweep, so an empty sessions list is
   distinguishable from a probe that couldn't look. Both probes live in one

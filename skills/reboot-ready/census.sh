@@ -221,7 +221,7 @@ add_checkout() {
 # Results via globals: PARK_REF (ref name on success, else "") and
 # PARK_ERROR (failure reason, else "").
 park_checkout() {
-  local p=$1 name uniq ref tmpidx commit
+  local p=$1 name uniq ref tmpidx commit err
   PARK_REF=""
   PARK_ERROR=""
   name=$(printf '%s' "$(basename "$p")" | tr -cs 'A-Za-z0-9._-' '-')
@@ -232,6 +232,11 @@ park_checkout() {
   # POSIX/bash-3.2-safe.
   uniq=$(printf '%s' "$p" | cksum | cut -d' ' -f1)
   ref="refs/rescue/pre-reboot/$name-$uniq-$TS"
+  # A sanitized basename can still produce an illegal ref component (e.g.
+  # "..", a leading dot, a trailing ".lock") — fall back to a ref built only
+  # from the always-legal uniq/timestamp tail rather than fail parking over
+  # a naming edge case.
+  git check-ref-format "$ref" >/dev/null 2>&1 || ref="refs/rescue/pre-reboot/$uniq-$TS"
   if ! git -C "$p" rev-parse --verify -q HEAD >/dev/null 2>&1; then
     PARK_ERROR="no commits yet (unborn HEAD)"
     return 0
@@ -247,28 +252,43 @@ park_checkout() {
     git -C "$p" commit-tree "$tree" -p HEAD -m "rescue: pre-reboot park $TS" 2>/dev/null
   )
   rm -f "$tmpidx"
-  if [[ -n "$commit" ]] && git -C "$p" update-ref "$ref" "$commit" 2>/dev/null; then
+  if [[ -z "$commit" ]]; then
+    PARK_ERROR="rescue commit failed"
+    return 0
+  fi
+  # Distinguish the two failure modes instead of collapsing both into
+  # "rescue commit failed": the commit above succeeded, so a failure here is
+  # git's own reason for refusing the ref write (e.g. a lock held elsewhere).
+  err=$(git -C "$p" update-ref "$ref" "$commit" 2>&1)
+  if [[ $? -eq 0 ]]; then
     PARK_REF="$ref"
   else
-    PARK_ERROR="rescue commit failed"
+    PARK_ERROR="ref write failed: $err"
   fi
 }
 
 for root in "${ROOTS[@]}"; do
   if [[ ! -d "$root" ]]; then
     echo "census: root not found: $root" >&2
+    not_parked_entries+=("{\"path\":\"$(json_escape "$root")\",\"error\":\"root not found (not swept)\"}")
     continue
   fi
   while IFS= read -r gitpath; do
     # pwd -P canonicalizes symlinks; mktemp paths on macOS are /var (symlink) but
     # git worktree list returns /private/var (real path), so both must resolve the same way
-    dir=$(cd "$(dirname "$gitpath")" 2>/dev/null && pwd -P) || { echo "census: cannot resolve $gitpath" >&2; continue; }
+    dir=$(cd "$(dirname "$gitpath")" 2>/dev/null && pwd -P) || {
+      echo "census: cannot resolve $gitpath" >&2
+      not_parked_entries+=("{\"path\":\"$(json_escape "$(dirname "$gitpath")")\",\"error\":\"cannot resolve path (checkout not inspected)\"}")
+      continue
+    }
     # worktree list from the primary catches nested .claude/worktrees/* that
     # -maxdepth 2 cannot see; git always lists MAIN worktree first
     primary=""
     wt_out=$(git -C "$dir" worktree list --porcelain 2>/dev/null)
     if [[ $? -ne 0 || -z "$wt_out" ]]; then
       echo "census: worktree list failed for $dir" >&2
+      not_parked_entries+=("{\"path\":\"$(json_escape "$dir")\",\"error\":\"worktree list failed (checkout not inspected)\"}")
+      continue
     fi
     while IFS= read -r wtline; do
       case "$wtline" in
@@ -284,6 +304,21 @@ for root in "${ROOTS[@]}"; do
   done < <(find "$root" -maxdepth 2 -name .git 2>/dev/null)
 done
 
+# Resolve each live process's cwd to the checkout that OWNS it, ONCE, up
+# front. A naive prefix match ("$c" == "$p" || "$c" == "$p"/*) mislabels an
+# ancestor checkout as live too: a process cwd inside a NESTED worktree
+# (e.g. under a primary's .claude/worktrees/*) prefix-matches the enclosing
+# primary's path just as well (verified live: an idle primary with 14 dirty
+# files read as "live" solely because a session's cwd was actually inside a
+# nested worktree). `rev-parse --show-toplevel` from inside a linked
+# worktree returns the WORKTREE's own path (symlink-resolved), matching the
+# worktree-list-derived paths in co_paths, so exact equality below is safe.
+proc_roots=()
+for c in ${proc_cwds[@]+"${proc_cwds[@]}"}; do
+  r=$(git -C "$c" rev-parse --show-toplevel 2>/dev/null) || r="$c"
+  proc_roots+=("$r")
+done
+
 i=0
 while [[ $i -lt ${#co_paths[@]} ]]; do
   p=${co_paths[$i]}
@@ -292,23 +327,33 @@ while [[ $i -lt ${#co_paths[@]} ]]; do
 
   branch=$(git -C "$p" rev-parse --abbrev-ref HEAD 2>/dev/null) || branch="(unknown)"
   # Capture git's own exit status directly (no pipe in between) so a
-  # failure — e.g. an unreadable index — can't be swallowed by `wc -l`
-  # counting 0 lines of empty output and reading as "clean". A failure
-  # degrades to dirty_count:null (like ahead/behind) plus a not_parked
-  # entry and a stderr line; it never falls through to parking.
-  status_out=$(git -C "$p" status --porcelain 2>/dev/null)
+  # failure — e.g. an unreadable index — can't be swallowed by a count of 0
+  # entries reading as "clean". A failure degrades to dirty_count:null (like
+  # ahead/behind) plus a not_parked entry and a stderr line; it never falls
+  # through to parking.
+  #
+  # -z (NUL-terminated) instead of newline-terminated porcelain output: a
+  # filename containing a literal newline would otherwise inflate a plain
+  # `wc -l` count. Redirect to a temp FILE rather than a `$(...)` capture —
+  # command substitution silently drops embedded NUL bytes, which would
+  # collapse the very separators being counted. Count is then "NUL bytes
+  # written", via `tr -cd` + `wc -c` (no pipe between git and its rc).
+  status_tmp=$(mktemp)
+  git -C "$p" status --porcelain -z >"$status_tmp" 2>/dev/null
   status_rc=$?
   if [[ $status_rc -ne 0 ]]; then
     echo "census: git status failed for $p" >&2
     dirty="null"
     not_parked_entries+=("{\"path\":\"$(json_escape "$p")\",\"error\":\"git status failed (checkout unreadable)\"}")
-  elif [[ -z "$status_out" ]]; then
+  elif [[ ! -s "$status_tmp" ]]; then
     dirty=0
   else
-    # re-add the trailing newline that $(...) stripped so wc -l counts the
-    # last porcelain line too
-    dirty=$(printf '%s\n' "$status_out" | wc -l | tr -d ' ')
+    # Each entry ends in one NUL; a rename/copy entry ("R  old\0new\0")
+    # carries an EXTRA NUL field for the old path, so a rename is counted as
+    # 2 — acceptable, this is a truthy dirty signal, not exact accounting.
+    dirty=$(tr -cd '\0' < "$status_tmp" | wc -c | tr -d ' ')
   fi
+  rm -f "$status_tmp"
 
   ahead=null
   behind=null
@@ -323,18 +368,21 @@ while [[ $i -lt ${#co_paths[@]} ]]; do
   fi
 
   live=false
-  for c in ${proc_cwds[@]+"${proc_cwds[@]}"}; do
-    if [[ "$c" == "$p" || "$c" == "$p"/* ]]; then live=true; break; fi
+  for r in ${proc_roots[@]+"${proc_roots[@]}"}; do
+    if [[ "$r" == "$p" ]]; then live=true; break; fi
   done
 
   is_worktree=true
   [[ "$p" == "$primary" ]] && is_worktree=false
 
-  # unpushed local branches: reported once, on the primary checkout
+  # unpushed local branches: reported once, on the primary checkout. A
+  # branch whose upstream was deleted on the remote ("[gone]") has nothing
+  # to compare ahead/behind against but its local commits are just as
+  # unpushed as a branch with no upstream at all — count it too.
   unpushed=()
   if [[ "$p" == "$primary" ]]; then
     while IFS=$'\t' read -r br up track; do
-      if [[ -z "$up" || "$track" == *ahead* ]]; then
+      if [[ -z "$up" || "$track" == *ahead* || "$track" == *gone* ]]; then
         unpushed+=("\"$(json_escape "$br")\"")
       fi
     done < <(git -C "$p" for-each-ref refs/heads --format='%(refname:short)%09%(upstream:short)%09%(upstream:track)' 2>/dev/null)
@@ -365,7 +413,11 @@ park_json=false
 [[ $PARK -eq 1 ]] && park_json=true
 
 printf '{'
-printf '"generated_at":"%s",' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+# generated_at is machine-produced (UTC, fixed format) and can never
+# actually need escaping — it still passes through json_escape anyway, so
+# "every string field passes through json_escape" stays true by grep, with
+# zero fields exempted by eyeball.
+printf '"generated_at":"%s",' "$(json_escape "$(date -u +%Y-%m-%dT%H:%M:%SZ)")"
 printf '"park":%s,' "$park_json"
 printf '"roots":[%s],' "$(join_json ${roots_json[@]+"${roots_json[@]}"})"
 printf '"probes":{"jobs_scan":"%s","lsof":"%s"},' "$jobs_status" "$procs_status"

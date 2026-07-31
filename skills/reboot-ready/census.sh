@@ -122,6 +122,10 @@ if command -v lsof >/dev/null 2>&1; then
         p*) pid=${line#p} ;;
         n*)
           cwd=${line#n}
+          # macOS lsof can suffix an unreadable cwd with " (stat: Permission
+          # denied)" — trim it so the JSON cwd stays a clean path and the
+          # live-prefix match below keeps working.
+          cwd=${cwd%% (stat:*}
           proc_entries+=("{\"pid\":${pid:-0},\"cwd\":\"$(json_escape "$cwd")\"}")
           proc_cwds+=("$cwd")
           ;;
@@ -158,11 +162,17 @@ add_checkout() {
 # Results via globals: PARK_REF (ref name on success, else "") and
 # PARK_ERROR (failure reason, else "").
 park_checkout() {
-  local p=$1 name ref tmpidx commit
+  local p=$1 name uniq ref tmpidx commit
   PARK_REF=""
   PARK_ERROR=""
   name=$(printf '%s' "$(basename "$p")" | tr -cs 'A-Za-z0-9._-' '-')
-  ref="refs/rescue/pre-reboot/$name-$TS"
+  # Two checkouts can share a basename (a primary checkout and a same-named
+  # worktree elsewhere, or two repos cloned under different roots) — a
+  # path-derived uniquifier keeps their rescue refs from colliding and
+  # silently overwriting each other in the shared ref store. cksum is
+  # POSIX/bash-3.2-safe.
+  uniq=$(printf '%s' "$p" | cksum | cut -d' ' -f1)
+  ref="refs/rescue/pre-reboot/$name-$uniq-$TS"
   if ! git -C "$p" rev-parse --verify -q HEAD >/dev/null 2>&1; then
     PARK_ERROR="no commits yet (unborn HEAD)"
     return 0
@@ -197,6 +207,10 @@ for root in "${ROOTS[@]}"; do
     # worktree list from the primary catches nested .claude/worktrees/* that
     # -maxdepth 2 cannot see; git always lists MAIN worktree first
     primary=""
+    wt_out=$(git -C "$dir" worktree list --porcelain 2>/dev/null)
+    if [[ $? -ne 0 || -z "$wt_out" ]]; then
+      echo "census: worktree list failed for $dir" >&2
+    fi
     while IFS= read -r wtline; do
       case "$wtline" in
         "worktree "*)
@@ -207,7 +221,7 @@ for root in "${ROOTS[@]}"; do
           add_checkout "$path" "$primary"
           ;;
       esac
-    done < <(git -C "$dir" worktree list --porcelain 2>/dev/null)
+    done <<<"$wt_out"
   done < <(find "$root" -maxdepth 2 -name .git 2>/dev/null)
 done
 
@@ -218,7 +232,24 @@ while [[ $i -lt ${#co_paths[@]} ]]; do
   i=$((i + 1))
 
   branch=$(git -C "$p" rev-parse --abbrev-ref HEAD 2>/dev/null) || branch="(unknown)"
-  dirty=$(git -C "$p" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+  # Capture git's own exit status directly (no pipe in between) so a
+  # failure — e.g. an unreadable index — can't be swallowed by `wc -l`
+  # counting 0 lines of empty output and reading as "clean". A failure
+  # degrades to dirty_count:null (like ahead/behind) plus a not_parked
+  # entry and a stderr line; it never falls through to parking.
+  status_out=$(git -C "$p" status --porcelain 2>/dev/null)
+  status_rc=$?
+  if [[ $status_rc -ne 0 ]]; then
+    echo "census: git status failed for $p" >&2
+    dirty="null"
+    not_parked_entries+=("{\"path\":\"$(json_escape "$p")\",\"error\":\"git status failed (checkout unreadable)\"}")
+  elif [[ -z "$status_out" ]]; then
+    dirty=0
+  else
+    # re-add the trailing newline that $(...) stripped so wc -l counts the
+    # last porcelain line too
+    dirty=$(printf '%s\n' "$status_out" | wc -l | tr -d ' ')
+  fi
 
   ahead=null
   behind=null
@@ -252,7 +283,10 @@ while [[ $i -lt ${#co_paths[@]} ]]; do
 
   rescue_ref=""
   park_error=""
-  if [[ $PARK -eq 1 && ${dirty:-0} -gt 0 ]]; then
+  # Gate parking on dirty being numeric first — dirty is the literal string
+  # "null" when `git status` failed above, and `-gt 0` on that would blow
+  # up arithmetic. An unassessable checkout is never parked.
+  if [[ $PARK -eq 1 && "$dirty" =~ ^[0-9]+$ && $dirty -gt 0 ]]; then
     park_checkout "$p"
     rescue_ref=$PARK_REF
     park_error=$PARK_ERROR
@@ -262,7 +296,7 @@ while [[ $i -lt ${#co_paths[@]} ]]; do
     fi
   fi
 
-  checkout_entries+=("{\"path\":\"$(json_escape "$p")\",\"primary\":\"$(json_escape "$primary")\",\"is_worktree\":$is_worktree,\"branch\":\"$(json_escape "$branch")\",\"dirty_count\":${dirty:-0},\"ahead\":$ahead,\"behind\":$behind,\"live\":$live,\"unpushed_branches\":[$(join_json ${unpushed[@]+"${unpushed[@]}"})],\"rescue_ref\":\"$(json_escape "$rescue_ref")\",\"park_error\":\"$(json_escape "$park_error")\"}")
+  checkout_entries+=("{\"path\":\"$(json_escape "$p")\",\"primary\":\"$(json_escape "$primary")\",\"is_worktree\":$is_worktree,\"branch\":\"$(json_escape "$branch")\",\"dirty_count\":$dirty,\"ahead\":$ahead,\"behind\":$behind,\"live\":$live,\"unpushed_branches\":[$(join_json ${unpushed[@]+"${unpushed[@]}"})],\"rescue_ref\":\"$(json_escape "$rescue_ref")\",\"park_error\":\"$(json_escape "$park_error")\"}")
 done
 
 # --- emit -------------------------------------------------------------------

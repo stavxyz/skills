@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
   "name": "stavxyz",
-  "version": "0.1.7",
+  "version": "0.2.0",
   "description": "Multi-reviewer and ops skills: /stavxyz:validate (fact-check + SOLID review of specs and plans), /stavxyz:polish-pr (parallel review + fix sweep on a pull request), and /stavxyz:reboot-ready (pre-reboot session census, rescue-ref parking, resume manifest)",
   "author": {
     "name": "stavxyz",

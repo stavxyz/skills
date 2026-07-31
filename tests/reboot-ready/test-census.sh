@@ -99,7 +99,7 @@ test_checkouts_sibling() {
 }
 
 test_park() {
-  local root="$TMP/root3" repo out before after ref
+  local root="$TMP/root4" repo out before after ref
   mkdir -p "$root"
   repo="$root/parkme"
   make_repo "$repo"
@@ -171,10 +171,83 @@ test_park() {
   py_assert "$out" '[c["park_error"] for c in d["checkouts"] if c["path"].endswith("/unborn")] != [""]'
 }
 
+# same-basename primary + linked worktree, both dirty: rescue ref names must
+# be collision-proof (path-derived uniquifier), or the second park silently
+# overwrites the first's ref in the shared ref store.
+test_park_ref_collision() {
+  local root="$TMP/root5" repo wt out refs nrefs primary_ref wt_ref r
+  mkdir -p "$root/otherdir"
+  repo="$root/proj"
+  make_repo "$repo"
+  echo primary-orig > "$repo/f.txt"
+  git -C "$repo" add f.txt
+  git -C "$repo" -c user.email=t@t -c user.name=t commit -q -m add-f
+  echo primary-edit > "$repo/f.txt"
+
+  wt="$root/otherdir/proj"
+  git -C "$repo" worktree add -q "$wt" -b projwt
+  echo wt-edit > "$wt/f.txt"
+
+  out=$(CLAUDE_DIR="$TMP/does-not-exist" bash "$CENSUS" --park "$root") || fail "census exited non-zero (ref collision)"
+
+  refs=$(git -C "$repo" for-each-ref --format='%(refname)' 'refs/rescue/pre-reboot/proj-*')
+  nrefs=$(printf '%s\n' "$refs" | grep -c .)
+  if [[ "$nrefs" -eq 2 ]]; then
+    pass "two distinct rescue refs for same-basename checkouts"
+  else
+    fail "expected 2 rescue refs for same-basename checkouts, got $nrefs: $refs"
+  fi
+
+  primary_ref=""
+  wt_ref=""
+  while IFS= read -r r; do
+    [[ -z "$r" ]] && continue
+    case "$(git -C "$repo" show "$r:f.txt" 2>/dev/null)" in
+      primary-edit) primary_ref="$r" ;;
+      wt-edit) wt_ref="$r" ;;
+    esac
+  done <<<"$refs"
+
+  if [[ -n "$primary_ref" ]]; then pass "a ref contains the primary's own content"; else fail "no ref contains primary-edit content"; fi
+  if [[ -n "$wt_ref" ]]; then pass "a ref contains the worktree's own content"; else fail "no ref contains wt-edit content"; fi
+  if [[ -n "$primary_ref" && -n "$wt_ref" && "$primary_ref" != "$wt_ref" ]]; then
+    pass "same-basename checkouts got distinct refs"
+  else
+    fail "same-basename checkouts collapsed onto the same ref"
+  fi
+
+  py_assert "$out" '[c["rescue_ref"] for c in d["checkouts"] if c["path"].endswith("/proj")][0].startswith("refs/rescue/pre-reboot/proj-")'
+  py_assert "$out" '[c["rescue_ref"] for c in d["checkouts"] if c["path"].endswith("otherdir/proj")][0].startswith("refs/rescue/pre-reboot/proj-")'
+}
+
+# `git status` failure (unreadable index) must degrade — never read as clean.
+test_git_status_failure() {
+  local root="$TMP/root6" repo out errfile err
+  mkdir -p "$root"
+  repo="$root/broken"
+  make_repo "$repo"
+  errfile="$TMP/root6-stderr"
+  chmod 000 "$repo/.git/index"
+
+  out=$(CLAUDE_DIR="$TMP/does-not-exist" bash "$CENSUS" "$root" 2>"$errfile") || fail "census exited non-zero (status failure)"
+  err=$(cat "$errfile" 2>/dev/null)
+
+  py_assert "$out" '[c["dirty_count"] for c in d["checkouts"] if c["path"].endswith("/broken")] == [None]'
+  py_assert "$out" 'any(n["path"].endswith("/broken") for n in d["not_parked"])'
+  case "$err" in
+    *"git status failed"*"$repo"*) pass "stderr reports the git status failure" ;;
+    *) fail "stderr missing git status failure message; got: $err" ;;
+  esac
+
+  chmod 644 "$repo/.git/index"
+}
+
 test_sessions_and_probes
 test_checkouts
 test_checkouts_sibling
 test_park
+test_park_ref_collision
+test_git_status_failure
 
 echo
 if [[ $FAILS -eq 0 ]]; then echo "ALL PASS"; exit 0; else echo "$FAILS failure(s)"; exit 1; fi

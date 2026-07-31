@@ -154,14 +154,23 @@ for root in "${ROOTS[@]}"; do
     continue
   fi
   while IFS= read -r gitpath; do
-    repo=$(cd "$(dirname "$gitpath")" && pwd -P)
+    # pwd -P canonicalizes symlinks; mktemp paths on macOS are /var (symlink) but
+    # git worktree list returns /private/var (real path), so both must resolve the same way
+    dir=$(cd "$(dirname "$gitpath")" 2>/dev/null && pwd -P) || { echo "census: cannot resolve $gitpath" >&2; continue; }
     # worktree list from the primary catches nested .claude/worktrees/* that
-    # -maxdepth 2 cannot see
+    # -maxdepth 2 cannot see; git always lists MAIN worktree first
+    primary=""
     while IFS= read -r wtline; do
       case "$wtline" in
-        "worktree "*) add_checkout "${wtline#worktree }" "$repo" ;;
+        "worktree "*)
+          path="${wtline#worktree }"
+          if [[ -z "$primary" ]]; then
+            primary="$path"
+          fi
+          add_checkout "$path" "$primary"
+          ;;
       esac
-    done < <(git -C "$repo" worktree list --porcelain 2>/dev/null)
+    done < <(git -C "$dir" worktree list --porcelain 2>/dev/null)
   done < <(find "$root" -maxdepth 2 -name .git 2>/dev/null)
 done
 
@@ -172,8 +181,6 @@ while [[ $i -lt ${#co_paths[@]} ]]; do
   i=$((i + 1))
 
   branch=$(git -C "$p" rev-parse --abbrev-ref HEAD 2>/dev/null) || branch="(unknown)"
-  # pwd -P canonicalizes symlinks; mktemp paths on macOS are /var (symlink) but
-  # git worktree list returns /private/var (real path), so both must resolve the same way
   dirty=$(git -C "$p" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
 
   ahead=null

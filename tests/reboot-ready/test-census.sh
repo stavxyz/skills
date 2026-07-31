@@ -77,8 +77,30 @@ test_checkouts() {
   py_assert "$out" 'all(c["rescue_ref"] == "" and c["park_error"] == "" for c in d["checkouts"])'
 }
 
+test_checkouts_sibling() {
+  local root="$TMP/root3" repo out
+  mkdir -p "$root"
+  repo="$root/sib"
+  make_repo "$repo"
+  printf '.claude/\n' > "$repo/.gitignore"
+  git -C "$repo" add .gitignore
+  git -C "$repo" -c user.email=t@t -c user.name=t commit -q -m gitignore
+  # Create sibling worktree (not nested under .claude/), within find's -maxdepth 2 reach
+  git -C "$repo" worktree add -q "$root/sib-wt" -b sibwt
+  echo dirty > "$root/sib-wt/file.txt"
+
+  out=$(CLAUDE_DIR="$TMP/does-not-exist" bash "$CENSUS" "$root") || fail "census exited non-zero (sibling)"
+  py_assert "$out" 'len(d["checkouts"]) == 2'
+  py_assert "$out" '[c["is_worktree"] for c in d["checkouts"] if c["path"].endswith("/sib")] == [False]'
+  py_assert "$out" '[c["is_worktree"] for c in d["checkouts"] if c["path"].endswith("/sib-wt")] == [True]'
+  # unpushed_branches on primary (/sib), empty on worktree (/sib-wt)
+  py_assert "$out" '[c["unpushed_branches"] for c in d["checkouts"] if c["path"].endswith("/sib")] != [[]]'
+  py_assert "$out" '[c["unpushed_branches"] for c in d["checkouts"] if c["path"].endswith("/sib-wt")] == [[]]'
+}
+
 test_sessions_and_probes
 test_checkouts
+test_checkouts_sibling
 
 echo
 if [[ $FAILS -eq 0 ]]; then echo "ALL PASS"; exit 0; else echo "$FAILS failure(s)"; exit 1; fi

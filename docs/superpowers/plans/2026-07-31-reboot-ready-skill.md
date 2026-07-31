@@ -43,7 +43,7 @@ validated:
 - `skills/reboot-ready/SKILL.md` — model instructions: run the script, summarize sessions from transcripts, write manifests, print go/no-go.
 - `tests/reboot-ready/test-census.sh` — automated bash test (sandboxed under `mktemp -d`; not distributed with the plugin, same as `tests/validate-fixtures/`).
 - `tests/reboot-ready/README.md` — how to run the test.
-- `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` — description strings enumerate skills (add reboot-ready to both), and versions must bump `0.1.6` → `0.1.7` per RELEASING.md (any `skills/` content change requires a patch bump; installed users never receive the new skill otherwise).
+- `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` — description strings enumerate skills (add reboot-ready to both), and versions must bump `0.1.6` → `0.2.0` per RELEASING.md's new-skill clause ("Reserve minor/major for larger shifts (new skills, breaking changes to a skill's interface)" — a patch bump is for content changes to existing skills, not for adding one; installed users never receive the new skill without a bump regardless of which segment moves).
 - `README.md` — skill count, table, invocation examples, and layout tree enumerate the skills; add reboot-ready.
 
 ---
@@ -58,7 +58,7 @@ validated:
 - Consumes: nothing from other tasks.
 - Produces: `census.sh [--park] [ROOT ...]` CLI contract; JSON top-level shape `{generated_at, park, roots, probes: {jobs_scan, lsof}, sessions: {jobs, processes}, checkouts: [], not_parked: []}`; probe status enum `ran | unavailable | errored`; helper functions `json_escape`, `mtime_of`, `join_json` reused by Tasks 2–3. Job entry shape: `{id, mtime, session_id, cwd, transcript}`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `tests/reboot-ready/test-census.sh`:
 
@@ -117,12 +117,12 @@ echo
 if [[ $FAILS -eq 0 ]]; then echo "ALL PASS"; exit 0; else echo "$FAILS failure(s)"; exit 1; fi
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `bash tests/reboot-ready/test-census.sh`
 Expected: FAIL lines / non-zero exit — `skills/reboot-ready/census.sh` does not exist yet (`bash: .../census.sh: No such file or directory`).
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Create `skills/reboot-ready/census.sh`:
 
@@ -289,12 +289,12 @@ Then make both files executable:
 chmod +x skills/reboot-ready/census.sh tests/reboot-ready/test-census.sh
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `bash tests/reboot-ready/test-census.sh`
 Expected: `ALL PASS`, exit 0. (The `lsof` probe assertion accepts any enum value because live processes on the dev machine vary.)
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add skills/reboot-ready/census.sh tests/reboot-ready/test-census.sh
@@ -315,7 +315,7 @@ git commit -m "feat(reboot-ready): sessions census with probe statuses and JSON 
 - Consumes: `json_escape`, `join_json`, `ROOTS`, `proc_cwds`, `checkout_entries`, `not_parked_entries` from Task 1.
 - Produces: checkout entry shape used by Task 3 and by SKILL.md: `{path, primary, is_worktree, branch, dirty_count, ahead, behind, live, unpushed_branches, rescue_ref, park_error}` (`ahead`/`behind` are integers or `null` when no upstream; `unpushed_branches` is non-empty only on primary checkouts; `rescue_ref`/`park_error` are `""` until Task 3 fills them). Loop variable contract for Task 3: inside the per-checkout loop, `p` = checkout path, `dirty` = dirty count, `rescue_ref` and `park_error` are assigned immediately before the entry is rendered.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 In `tests/reboot-ready/test-census.sh`, insert after the `test_sessions_and_probes` function definition (before the `test_sessions_and_probes` call line):
 
@@ -362,12 +362,12 @@ test_sessions_and_probes
 test_checkouts
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `bash tests/reboot-ready/test-census.sh`
 Expected: FAIL on `len(d["checkouts"]) == 2` (checkouts is still `[]`); earlier assertions still pass.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 In `skills/reboot-ready/census.sh`, replace this block:
 
@@ -460,12 +460,12 @@ while [[ $i -lt ${#co_paths[@]} ]]; do
 done
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `bash tests/reboot-ready/test-census.sh`
 Expected: `ALL PASS`, exit 0.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add skills/reboot-ready/census.sh tests/reboot-ready/test-census.sh
@@ -486,7 +486,7 @@ git commit -m "feat(reboot-ready): checkout census — worktrees, dirty state, l
 - Consumes: the per-checkout loop from Task 2 (`p`, `dirty`, `not_parked_entries`), `PARK`, `TS`, `json_escape`.
 - Produces: `park_checkout <path>` — the single mutating entry point, reporting via globals `PARK_REF` (ref name on success, else empty) and `PARK_ERROR` (failure reason, else empty). Rescue refs are named `refs/rescue/pre-reboot/<sanitized-basename>-<TS>`; `not_parked` JSON entries are `{path, error}`. SKILL.md (Task 4) relies on `rescue_ref` being non-empty exactly when parking succeeded.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 In `tests/reboot-ready/test-census.sh`, insert after the `test_checkouts` function definition:
 
@@ -573,12 +573,12 @@ test_checkouts
 test_park
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `bash tests/reboot-ready/test-census.sh`
 Expected: FAIL on "no rescue ref after --park" and the rescue-ref content assertions; the read-only and zero-touch checks pass trivially (nothing mutates yet).
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 In `skills/reboot-ready/census.sh`, first insert this function immediately after the `add_checkout` function definition (before the `for root in` discovery loop) — parking gets a named boundary so the checkout loop stays pure reporting:
 
@@ -642,17 +642,17 @@ with:
   fi
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `bash tests/reboot-ready/test-census.sh`
 Expected: `ALL PASS`, exit 0.
 
-- [ ] **Step 5: Sanity-run against the real machine (read-only)**
+- [x] **Step 5: Sanity-run against the real machine (read-only)**
 
 Run: `bash skills/reboot-ready/census.sh | python3 -m json.tool | head -40`
 Expected: valid JSON; your real repos under `~/src` appear in `checkouts`; both probes report `ran`; **no** `refs/rescue/*` created anywhere (spot-check one repo with `git for-each-ref refs/rescue`).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add skills/reboot-ready/census.sh tests/reboot-ready/test-census.sh
@@ -674,7 +674,7 @@ git commit -m "feat(reboot-ready): opt-in --park rescue refs via temporary index
 - Consumes: `census.sh [--park] [ROOT ...]` CLI and the full JSON shape from Tasks 1–3 (`probes`, `sessions.jobs[].transcript`, `checkouts[].rescue_ref`, `not_parked`).
 - Produces: the user-facing skill `/stavxyz:reboot-ready`; files `~/.claude/reboot-manifest.md` and `~/.claude/reboot-manifest.json`.
 
-- [ ] **Step 1: Write SKILL.md**
+- [x] **Step 1: Write SKILL.md**
 
 Create `skills/reboot-ready/SKILL.md` with exactly this content:
 
@@ -780,16 +780,16 @@ not; after reboot, walk the manifest and resume each session.
   install is broken — do not improvise the sweep inline.
 ````
 
-- [ ] **Step 2: Review SKILL.md against the spec's judgment-layer section**
+- [x] **Step 2: Review SKILL.md against the spec's judgment-layer section**
 
 Read `docs/superpowers/specs/2026-07-30-reboot-ready-skill-design.md` sections "`SKILL.md` — judgment layer" and "Error handling". Confirm: transcript-tail summaries (spec item 1) → Step 3; manifest `.md` + verbatim `.json` (spec item 2) → Steps 2 and 4; go/no-go verdict distinguishing "no sessions" from "couldn't look" (spec item 3 + probe-status design note) → Step 5. Fix any mismatch now.
 
-- [ ] **Step 3: Verify the skill loads**
+- [x] **Step 3: Verify the skill loads**
 
 Run: `head -5 skills/reboot-ready/SKILL.md`
 Expected: frontmatter opens with `---` and `name: reboot-ready`. (Full end-to-end skill invocation is exercised after plugin release; structural validity is what's checkable here.)
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add skills/reboot-ready/SKILL.md
@@ -810,7 +810,7 @@ git commit -m "feat(reboot-ready): SKILL.md judgment layer — manifests and go/
 - Consumes: skill name `reboot-ready` from Task 4; test entry point `tests/reboot-ready/test-census.sh` from Tasks 1–3.
 - Produces: accurate plugin metadata; developer docs.
 
-- [ ] **Step 1: Update plugin.json description and bump the version**
+- [x] **Step 1: Update plugin.json description and bump the version**
 
 In `.claude-plugin/plugin.json`, replace:
 
@@ -836,7 +836,7 @@ with:
   "version": "0.1.7",
 ```
 
-- [ ] **Step 2: Update marketplace.json descriptions and bump the version**
+- [x] **Step 2: Update marketplace.json descriptions and bump the version**
 
 In `.claude-plugin/marketplace.json`, replace:
 
@@ -868,7 +868,7 @@ with:
   },
 ```
 
-- [ ] **Step 3: Write tests/reboot-ready/README.md**
+- [x] **Step 3: Write tests/reboot-ready/README.md**
 
 ```markdown
 # reboot-ready tests
@@ -895,7 +895,7 @@ These files live outside `skills/` so they are not distributed with the
 installed plugin (same convention as `tests/validate-fixtures/`).
 ```
 
-- [ ] **Step 4: Update the repo README.md**
+- [x] **Step 4: Update the repo README.md**
 
 `README.md` enumerates the plugin's skills in four places; update each with a surgical replacement.
 
@@ -966,17 +966,17 @@ with:
     └── reboot-ready/      # automated tests for census.sh
 ```
 
-- [ ] **Step 5: Verify JSON validity of both metadata files**
+- [x] **Step 5: Verify JSON validity of both metadata files**
 
 Run: `python3 -m json.tool .claude-plugin/plugin.json >/dev/null && python3 -m json.tool .claude-plugin/marketplace.json >/dev/null && echo OK`
 Expected: `OK`
 
-- [ ] **Step 6: Run the full test suite one final time**
+- [x] **Step 6: Run the full test suite one final time**
 
 Run: `bash tests/reboot-ready/test-census.sh`
 Expected: `ALL PASS`, exit 0.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add .claude-plugin/plugin.json .claude-plugin/marketplace.json README.md tests/reboot-ready/README.md

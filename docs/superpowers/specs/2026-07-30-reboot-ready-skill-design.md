@@ -98,7 +98,7 @@ git read-tree HEAD          # seed temp index from HEAD
 git add -A                  # stage tracked changes AND untracked files
 tree=$(git write-tree)
 commit=$(git commit-tree "$tree" -p HEAD -m "rescue: pre-reboot park <ts>")
-git update-ref refs/rescue/pre-reboot/<worktree-name>-<ts> "$commit"
+git update-ref refs/rescue/pre-reboot/<worktree-name>-<pathhash>-<ts> "$commit"
 ```
 
 Properties:
@@ -115,6 +115,13 @@ Properties:
 - This section runs only when `--park` is passed; the default invocation
   is a pure read-only census. SKILL.md instructs Claude to pass `--park`
   on a real pre-reboot run.
+
+> **Design note (2026-07-31):** The rescue ref name carries a path-derived
+> `<pathhash>` component in addition to the worktree name and timestamp.
+> Two checkouts can share a basename (a primary and a same-named worktree
+> elsewhere, or two repos cloned under different roots) — without the
+> uniquifier their rescue refs collide in the shared ref store and the
+> second parking silently overwrites the first's ref.
 
 > **Design note (2026-07-31):** Parking was originally the default with a
 > `--no-park` escape hatch. Inverted to opt-in so the script's name

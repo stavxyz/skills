@@ -1,11 +1,12 @@
 # stavxyz/skills
 
-A small [Claude Code](https://claude.com/claude-code) plugin marketplace with two multi-reviewer skills:
+A small [Claude Code](https://claude.com/claude-code) plugin marketplace with three skills:
 
 | Skill | Command | What it does |
 | --- | --- | --- |
 | **validate** | `/stavxyz:validate <path-to-spec-or-plan.md>` | Runs two reviewers in parallel against your codebase — a **fact-check** pass (are the spec's claims about existing code true?) and a **SOLID / hygiene** pass (is the design direction sound?) — then addresses the findings in-spec, with gates for deferrals, Critical corrections, and net-negative design. |
 | **polish-pr** | `/stavxyz:polish-pr <PR#>` | Rebases a PR, runs two independent code reviews in parallel, addresses **every** finding at every severity in-PR, updates docs, runs a test plan, and pushes. |
+| **reboot-ready** | `/stavxyz:reboot-ready` | Pre-reboot sweep: censuses running Claude Code sessions, dirty worktrees, and unpushed branches, parks dirty checkouts as zero-touch rescue refs, and writes a resume manifest to `~/.claude/reboot-manifest.md` + `.json`. |
 
 ## Install
 
@@ -14,7 +15,7 @@ A small [Claude Code](https://claude.com/claude-code) plugin marketplace with tw
 /plugin install stavxyz@skills
 ```
 
-The first command registers this repo as a marketplace named `skills`; the second installs the `stavxyz` plugin from it. Plugin skills are namespaced by the plugin name, so after installing they're invoked as `/stavxyz:validate` and `/stavxyz:polish-pr`.
+The first command registers this repo as a marketplace named `skills`; the second installs the `stavxyz` plugin from it. Plugin skills are namespaced by the plugin name, so after installing they're invoked as `/stavxyz:validate`, `/stavxyz:polish-pr`, and `/stavxyz:reboot-ready`.
 
 To update later:
 
@@ -108,10 +109,14 @@ Installed this way they are **user skills**, which are not namespaced — so you
 │   │   ├── SKILL.md
 │   │   ├── fact-check-reviewer.md
 │   │   └── solid-hygiene-reviewer.md
-│   └── polish-pr/
-│       └── SKILL.md
+│   ├── polish-pr/
+│   │   └── SKILL.md
+│   └── reboot-ready/
+│       ├── SKILL.md
+│       └── census.sh
 └── tests/                 # dev-only, not part of the installed plugin
-    └── validate-fixtures/ # sample specs for exercising validate by hand
+    ├── validate-fixtures/ # sample specs for exercising validate by hand
+    └── reboot-ready/      # automated tests for census.sh
 ```
 
 Contributing: enable the release guard once per clone with

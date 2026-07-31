@@ -49,6 +49,8 @@ mtime_of() { stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 
 join_json() { local IFS=,; printf '%s' "$*"; }
 
 PARK=0
+PARK_REF=""
+PARK_ERROR=""
 ROOTS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -148,6 +150,41 @@ add_checkout() {
   co_primaries+=("$2")
 }
 
+# park_checkout <path> — the ONLY mutating code in this script (--park only).
+# Builds a rescue commit via a TEMPORARY index: the real index, working
+# tree, branches, and `git status` output are byte-for-byte unchanged, so
+# this is safe even on a checkout a live agent is editing. Never pushes;
+# writes refs only, under refs/rescue/pre-reboot/.
+# Results via globals: PARK_REF (ref name on success, else "") and
+# PARK_ERROR (failure reason, else "").
+park_checkout() {
+  local p=$1 name ref tmpidx commit
+  PARK_REF=""
+  PARK_ERROR=""
+  name=$(printf '%s' "$(basename "$p")" | tr -cs 'A-Za-z0-9._-' '-')
+  ref="refs/rescue/pre-reboot/$name-$TS"
+  if ! git -C "$p" rev-parse --verify -q HEAD >/dev/null 2>&1; then
+    PARK_ERROR="no commits yet (unborn HEAD)"
+    return 0
+  fi
+  tmpidx=$(mktemp)
+  # the subshell scopes GIT_INDEX_FILE so it cannot leak into later git
+  # calls — do not "simplify" the export out of the subshell
+  commit=$(
+    export GIT_INDEX_FILE="$tmpidx"
+    git -C "$p" read-tree HEAD 2>/dev/null &&
+    git -C "$p" add -A 2>/dev/null &&
+    tree=$(git -C "$p" write-tree 2>/dev/null) &&
+    git -C "$p" commit-tree "$tree" -p HEAD -m "rescue: pre-reboot park $TS" 2>/dev/null
+  )
+  rm -f "$tmpidx"
+  if [[ -n "$commit" ]] && git -C "$p" update-ref "$ref" "$commit" 2>/dev/null; then
+    PARK_REF="$ref"
+  else
+    PARK_ERROR="rescue commit failed"
+  fi
+}
+
 for root in "${ROOTS[@]}"; do
   if [[ ! -d "$root" ]]; then
     echo "census: root not found: $root" >&2
@@ -215,6 +252,15 @@ while [[ $i -lt ${#co_paths[@]} ]]; do
 
   rescue_ref=""
   park_error=""
+  if [[ $PARK -eq 1 && ${dirty:-0} -gt 0 ]]; then
+    park_checkout "$p"
+    rescue_ref=$PARK_REF
+    park_error=$PARK_ERROR
+    if [[ -n "$park_error" ]]; then
+      echo "census: NOT parked: $p — $park_error" >&2
+      not_parked_entries+=("{\"path\":\"$(json_escape "$p")\",\"error\":\"$(json_escape "$park_error")\"}")
+    fi
+  fi
 
   checkout_entries+=("{\"path\":\"$(json_escape "$p")\",\"primary\":\"$(json_escape "$primary")\",\"is_worktree\":$is_worktree,\"branch\":\"$(json_escape "$branch")\",\"dirty_count\":${dirty:-0},\"ahead\":$ahead,\"behind\":$behind,\"live\":$live,\"unpushed_branches\":[$(join_json ${unpushed[@]+"${unpushed[@]}"})],\"rescue_ref\":\"$(json_escape "$rescue_ref")\",\"park_error\":\"$(json_escape "$park_error")\"}")
 done

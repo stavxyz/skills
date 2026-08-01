@@ -3,10 +3,15 @@ name: reboot-ready
 description: Pre-reboot sweep of Claude Code sessions and git state. Use when the user says they are about to reboot, shut down, restart, or install an OS update — inventories running sessions, dirty worktrees, and unpushed branches, parks dirty checkouts as zero-touch rescue refs, and writes a resume manifest.
 ---
 
-Prepare this machine for a reboot. A reboot kills running Claude Code
-sessions and any in-flight tool calls; transcripts and files on disk
-survive. Your job: census everything at risk, park dirty git state as
-rescue refs, and leave a manifest so every session can be picked back up.
+Prepare this machine for a reboot. A reboot kills the running *processes*
+— any in-flight tool call dies mid-step — but the sessions themselves are
+disk-backed and reappear in the agents list after restart (verified
+2026-08-01: post-reboot, `~/.claude/jobs/*/state.json` files carried
+`updatedAt` timestamps newer than boot). Transcripts and files on disk
+survive too. Your job: census everything at risk, park dirty git state as
+rescue refs, and leave a manifest recording what each session was doing —
+the sessions come back on their own; knowing where each one left off, and
+having the dirty state snapshotted, is what doesn't happen automatically.
 
 ## Step 1 — resolve the skill directory and run the census
 
@@ -69,13 +74,14 @@ Write `~/.claude/reboot-manifest.md` (overwrite each run):
 - <root> (from the JSON's `roots`; state plainly if this list is empty or
   narrower than expected — "0 checkouts" must never read as green)
 
-## Running sessions (will be killed by reboot)
+## Running sessions (interrupted by reboot; they reappear in the agents list afterward)
 ### <job id or pid> — <one-line activity summary>
 - Where: <checkout path> (branch `<branch>`, <N> dirty files, or "dirty
   state unknown" when `dirty_count` is `null`)
 - Rescue ref: `<rescue_ref>` (or "none — checkout clean")
-- Resume: `claude --resume <session_id>` — then tell it to re-check its
-  last step; in-flight tool calls do not auto-resume.
+- Pickup: the session returns natively after reboot — tell it to re-check
+  its last step (in-flight tool calls die at shutdown and do not re-run).
+  If it does not reappear: `claude --resume <session_id>`.
 
 ## Idle dirty checkouts (parked)
 - <path> — branch `<branch>`, <N> dirty files (or "dirty state unknown" when
@@ -121,8 +127,11 @@ Always state the swept roots in this summary too, even on a clean run — a
 `READY TO REBOOT` with zero checkouts because the wrong root was swept is
 not actually ready.
 
-Remind the user: files and transcripts survive reboot; running processes do
-not; after reboot, walk the manifest and resume each session.
+Remind the user: sessions are disk-backed and reappear in the agents list
+after reboot; what dies is the running processes and any in-flight tool
+calls. After reboot, walk the manifest and nudge each returned session to
+re-check its last step — do not tell the user they must manually resume
+everything.
 
 ## Hard rules
 

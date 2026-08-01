@@ -20,13 +20,25 @@ validated:
 
 ## Problem
 
-Rebooting the machine kills every running Claude Code session: background
-jobs, interactive tabs, and the desktop app. Conversation transcripts and
-files on disk survive, but in-flight work stops silently, and there is no
-single place to see what was running, what state each worktree was in, or
-what to resume afterward. Before a reboot (or OS update), the user wants a
-one-command sweep that inventories everything at risk, parks dirty state
-safely, and leaves behind a checklist for picking work back up.
+Rebooting the machine kills every running Claude Code *process*: in-flight
+tool calls die mid-step. The sessions themselves are disk-backed and
+reappear in the agents list after restart; conversation transcripts and
+files on disk survive too. What a reboot does NOT preserve: whatever a
+tool call was doing when it died, a snapshot of uncommitted git state at
+that moment, and a record of what each agent was mid-way through. Before a
+reboot (or OS update), the user wants a one-command sweep that inventories
+everything at risk, parks dirty state safely, and leaves behind a
+checklist for picking work back up.
+
+*(Corrected 2026-08-01: this section originally claimed sessions are lost
+at reboot and must be manually resumed. That claim came from a
+documentation lookup whose "stop on machine shutdown" language describes
+process lifetime, not session persistence — the research agent inferred
+"entries disappear" and the inference was repeated as fact without
+empirical verification. Post-reboot observation showed sessions return
+natively: `~/.claude/jobs/*/state.json` files carried post-boot
+`updatedAt` timestamps. Lesson recorded: load-bearing platform behavior
+must be verified empirically or explicitly flagged as unverified.)*
 
 ## Shape
 

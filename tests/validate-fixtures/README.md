@@ -12,6 +12,7 @@ Each fixture is a minimal `type: spec` markdown file that drives a different
 | `fixture-clean.md` | A spec whose claims match the codebase — expect a clean bless with no findings. Because the bless is caveat-free, validate will then **auto-continue into `superpowers:writing-plans`** (the fixture is `type: spec`); stop there if you only meant to exercise validation. |
 | `fixture-drift.md` | A spec containing stale/incorrect claims — expect fact-check findings. |
 | `fixture-net-negative.md` | A spec whose design direction is net-negative — expect a SOLID/hygiene `net-negative` gate. |
+| `fixture-unverified-platform.md` | A spec whose design rests on a load-bearing claim about an external platform (launchd's missed-job semantics). Expect the fact-check reviewer to verify it against a primary source (docs fetch or probe) — yielding Critical if the source contradicts it, or Important with an `UNVERIFIED:` annotation as the correction if no primary source settles it. The in-repo claim (`tests/validate-fixtures/` exists) should verify clean. Added with issue #15 (the reboot-ready incident: an unverified platform inference passed two validations and shipped). |
 
 To use one, point the validate skill at a copy inside a git repo (`/stavxyz:validate`
 for a plugin install, or bare `/validate` for a user-skill install):

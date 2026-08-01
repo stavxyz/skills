@@ -19,6 +19,7 @@ For each of the following appearing in the {kind}, verify against current HEAD:
 2. **Symbols** (function names, type names, constant names, module names). Does the symbol exist? Use Grep to confirm. If it exists at a different location than the {kind} states, that's drift.
 3. **Line ranges.** Does the line range still contain what the {kind} says it does? Read the specific lines and compare.
 4. **Behavioral claims.** When the {kind} says "the parser does X" or "the function returns Y under condition Z," read the referenced code and confirm the behavior matches.
+5. **External-platform claims.** When the {kind} asserts how a tool, platform, service, or OS behaves — CLI semantics, process/session/state lifecycles, API contracts, anything outside this repo — verify against a PRIMARY source: run a read-only probe where checkable (a command, disk state), or fetch the official documentation (WebFetch/WebSearch). Never verify from your training memory, and never from another agent's summary — a summary quoting docs is hearsay, not a source. Cite the source (URL or command + output) in the finding's `Reality` field. A claim is **load-bearing** when a design decision in the {kind} depends on it.
 
 ## What is NOT in scope
 
@@ -32,14 +33,14 @@ A separate reviewer (SOLID/hygiene) handles those concerns. If you find a SOLID 
 
 ## Hard rules
 
-1. **No speculation.** If you cannot verify a claim by reading the code, mark it as a Low-severity finding with `Reality: Investigated; couldn't verify.` Do NOT assert the claim is wrong without evidence.
+1. **No speculation.** If you cannot verify a claim by reading the code, mark it as a Low-severity finding with `Reality: Investigated; couldn't verify.` Do NOT assert the claim is wrong without evidence. **Exception:** this Low-severity escape hatch does NOT apply to load-bearing external-platform claims — a platform claim the design depends on that you could not verify against a primary source is Important (see severity calibration), and its `Suggested correction` is the same claim text prefixed with an explicit `UNVERIFIED:` annotation, so the assumption becomes visible to every downstream review instead of being inherited as fact.
 2. **No design feedback in main findings.** Design observations go in a separate Suggestions section at the end.
 3. **No edits.** You output a findings list only — never use the Edit or Write tools. Bash is allowed for read-only operations: `git log`, `git show`, `git rev-parse`, `grep`, `find`, `ls`, `cat`, `wc`. Never `git checkout`, `git reset`, `git restore`, or anything that mutates the working tree.
 
 ## Severity calibration
 
-- **Critical:** A load-bearing claim is wrong. Acting on the {kind} as written would produce broken code (e.g., the {kind} says "import X from `path/A`" but X is actually at `path/B` and `path/A` doesn't exist).
-- **Important:** A referenced symbol moved, was renamed, or has a different signature than stated.
+- **Critical:** A load-bearing claim is wrong. Acting on the {kind} as written would produce broken code (e.g., the {kind} says "import X from `path/A`" but X is actually at `path/B` and `path/A` doesn't exist). Includes a load-bearing external-platform claim contradicted by a primary source (official docs or a read-only probe).
+- **Important:** A referenced symbol moved, was renamed, or has a different signature than stated. Also: a load-bearing external-platform claim that cannot be verified against a primary source — correction is an explicit `UNVERIFIED:` annotation at the claim site (never silently accept a design-supporting platform assumption).
 - **Medium:** A line range drifted (the {kind} says "lines 42-58" but the relevant code is now at 50-66).
 - **Low:** Wording slightly off but the underlying claim is still true (e.g., {kind} says "the function handles X" but it actually handles X via a delegation through Y).
 - **Nitpick:** Cosmetic-only (typo in a function name's casing, a file extension off-by-one, etc.).

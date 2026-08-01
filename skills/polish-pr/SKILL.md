@@ -1,7 +1,7 @@
 ---
 name: polish-pr
 description: Polish a pull request — rebase, run parallel reviews, address all findings, update docs, push
-disable-model-invocation: true
+disable-model-invocation: false
 ---
 
 Polish PR #$ARGUMENTS.

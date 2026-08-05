@@ -41,14 +41,36 @@ reviewers never saw the code that would actually land.
 Run this exact check (not a paraphrase of it):
 
 ```bash
-BASE_BRANCH=$(gh pr view <PR_NUMBER> --json baseRefName -q .baseRefName)
-git fetch origin
-BEHIND=$(git rev-list --count HEAD..origin/"$BASE_BRANCH")
-echo "behind origin/$BASE_BRANCH by: $BEHIND"
+PR=<PR_NUMBER>
+
+# Resolve the remote that actually hosts the PR's base repo. It is NOT always
+# `origin`: on a repo whose canonical remote is `upstream`, `origin` may be a
+# different repository that merely shares a name, so `origin/$BASE_BRANCH`
+# silently measures against unrelated history and reports a reassuring 0.
+PR_URL=$(gh pr view "$PR" --json url -q .url)
+NWO=$(printf '%s\n' "$PR_URL" | sed -E 's#^https?://[^/]+/([^/]+/[^/]+)/pull/.*#\1#')
+BASE_REMOTE=""
+while read -r name url _; do
+  norm=$(printf '%s\n' "$url" | sed -E 's#^git@[^:]+:#:#; s#^https?://[^/]+/#:#; s#\.git$##')
+  if [ "$norm" = ":$NWO" ]; then BASE_REMOTE="$name"; break; fi
+done < <(git remote -v | awk '$3=="(fetch)"')
+BASE_REMOTE=${BASE_REMOTE:-origin}
+
+BASE_BRANCH=$(gh pr view "$PR" --json baseRefName -q .baseRefName)
+git fetch "$BASE_REMOTE"
+BEHIND=$(git rev-list --count "HEAD..$BASE_REMOTE/$BASE_BRANCH")
+echo "PR $PR -> repo=$NWO remote=$BASE_REMOTE base=$BASE_BRANCH behind=$BEHIND"
 ```
 
+Keep `$BASE_REMOTE` and `$BASE_BRANCH` for the rest of the run — the
+attribution sweep and the final push both need them.
+
+If `gh pr view` cannot find the PR, `gh` picked the wrong repo from the
+remotes. Set `GH_REPO=<owner>/<repo>` for every `gh` call in the run (or
+`gh repo set-default`); do not fall back to guessing.
+
 - `BEHIND` = 0 → proceed to dispatch reviewers.
-- `BEHIND` > 0 → STOP. Rebase onto `origin/$BASE_BRANCH` (resolve conflicts;
+- `BEHIND` > 0 → STOP. Rebase onto `$BASE_REMOTE/$BASE_BRANCH` (resolve conflicts;
   if a conflict resolution is non-mechanical, surface it to the user before
   continuing), re-run the project's test suite and linters on the rebased
   result, `git push --force-with-lease` the feature branch, and only then
@@ -60,8 +82,8 @@ during the polish round itself). If it moved: rebase, re-run the suite,
 force-push, wait for CI again. Never open the browser — the
 ready-to-merge signal — on a branch that is behind its base.
 
-`git rev-list --count HEAD..origin/$BASE_BRANCH` (commits BEHIND) is the
-load-bearing direction. `origin/$BASE_BRANCH..HEAD` (commits ahead) and
+`git rev-list --count HEAD..$BASE_REMOTE/$BASE_BRANCH` (commits BEHIND) is the
+load-bearing direction. `$BASE_REMOTE/$BASE_BRANCH..HEAD` (commits ahead) and
 `git status -sb` (sync with the feature branch's own upstream) are the two
 look-alike checks that do NOT detect staleness — do not substitute them.
 
@@ -166,7 +188,7 @@ Subagents inherit Claude Code's default commit-template behavior, which adds `Co
 Before the push that closes out polish-pr (the one that triggers the final CI run + browser-open), run this exact check:
 
 ```bash
-git log --format="%H" $(git merge-base origin/main HEAD)..HEAD | while read sha; do
+git log --format="%H" $(git merge-base "$BASE_REMOTE/$BASE_BRANCH" HEAD)..HEAD | while read sha; do
   body=$(git show -s --format=%B "$sha")
   if echo "$body" | grep -qE "Co-Authored-By: Claude|🤖 Generated with .*Claude|Generated with .*Claude Code"; then
     echo "ATTRIBUTED: $sha $(git show -s --format=%s $sha)"
@@ -185,13 +207,13 @@ FILTER_BRANCH_SQUELCH_WARNING=1 git filter-branch -f --msg-filter '
   sed -e "/^Co-Authored-By: Claude/d" \
       -e "/^🤖 Generated with/d" \
       -e "/^Generated with .* Claude/d"
-' $(git merge-base origin/main HEAD)..HEAD
+' $(git merge-base "$BASE_REMOTE/$BASE_BRANCH" HEAD)..HEAD
 ```
 
 Re-run the Step 2 grep to confirm zero attributions. Then:
 
 ```bash
-git push --force-with-lease origin <branch-name>
+git push --force-with-lease "$BASE_REMOTE" <branch-name>
 ```
 
 Force-push to the **feature branch** is acceptable and required here. Force-push to `main`/`master` is forbidden by CLAUDE.md and would never apply at this stage anyway.

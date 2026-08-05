@@ -3,3 +3,6 @@
 
 # macOS
 .DS_Store
+
+# Nested git worktrees (live checkouts; never plugin content)
+.claude/worktrees/

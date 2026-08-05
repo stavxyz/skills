@@ -41,14 +41,55 @@ reviewers never saw the code that would actually land.
 Run this exact check (not a paraphrase of it):
 
 ```bash
-BASE_BRANCH=$(gh pr view <PR_NUMBER> --json baseRefName -q .baseRefName)
-git fetch origin
-BEHIND=$(git rev-list --count HEAD..origin/"$BASE_BRANCH")
-echo "behind origin/$BASE_BRANCH by: $BEHIND"
+OUT=$("$CLAUDE_PLUGIN_ROOT/skills/polish-pr/resolve-pr-remotes.sh" <PR_NUMBER>) || exit 1
+eval "$OUT"
+
+git fetch "$BASE_REMOTE"
+BEHIND=$(git rev-list --count "HEAD..$BASE_REMOTE/$BASE_BRANCH")
+echo "base=$BASE_REMOTE/$BASE_BRANCH head=$HEAD_REMOTE behind=$BEHIND"
 ```
 
+`resolve-pr-remotes.sh` maps the PR to the local remotes hosting its base and
+head repositories and sets `BASE_REMOTE`, `HEAD_REMOTE`, `BASE_BRANCH`,
+`BASE_REPO`, `HEAD_REPO`, `CROSS_REPOSITORY`. (If `$CLAUDE_PLUGIN_ROOT` is
+unset, resolve this SKILL.md's directory and use the sibling script — same as
+`wait-for-pr-checks.sh`.) It **hard-stops instead of guessing**: exit 1 when no
+remote hosts the repo, 2 when more than one does, 3 on a usage or `gh` error.
+Do not paper over a non-zero exit by falling back to `origin` — that is the bug
+this replaces. Add `--repo <owner>/<repo>` when the repo has several remotes and
+`gh` might resolve the wrong one. Note that a same-numbered PR can exist in both
+repos, so a plausible-looking result can still be the wrong repo; pass `--repo`
+whenever you are not certain.
+
+**Why a script and not inline shell:** exactly the reason given below for
+`wait-for-pr-checks.sh`. `git remote -v` is human-formatted output, not a
+stable contract — it applies `insteadOf` rewrites (so a remote configured as
+`https://github.com/o/r` can print as `ssh://git@github.com/o/r`) and it
+whitespace-splits, so a local path containing a space breaks positional
+parsing. The script reads `git config --get-regexp` instead, compares host as
+well as owner/repo so an enterprise remote never matches a github.com PR, and
+folds case. `tests/polish-pr/test-resolve.sh` locks the URL dialects in.
+
+**`BASE_REMOTE` and `HEAD_REMOTE` are different remotes on a fork PR**, and
+each has one correct use: fetch and compare against `BASE_REMOTE`, but push the
+branch to `HEAD_REMOTE`. The PR's head branch lives in the fork; pushing it to
+the base repo exits 0, creates a stray branch there, and never updates the PR.
+
+**Write the resolved values down.** Shell state does NOT survive between tool
+calls, so `$BASE_REMOTE` is empty in any later block and
+`git merge-base "$BASE_REMOTE/$BASE_BRANCH" HEAD` silently degrades to
+`git merge-base "/main" HEAD` — which lists zero commits and reads as a pass.
+Later commands write them as `<BASE_REMOTE>`, `<HEAD_REMOTE>` and
+`<BASE_BRANCH>` placeholders; substitute the literal values you just resolved,
+the same way you would `<PR_NUMBER>`.
+
+The same applies to `GH_REPO`: it is shell state too. Prefix it on each `gh`
+invocation individually (`GH_REPO=<owner>/<repo> gh pr view …`) or run
+`gh repo set-default` once — do not set it in one block and expect a later one
+to see it.
+
 - `BEHIND` = 0 → proceed to dispatch reviewers.
-- `BEHIND` > 0 → STOP. Rebase onto `origin/$BASE_BRANCH` (resolve conflicts;
+- `BEHIND` > 0 → STOP. Rebase onto `<BASE_REMOTE>/<BASE_BRANCH>` (resolve conflicts;
   if a conflict resolution is non-mechanical, surface it to the user before
   continuing), re-run the project's test suite and linters on the rebased
   result, `git push --force-with-lease` the feature branch, and only then
@@ -60,8 +101,8 @@ during the polish round itself). If it moved: rebase, re-run the suite,
 force-push, wait for CI again. Never open the browser — the
 ready-to-merge signal — on a branch that is behind its base.
 
-`git rev-list --count HEAD..origin/$BASE_BRANCH` (commits BEHIND) is the
-load-bearing direction. `origin/$BASE_BRANCH..HEAD` (commits ahead) and
+`git rev-list --count HEAD..<BASE_REMOTE>/<BASE_BRANCH>` (commits BEHIND) is the
+load-bearing direction. `<BASE_REMOTE>/<BASE_BRANCH>..HEAD` (commits ahead) and
 `git status -sb` (sync with the feature branch's own upstream) are the two
 look-alike checks that do NOT detect staleness — do not substitute them.
 
@@ -134,7 +175,7 @@ Do NOT write an inline `awk` / `grep` watcher over the default `gh pr checks` ou
 Use the bundled watcher script. From a Bash tool call inside this skill, run:
 
 ```bash
-"$CLAUDE_PLUGIN_ROOT/skills/polish-pr/wait-for-pr-checks.sh" <PR_NUMBER>
+GH_REPO=<owner>/<repo> "$CLAUDE_PLUGIN_ROOT/skills/polish-pr/wait-for-pr-checks.sh" <PR_NUMBER>
 ```
 
 If `$CLAUDE_PLUGIN_ROOT` is unset (some skill installations), resolve the skill's directory by reading the path of this SKILL.md file at invocation time and use the sibling `wait-for-pr-checks.sh`.
@@ -166,7 +207,7 @@ Subagents inherit Claude Code's default commit-template behavior, which adds `Co
 Before the push that closes out polish-pr (the one that triggers the final CI run + browser-open), run this exact check:
 
 ```bash
-git log --format="%H" $(git merge-base origin/main HEAD)..HEAD | while read sha; do
+git log --format="%H" $(git merge-base <BASE_REMOTE>/<BASE_BRANCH> HEAD)..HEAD | while read sha; do
   body=$(git show -s --format=%B "$sha")
   if echo "$body" | grep -qE "Co-Authored-By: Claude|🤖 Generated with .*Claude|Generated with .*Claude Code"; then
     echo "ATTRIBUTED: $sha $(git show -s --format=%s $sha)"
@@ -185,20 +226,26 @@ FILTER_BRANCH_SQUELCH_WARNING=1 git filter-branch -f --msg-filter '
   sed -e "/^Co-Authored-By: Claude/d" \
       -e "/^🤖 Generated with/d" \
       -e "/^Generated with .* Claude/d"
-' $(git merge-base origin/main HEAD)..HEAD
+' $(git merge-base <BASE_REMOTE>/<BASE_BRANCH> HEAD)..HEAD
 ```
 
 Re-run the Step 2 grep to confirm zero attributions. Then:
 
 ```bash
-git push --force-with-lease origin <branch-name>
+git push --force-with-lease <HEAD_REMOTE> <branch-name>
 ```
 
 Force-push to the **feature branch** is acceptable and required here. Force-push to `main`/`master` is forbidden by CLAUDE.md and would never apply at this stage anyway.
 
+Push to `<HEAD_REMOTE>`, not `<BASE_REMOTE>`. On a fork PR they differ, and
+pushing the head branch at the base repo succeeds silently: it lands a stray
+branch on the upstream, leaves the PR's head untouched, fires no new CI, and
+lets the re-run grep report clean — so the sweep "passes" with the attributed
+commits still on the PR.
+
 ### Step 4 — Browser-open gate
 
-Do NOT call `gh pr view <N> --web` until Step 2 returns empty AND CI on the post-strip push is green. The browser-open signal tells the user "this is ready to merge"; opening it with attributed commits visible in the PR's commit list breaks the user's trust in the gate.
+Do NOT call `GH_REPO=<owner>/<repo> gh pr view <N> --web` until Step 2 returns empty AND CI on the post-strip push is green. The browser-open signal tells the user "this is ready to merge"; opening it with attributed commits visible in the PR's commit list breaks the user's trust in the gate.
 
 ## Test plan — "kicking the tires"
 
@@ -222,7 +269,7 @@ The exact items depend on the project AND the PR's surface area. Tailor accordin
 
 For each automatable item: do it, capture the evidence (curl output, screenshot, log line, test result), and update the PR description's Test plan section with the result inline. Mark items the user must do manually with `- [ ]` checkboxes; mark items you've already executed with `- [x]` plus a one-line evidence summary.
 
-When CI is fully green (every required check has succeeded) AND every automatable test-plan item has been executed and documented AND the attribution sweep below returns empty, open the PR in the user's default browser via `gh pr view <number> --web` so they can review and merge it. Do this only after every required check has passed AND the test plan is populated AND the sweep is clean; do not open the browser while checks are still pending, any have failed, test-plan items remain undocumented, or attributed commits remain.
+When CI is fully green (every required check has succeeded) AND every automatable test-plan item has been executed and documented AND the attribution sweep below returns empty, open the PR in the user's default browser via `GH_REPO=<owner>/<repo> gh pr view <number> --web` so they can review and merge it. Do this only after every required check has passed AND the test plan is populated AND the sweep is clean; do not open the browser while checks are still pending, any have failed, test-plan items remain undocumented, or attributed commits remain.
 
 (Attribution rule lives in its own section — see "Mandatory attribution sweep" below. Do not skip that section.)
 

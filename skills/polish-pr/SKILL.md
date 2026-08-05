@@ -62,8 +62,13 @@ BEHIND=$(git rev-list --count "HEAD..$BASE_REMOTE/$BASE_BRANCH")
 echo "PR $PR -> repo=$NWO remote=$BASE_REMOTE base=$BASE_BRANCH behind=$BEHIND"
 ```
 
-Keep `$BASE_REMOTE` and `$BASE_BRANCH` for the rest of the run — the
-attribution sweep and the final push both need them.
+**Write the two resolved values down** — they are needed again by the
+attribution sweep and the final push. Shell state does NOT survive between
+tool calls, so `$BASE_REMOTE` will be empty in any later block and
+`git merge-base "$BASE_REMOTE/$BASE_BRANCH" HEAD` would silently degrade to
+`git merge-base "/main" HEAD`. Later commands write them as `<BASE_REMOTE>` and
+`<BASE_BRANCH>` placeholders — substitute the literal values you just
+resolved (e.g. `upstream`, `main`), the same way you would `<PR_NUMBER>`.
 
 If `gh pr view` cannot find the PR, `gh` picked the wrong repo from the
 remotes. Set `GH_REPO=<owner>/<repo>` for every `gh` call in the run (or
@@ -188,7 +193,7 @@ Subagents inherit Claude Code's default commit-template behavior, which adds `Co
 Before the push that closes out polish-pr (the one that triggers the final CI run + browser-open), run this exact check:
 
 ```bash
-git log --format="%H" $(git merge-base "$BASE_REMOTE/$BASE_BRANCH" HEAD)..HEAD | while read sha; do
+git log --format="%H" $(git merge-base <BASE_REMOTE>/<BASE_BRANCH> HEAD)..HEAD | while read sha; do
   body=$(git show -s --format=%B "$sha")
   if echo "$body" | grep -qE "Co-Authored-By: Claude|🤖 Generated with .*Claude|Generated with .*Claude Code"; then
     echo "ATTRIBUTED: $sha $(git show -s --format=%s $sha)"
@@ -207,13 +212,13 @@ FILTER_BRANCH_SQUELCH_WARNING=1 git filter-branch -f --msg-filter '
   sed -e "/^Co-Authored-By: Claude/d" \
       -e "/^🤖 Generated with/d" \
       -e "/^Generated with .* Claude/d"
-' $(git merge-base "$BASE_REMOTE/$BASE_BRANCH" HEAD)..HEAD
+' $(git merge-base <BASE_REMOTE>/<BASE_BRANCH> HEAD)..HEAD
 ```
 
 Re-run the Step 2 grep to confirm zero attributions. Then:
 
 ```bash
-git push --force-with-lease "$BASE_REMOTE" <branch-name>
+git push --force-with-lease <BASE_REMOTE> <branch-name>
 ```
 
 Force-push to the **feature branch** is acceptable and required here. Force-push to `main`/`master` is forbidden by CLAUDE.md and would never apply at this stage anyway.

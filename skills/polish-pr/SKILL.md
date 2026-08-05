@@ -26,7 +26,45 @@ The user's standing rule: polish-pr is non-optional before merge AND requires BO
 
 ## Workflow
 
-First make sure all local commits for this PR are updated and the branch is rebased and has latest upstream changes.
+### Base-currency gate — DO THIS FIRST, with these exact commands
+
+The branch MUST be fully up to date with the branch the PR merges into
+(the PR's BASE branch, usually main) before any reviewer is dispatched.
+Prose like "make sure the branch is rebased" is not enough — a controller
+once "verified" currency by counting commits AHEAD of the base and checking
+sync with the branch's own upstream, neither of which detects being BEHIND.
+Learned the hard way (2026-08-01, graftpunk PR #142): the base had moved 3
+days earlier (two PRs), polish-pr certified a green run on the stale
+combination, and the staleness was only caught at merge time — the
+reviewers never saw the code that would actually land.
+
+Run this exact check (not a paraphrase of it):
+
+```bash
+BASE_BRANCH=$(gh pr view <PR_NUMBER> --json baseRefName -q .baseRefName)
+git fetch origin
+BEHIND=$(git rev-list --count HEAD..origin/"$BASE_BRANCH")
+echo "behind origin/$BASE_BRANCH by: $BEHIND"
+```
+
+- `BEHIND` = 0 → proceed to dispatch reviewers.
+- `BEHIND` > 0 → STOP. Rebase onto `origin/$BASE_BRANCH` (resolve conflicts;
+  if a conflict resolution is non-mechanical, surface it to the user before
+  continuing), re-run the project's test suite and linters on the rebased
+  result, `git push --force-with-lease` the feature branch, and only then
+  dispatch reviewers — they must review the combination that will actually
+  merge.
+
+**Re-run the same check at the browser-open gate** (the base can move
+during the polish round itself). If it moved: rebase, re-run the suite,
+force-push, wait for CI again. Never open the browser — the
+ready-to-merge signal — on a branch that is behind its base.
+
+`git rev-list --count HEAD..origin/$BASE_BRANCH` (commits BEHIND) is the
+load-bearing direction. `origin/$BASE_BRANCH..HEAD` (commits ahead) and
+`git status -sb` (sync with the feature branch's own upstream) are the two
+look-alike checks that do NOT detect staleness — do not substitute them.
+
 
 Run **two reviews in parallel** — one from each system — then address **ALL** findings at every severity level: critical, important, medium, low, nitpicks, test gaps, and suggestions.
 

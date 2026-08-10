@@ -28,6 +28,8 @@ Adjust these after inaugural runs reveal real-world thresholds:
 - `OVERLOAD_TOTAL = 100` — same abort condition, total finding count.
 - `DEDUPE_SIMILARITY = 0.8` — Levenshtein-style similarity threshold for treating two findings at the same location as duplicates. Above threshold = duplicate (keep more specific); below = independent.
 
+Note: **`source: citations` findings do NOT count toward `CI_COUNT`.** Every broken citation is emitted at `Important`, and one module renamed across a large spec can produce thirty of them — enough on its own to trip `OVERLOAD_CRITICAL_IMPORTANT` and abort the run with "spec drifted significantly … consider rebasing the spec via brainstorming." That is the wrong prescription for thirty mechanical one-line corrections, which are precisely what this pass exists to make cheap. Count them in `TOTAL_COUNT` and report them in full; just exclude them from the Critical+Important abort trigger.
+
 Note: the reviewer templates' **repeated-pattern sweep** (see `fact-check-reviewer.md` / `solid-hygiene-reviewer.md`) deliberately emits one finding per location for a recurring anti-pattern, so a single systemic root cause can legitimately raise the counts above. Tripping the overload abort on such a pattern is defensible (a pattern at many sites *is* significant drift), but re-tune both `OVERLOAD_*` constants once real runs show how often the sweep pushes one genuine root cause past the threshold.
 
 ## Preconditions
@@ -41,7 +43,7 @@ Verify in order, exiting on the first failure:
    - **Plugin install:** if the `$CLAUDE_PLUGIN_ROOT` environment variable is set, `SKILL_DIR="$CLAUDE_PLUGIN_ROOT/skills/validate"`.
    - **Manual install:** otherwise `SKILL_DIR` is the directory containing this `SKILL.md` (e.g. `~/.claude/skills/validate` when symlinked into the user skills folder).
 
-   Then run `ls "$SKILL_DIR/fact-check-reviewer.md" "$SKILL_DIR/solid-hygiene-reviewer.md" "$SKILL_DIR/check-citations.py"` via Bash. If any is missing, report `⛔ validate: reviewer template <filename> missing from skill folder. Reinstall the skill or restore from version control.` and exit.
+   Then run `ls "$SKILL_DIR/fact-check-reviewer.md" "$SKILL_DIR/solid-hygiene-reviewer.md" "$SKILL_DIR/check-citations.py"` via Bash. If any is missing, report `⛔ validate: <filename> missing from skill folder. Reinstall the skill or restore from version control.` and exit.
 
    `check-citations.py` is hard-stopped alongside the templates on purpose. A missing deterministic check that merely warns would be skipped silently, and a citation check that runs on some invocations and not others is worse than none — the frontmatter bless would then mean two different things depending on what happened to be installed.
 5. Capture `REPO_ROOT` via `git -C "$(dirname "$ARGUMENTS")" rev-parse --show-toplevel`.
@@ -188,13 +190,13 @@ Combine all three sources' parsed findings into a single list, `FINDINGS`.
 
 Two findings count as overlapping if:
 
-1. They have different `source` (one fact-check, one solid-hygiene), AND
-2. Their `location` strings match (after trimming whitespace), AND
+1. They have different `source` — any two of `fact-check`, `solid-hygiene`, `citations` — AND
+2. Their `location` strings match — compared after trimming whitespace AND reducing any leading path to its basename, because the sources spell it differently: the checker emits the document's bare filename followed by a line number, while a reviewer, handed `{spec_path}` as an absolute path, may emit that full absolute path followed by the same line number, or a section heading instead. Compared raw, those never match, and the rule below cannot fire. A location that is a section heading rather than a line will still not match after normalization; that is expected, and it stays an independent finding. AND
 3. The Levenshtein-style similarity between their `claim`/`concern` strings is ≥ `DEDUPE_SIMILARITY` (default 0.8).
 
 **A `citations` finding always wins its pair.** Where a `citations` finding
 overlaps one from either reviewer, keep the `citations` one and log the other in
-`DEDUPE_FINDINGS` regardless of which reads as more specific. It carries a line
+`DEDUPED_FINDINGS` regardless of which reads as more specific. It carries a line
 number read off disk this run; the reviewer's carries one the reviewer arrived
 at. Applying both would also mean two Edits against the same text, the second of
 which fails to match. Overlap here uses the same three conditions above.
@@ -207,8 +209,8 @@ If two solid-hygiene findings (same source) share `location` and similar text, t
 
 Two findings count as contradictory if:
 
-1. They have different `source` (one fact-check, one solid-hygiene), AND
-2. Their `location` strings match (after trimming whitespace), AND
+1. They have different `source` — any two of `fact-check`, `solid-hygiene`, `citations` — AND
+2. Their `location` strings match — compared after trimming whitespace AND reducing any leading path to its basename, because the sources spell it differently: the checker emits the document's bare filename followed by a line number, while a reviewer, handed `{spec_path}` as an absolute path, may emit that full absolute path followed by the same line number, or a section heading instead. Compared raw, those never match, and the rule below cannot fire. A location that is a section heading rather than a line will still not match after normalization; that is expected, and it stays an independent finding. AND
 3. The Levenshtein-style similarity between their `claim`/`concern` strings is **below** `DEDUPE_SIMILARITY` (so they're NOT duplicates) AND below 0.4 (low similarity — they're describing different concerns at the same spec location).
 
 Crossing the same location from different angles is normal (e.g., a fact-check finding about a file path AND a SOLID finding about the design at that same path); those proceed as independent findings. But low-similarity findings at the same location may indicate the reviewers disagree about the underlying premise (one assumes X is true, the other's design feedback assumes X is false).
@@ -300,9 +302,11 @@ For each finding to apply (after gating resolutions), apply this loop:
 
    - **Mechanical drift** (path moved, line range stale, function renamed): replace verbatim with the verified reality from the finding's `reality` field. No annotation needed.
 
-   - **`source: citations` findings** are mechanical drift by construction — apply the `suggested_correction` verbatim in place of the `claim` text, with no annotation. Two of its verdicts have no mechanical correction to apply, because the right fix is a judgment call: an ambiguous bare filename (the checker cannot know which file was meant) and an anchor too short to verify anything (only the author knows what the line was supposed to say). For those two, surface the finding to the operator with the checker's suggestion rather than editing.
+   - **`source: citations` findings** — look at the `suggested_correction`. If it begins with `[manual] `, **make no edit**: that text is an instruction to a human ("Write the range low-to-high.", "Extend the anchor until it is unique in the file."), not replacement text, and applying it verbatim would replace a citation in the spec with an English sentence. Surface it to the operator in the report instead.
 
-   - **Substantive drift** (claim about behavior was wrong): replace with verified reality, then append a one-line note explaining what changed about the design's premise. Format the appended note in italics: `*(Verified <date>: was incorrect — <one-line summary of change>.)*`. Use the date from `date +%Y-%m-%d`.
+     Otherwise the correction is a drop-in replacement for the `claim` text — in practice the anchor-moved verdict, whose correction is itself a citation, `` `path:NN` (`SYMBOL`) ``. Apply it as mechanical drift, no annotation.
+
+     The marker is emitted by the checker rather than listed here on purpose. An exception list in this file is exactly what went stale the first time: it named a verdict the checker no longer has, and undercounted the ones needing a human. A new verdict added to the checker carries its own marker, so this rule does not need editing to stay correct.
 
    - **Advisory SOLID findings** (`gate_status: advisory`): address by adding/revising design notes within the relevant section. Add a "Design note (<date>):" subsection at the end of the section explaining the improvement made in response to the SOLID concern. Format: `> **Design note (<date>):** <description of how the section was revised in response to the SOLID concern>`.
 

@@ -6,8 +6,8 @@ type: spec
 
 Exercises `skills/validate/check-citations.py`. Every citation below is
 deliberate; `tests/validate/test-citations.sh` asserts the verdict each one
-should get. Editing this file means updating the line numbers that test
-asserts — the coupling is what makes those assertions specific enough to fail.
+should get, keyed on the citation's own text rather than on its line number —
+so cases can be added here without renumbering every assertion.
 
 ## Verified
 
@@ -15,10 +15,23 @@ The remote normalizer's shebang is at
 `skills/polish-pr/resolve-pr-remotes.sh:1` (`usr/bin/env`) — an anchored
 citation that resolves, is unique in the file, and sits on the cited line.
 
+## Verified: a bare continuation binds to the preceding named file
+
+The watcher's shebang is at `skills/polish-pr/wait-for-pr-checks.sh:1` (`usr/bin/env`),
+and `:2` (`every check has settled`) continues it — a bare `:NN` refers to the
+nearest citation naming a file BEFORE it, which is a real form in these
+documents and one a naive sweep drops entirely.
+
 ## Broken: the anchor moved
 
 Off by one, and the checker should say where it really is:
-`skills/polish-pr/wait-for-pr-checks.sh:2` (`usr/bin/env`).
+`skills/polish-pr/resolve-pr-remotes.sh:2` (`usr/bin/env`).
+
+## Broken: the anchor is not in the file at all
+
+`skills/validate/SKILL.md:1` (`zzz_absent_symbol_zzz`) resolves and is in
+range, but names something the file does not contain — the ordinary shape of a
+renamed or deleted symbol, and the most common real drift.
 
 ## Broken: past the end of the file
 
@@ -35,6 +48,12 @@ does not have.
 filename that resolves in range against the wrong one returns plausible
 content.
 
+## Broken: a filename that is a suffix of another file
+
+`remotes.sh:1` (`usr/bin/env`) must NOT resolve against
+`skills/polish-pr/resolve-pr-remotes.sh`. Matching on a bare suffix rather
+than a path component would follow the wrong file confidently.
+
 ## Broken: an anchor that is not unique
 
 `skills/validate/SKILL.md:28` (`OVERLOAD_TOTAL`) sits on the cited line, but
@@ -49,7 +68,7 @@ alone `body[0 - 1]` reads the LAST line of the file.
 
 ## Unverifiable: no anchor
 
-`skills/validate/SKILL.md:1` carries no anchor, so drift cannot be detected.
+`skills/validate/SKILL.md:3` carries no anchor, so drift cannot be detected.
 It resolves and is in range, so it is not a finding unless `--strict`.
 
 ## Unverifiable: an anchor that wrapped is not an anchor

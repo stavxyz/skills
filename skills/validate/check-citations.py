@@ -47,10 +47,22 @@ source is the repository's own `.gitignore` rather than a denylist here that
 would always be missing an entry.
 
 Output is validate's own finding format, so `validate` parses these with the
-same code that parses its two reviewers and applies them with the same
-"mechanical drift" edit rule. Findings go to stdout; the exit code is 0 unless
-the run itself failed, because findings are data for the caller to triage, not
-a gate.
+same code that parses its two reviewers. Only ONE verdict yields a correction
+that is a drop-in replacement -- the anchor-moved one, whose correction is
+itself a citation. Every other correction is an instruction to a human and is
+prefixed `[manual] `, because validate auto-applies corrections as edits and
+applying prose verbatim would replace a citation in the user's spec with an
+English sentence. The marker lives in the output rather than in a list of
+exceptions in the prompt: a list goes stale the first time a verdict changes,
+and did.
+
+Findings go to stdout; the exit code is 0 unless the run itself failed,
+because findings are data for the caller to triage, not a gate.
+
+A path containing a space is not recognised as a citation at all (the path
+character class stops at the space). That produces no false finding, but it is
+an invisible gap rather than a reported one -- the tally simply will not count
+it.
 
 Usage:
     check-citations.py <document.md> [--repo-root DIR] [--strict]
@@ -89,14 +101,23 @@ _ANCHOR = r"(?:[ \t]*\(`(?P<anchor>[^`\n]+)`\))?"
 _NAMED = re.compile(
     r"`(?P<path>[\w./-]+\.\w+):(?P<lines>\d+(?:[,-]\d+)*)`" + _ANCHOR
 )
-_BARE = re.compile(r"`:(?P<lines>\d+(?:[,-]\d+)*)`" + _ANCHOR.replace("anchor", "banchor"))
+# Spelled out rather than derived from `_ANCHOR` by string replacement: the
+# two patterns must carry DIFFERENT group names to coexist in one scan, and
+# deriving one from the other by `.replace("anchor", ...)` breaks silently the
+# day the group is renamed.
+_BARE = re.compile(
+    r"`:(?P<lines>\d+(?:[,-]\d+)*)`" + r"(?:[ \t]*\(`(?P<banchor>[^`\n]+)`\))?"
+)
 
 
 # Leading whitespace is allowed on both fences: a code block nested in a list
 # item is indented to the item's content column, and an anchored-to-column-0
 # pattern silently treats those as prose.
+# `|\Z`: an unterminated fence runs to the end of the document, per CommonMark.
+# Requiring a closing marker left the tail of such a document being checked as
+# prose, contradicting the documented rule that fenced citations are skipped.
 _FENCE = re.compile(
-    r"^[ \t]*(?P<mark>```|~~~)[^\n]*\n.*?^[ \t]*(?P=mark)",
+    r"^[ \t]*(?P<mark>```|~~~)[^\n]*\n.*?(?:^[ \t]*(?P=mark)|\Z)",
     re.MULTILINE | re.DOTALL,
 )
 
@@ -134,12 +155,21 @@ class Citation:
     anchor: str | None
 
     def numbers(self) -> list[int]:
+        """Every line the citation names. Empty if ANY part names nothing.
+
+        Checking parts individually, not the flattened result: `:5,3-1` used to
+        return `[5]`, so the reversed `3-1` -- which names no lines at all --
+        was never reported. Unanchored, that is precisely the silent
+        "verifies while comparing nothing" case this tool exists to catch.
+        """
         out: list[int] = []
         for part in self.lines.split(","):
             if "-" in part:
                 lo, hi = part.split("-", 1)
-                # A reversed range stays empty on purpose; `check` names it.
-                out.extend(range(int(lo), int(hi) + 1))
+                span = list(range(int(lo), int(hi) + 1))
+                if not span:
+                    return []
+                out.extend(span)
             else:
                 out.append(int(part))
         return out
@@ -148,11 +178,16 @@ class Citation:
 def citations(doc: Path) -> list[Citation]:
     """Every citation in the document, in order, resolving bare continuations.
 
-    Scanned over the WHOLE text rather than line by line, so an anchor that
-    wraps onto the following line is still seen. Matches are then interleaved
-    by position, because a bare `:47-49` must bind to the nearest PRECEDING
-    named file -- running all named matches before all bare ones would let it
-    bind to a file named later on the same line.
+    Scanned over the WHOLE text rather than line by line so that fenced blocks
+    can be blanked before matching, and so match offsets give a single
+    document-wide ordering. (It is NOT so that a wrapped anchor is seen -- the
+    opposite is true, deliberately: see `_ANCHOR`.)
+
+    That ordering is what the interleave needs: a bare `:47-49` binds to the
+    nearest PRECEDING named file, so running all named matches before all bare
+    ones would let one bind to a file named later on the same line. A bare
+    citation with no preceding named file is dropped, since there is nothing
+    to resolve it against.
     """
     text = _blank_fences(doc.read_text(errors="replace"))
     matches = sorted(
@@ -168,16 +203,30 @@ def citations(doc: Path) -> list[Citation]:
             last_named = m.group("path")
             path, anchor = m.group("path"), m.group("anchor")
         elif last_named is None:
+            found.append(Citation(
+                text.count("\n", 0, m.start()) + 1, m.group(0), "", m.group("lines"), None,
+            ))
             continue
         else:
             path, anchor = last_named, m.group("banchor")
         line_no = text.count("\n", 0, m.start()) + 1
-        # Collapse whitespace: a citation may now span a newline, and `raw` is
-        # emitted as a `**Claim:**` field, which validate's parser reads as one
-        # line. An embedded newline there would truncate the field mid-value.
-        raw = " ".join(m.group(0).split())
-        found.append(Citation(line_no, raw, path, m.group("lines"), anchor))
+        # VERBATIM. `raw` is emitted as the `**Claim:**` field, and validate
+        # searches the document for that text before editing; text that does
+        # not match byte-for-byte is classed as a hallucinated quote, which
+        # always blocks. Collapsing runs of whitespace here was enough to turn
+        # a correctly-detected stale citation into an unfixable blocked run.
+        # A match cannot span a newline (`_ANCHOR` uses `[ \t]*`), so this is
+        # always a single line.
+        found.append(Citation(line_no, m.group(0), path, m.group("lines"), anchor))
     return found
+
+
+# Prefix for a `Suggested correction` that is an instruction to a human rather
+# than replacement text. validate auto-applies corrections as Edits, so a
+# correction it cannot apply must SAY so in the output: applying one of these
+# verbatim would replace a citation in the user's spec with an English
+# sentence. Only the anchor-moved verdict omits it.
+MANUAL = "[manual] "
 
 
 @lru_cache(maxsize=None)
@@ -195,18 +244,56 @@ def tracked(repo: Path) -> tuple[str, ...]:
     `--others --exclude-standard` keeps files that are new but not ignored, so
     a spec can cite a file added in the same change that has not been staged.
     """
-    result = subprocess.run(
-        ["git", "-C", str(repo), "ls-files", "-z", "--cached", "--others",
-         "--exclude-standard"],
-        capture_output=True, text=True, check=False,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"git ls-files failed in {repo}: {result.stderr.strip()}"
+    # Two invocations, unioned: `--recurse-submodules` and `--others` are
+    # mutually exclusive in git ("unsupported mode"), but both sets are
+    # needed. Without the first, a submodule is one gitlink entry and every
+    # citation into it is confidently reported as a nonexistent file --
+    # advising the author to delete a correct citation, which is the same
+    # "confidently wrong" failure the ambiguity check exists to avoid.
+    names: list[str] = []
+    for extra in (["--recurse-submodules", "--cached"],
+                  ["--others", "--exclude-standard"]):
+        result = subprocess.run(
+            ["git", "-C", str(repo), "ls-files", "-z", *extra],
+            capture_output=True, text=True, check=False,
         )
-    # A tuple, and cached: `resolve` is called once per citation, and a
-    # subprocess per citation turns a 100-citation document into 100 forks.
-    return tuple(name for name in result.stdout.split("\0") if name)
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"git ls-files failed in {repo}: {result.stderr.strip()}"
+            )
+        names.extend(n for n in result.stdout.split("\0") if n)
+
+    return tuple(sorted(set(names)))
+
+
+@lru_cache(maxsize=None)
+def _by_name(repo: Path) -> dict[str, tuple[str, ...]]:
+    """Basename -> the tracked paths ending in it. Built once per repo."""
+    index: dict[str, list[str]] = {}
+    for name in tracked(repo):
+        index.setdefault(name.rsplit("/", 1)[-1], []).append(name)
+    return {k: tuple(v) for k, v in index.items()}
+
+
+def normalise(path: str, repo: Path) -> tuple[str, bool]:
+    """(path as `git ls-files` spells it, is_root_anchored).
+
+    An absolute path is a natural way to paste a location and used to report
+    "no such file" -- a confident denial of a file that is right there.
+
+    A leading `./` is ROOT-ANCHORED, not merely stripped: `./README.md` means
+    the repository's own README, not "any README". That gives an author a way
+    to write the one-word path they mean and have it resolve, instead of the
+    ambiguity error being unfixable without a full path.
+    """
+    if path.startswith("./"):
+        return path[2:], True
+    if path.startswith("/"):
+        try:
+            return str(Path(path).relative_to(repo)), True
+        except ValueError:
+            pass  # Genuinely outside the repo; the miss below is correct.
+    return path, False
 
 
 def resolve(path: str, repo: Path) -> tuple[Path | None, list[str]]:
@@ -217,10 +304,13 @@ def resolve(path: str, repo: Path) -> tuple[Path | None, list[str]]:
     plausible content. A checker that follows the wrong file confidently is
     worse than no checker, so ambiguity is an error rather than a guess.
     """
-    # `/` + path, never a bare suffix: `bar.py` must not match `foo/mybar.py`.
+    path, rooted = normalise(path, repo)
+    # Indexed by basename rather than scanning every tracked path per
+    # citation. `/` + path, never a bare suffix: a citation to `bar.py` must
+    # not resolve against `foo/mybar.py`.
     matches = sorted(
-        name for name in tracked(repo)
-        if name == path or name.endswith("/" + path)
+        name for name in _by_name(repo).get(path.rsplit("/", 1)[-1], ())
+        if name == path or (not rooted and name.endswith("/" + path))
     )
     if not matches:
         return None, []
@@ -231,24 +321,51 @@ def resolve(path: str, repo: Path) -> tuple[Path | None, list[str]]:
 
 def check(cite: Citation, repo: Path) -> tuple[str, str, str]:
     """(verdict, reality, correction). Verdicts: ok, unverifiable, broken."""
+    if not cite.path:
+        return (
+            "broken",
+            "This is a bare `:NN` continuation, but no citation naming a file "
+            "comes before it, so there is nothing for it to refer to.",
+            MANUAL + "Name the file, or move it after the citation it continues.",
+        )
+
     target, candidates = resolve(cite.path, repo)
     if target is None:
         if candidates:
             shown = ", ".join(f"`{c}`" for c in candidates[:4])
+            more = "" if len(candidates) <= 4 else f", and {len(candidates) - 4} more"
+            # Never echo the cited path back as the suggestion: for
+            # `README.md:1` the alphabetically-first candidate IS `README.md`,
+            # so the advice read "Qualify the path, e.g. `README.md:1`".
+            example = next(
+                (c for c in candidates if c != normalise(cite.path, repo)[0]),
+                candidates[0],
+            )
             return (
                 "broken",
-                f"`{cite.path}` is ambiguous — {len(candidates)} files match: {shown}. "
-                f"A bare filename can resolve in range against the wrong file and "
-                f"return plausible content.",
-                f"Qualify the path, e.g. `{candidates[0]}:{cite.lines}`",
+                f"`{cite.path}` is ambiguous — {len(candidates)} files match: "
+                f"{shown}{more}. A bare filename can resolve in range against "
+                f"the wrong file and return plausible content.",
+                MANUAL + f"Qualify the path, e.g. `{example}:{cite.lines}`",
             )
         return (
             "broken",
             f"No file matching `{cite.path}` exists in the repository.",
-            "Correct the path, or drop the citation if the file is gone.",
+            MANUAL + "Correct the path, or drop the citation if the file is gone.",
         )
 
-    body = target.read_text(errors="replace").splitlines()
+    try:
+        body = target.read_text(errors="replace").splitlines()
+    except OSError as exc:
+        # `--cached` lists index entries, so a file deleted from the worktree
+        # but not yet staged resolves here and then fails to open. Uncaught,
+        # one such file aborted the entire citation pass with a traceback.
+        return (
+            "broken",
+            f"`{cite.path}` is tracked by git but cannot be read ({exc.strerror}).",
+            MANUAL + "Restore the file, or drop the citation if it was deleted.",
+        )
+
     numbers = cite.numbers()
 
     # Line 0 is not a line. Left alone, `body[0 - 1]` is `body[-1]` -- Python
@@ -256,12 +373,12 @@ def check(cite: Citation, repo: Path) -> tuple[str, str, str]:
     # line of the file and report ok. A citation that checks the wrong line
     # and passes is worse than one that is merely stale.
     if any(n < 1 for n in numbers):
-        return ("broken", "Line numbers start at 1.", "Use a real line number.")
+        return ("broken", "Line numbers start at 1.", MANUAL + "Use a real line number.")
     if not numbers:
         return (
             "broken",
             f"`{cite.lines}` is an empty or reversed line range, so it names nothing.",
-            "Write the range low-to-high.",
+            MANUAL + "Write the range low-to-high.",
         )
 
     beyond = [n for n in numbers if n > len(body)]
@@ -269,7 +386,7 @@ def check(cite: Citation, repo: Path) -> tuple[str, str, str]:
         return (
             "broken",
             f"`{cite.path}` has {len(body)} lines; the citation names line {beyond[0]}.",
-            "Re-point the citation, or drop the line number and name the symbol.",
+            MANUAL + "Re-point the citation, or drop the line number and name the symbol.",
         )
 
     if cite.anchor is None:
@@ -283,7 +400,7 @@ def check(cite: Citation, repo: Path) -> tuple[str, str, str]:
         return (
             "broken",
             "The anchor is empty, so it asserts nothing about the line.",
-            "Name the symbol or phrase the line is expected to contain.",
+            MANUAL + "Name the symbol or phrase the line is expected to contain.",
         )
 
     at = [n for n, text in enumerate(body, start=1) if want in _flat(text)]
@@ -292,7 +409,7 @@ def check(cite: Citation, repo: Path) -> tuple[str, str, str]:
         return (
             "broken",
             f"`{cite.anchor}` does not appear anywhere in `{cite.path}`.",
-            "Re-anchor the citation to something the file actually contains.",
+            MANUAL + "Re-anchor the citation to something the file actually contains.",
         )
 
     # Uniqueness is the property that makes an anchor evidence, and it is
@@ -310,7 +427,7 @@ def check(cite: Citation, repo: Path) -> tuple[str, str, str]:
             f"{', ...' if len(at) > 5 else ''}), so it identifies no single "
             f"line — if the code moves, a different one of them lands at "
             f"{cite.lines} and the citation still passes.",
-            "Extend the anchor until it is unique in the file.",
+            MANUAL + "Extend the anchor until it is unique in the file.",
         )
 
     if at[0] in numbers:

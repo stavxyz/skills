@@ -45,7 +45,7 @@ Validates a **spec or plan** markdown file against the current `HEAD` of its git
   `driver.py:73` (`state_mod.load`)
   ```
 
-  — it asserts the cited lines contain that symbol and reports the corrected line number when they do not. Anchors are opt-in, so it can be turned on against existing documents without a mass rewrite; an unanchored citation is `unverifiable`, not a finding, and path resolution, ambiguity, and past-end-of-file are checked either way.
+  — it asserts that symbol is unique in the file and sits on a cited line, and reports the line it is really on when it does not. Uniqueness is measured rather than approximated by a minimum anchor length: `return None` is eleven characters and identifies nothing. Anchors are opt-in, so it can be turned on against existing documents without a mass rewrite; an unanchored citation is `unverifiable`, not a finding, and path resolution, ambiguity, and past-end-of-file are checked either way.
 - **fact-check** — a `general-purpose` subagent verifying claims the spec makes about existing code (paths, symbols, behavior) against the real codebase.
 - **solid-hygiene** — a `general-purpose` subagent auditing the design direction for SOLID/hygiene problems, flagging anything **net-negative** (a change that would make the codebase worse).
 

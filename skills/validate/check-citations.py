@@ -18,14 +18,33 @@ declare what it expects to find:
     `driver.py:73` (`state_mod.load`)
 
 Line number for precision, because prose often points at a block rather than a
-symbol. Anchor for verifiability. When the anchor is present we assert the
-cited lines contain it and, on failure, grep the file and report the CORRECTED
-line -- so the fix is mechanical rather than an investigation.
+symbol. Anchor for verifiability. When the anchor is present we assert it is
+UNIQUE in the file and sits on a cited line; on failure we report the line it
+is really on, so the fix is mechanical rather than an investigation.
+
+Uniqueness is the property that makes an anchor evidence, and it is measured
+rather than approximated by a minimum length. A length floor gets this wrong in
+both directions: it rejects a two-character anchor that happens to be unique
+(which verifies fine) and accepts `return None`, which appears everywhere and
+identifies nothing -- so once the cited code moves, a different `return None`
+sits at the cited line and the citation still passes.
+
+An anchor must sit on the citation's own line. Allowing it to wrap would catch
+the reflowed case, but would equally bind an ordinary parenthetical that merely
+follows an unanchored citation -- failing correct text for something it never
+opted into. Between the two errors, the false negative is the safe one: it is
+visible in the coverage tally, where a false failure just teaches people to
+stop reading the output.
 
 A citation with no anchor is `unverifiable`, not a finding. That is what makes
 this adoptable: anchors arrive as documents are touched, with no mass rewrite,
 and the check still catches what it can see without one -- a path that does not
-resolve, an ambiguous bare filename, and a line past the end of the file.
+resolve, an ambiguous bare filename, a line past the end of the file, and a
+reversed range that names no lines at all.
+
+Paths resolve against `git ls-files`, not a filesystem walk, so what counts as
+source is the repository's own `.gitignore` rather than a denylist here that
+would always be missing an entry.
 
 Output is validate's own finding format, so `validate` parses these with the
 same code that parses its two reviewers and applies them with the same
@@ -41,37 +60,32 @@ from __future__ import annotations
 
 import argparse
 import re
+import subprocess
 import sys
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
-
-# Shorter than this, an anchor matches too much to be evidence. `R` matches
-# almost every line, so it would "verify" while checking nothing -- an
-# assertion too weak to fail, inside the mechanism built to prevent exactly
-# that.
-MIN_ANCHOR = 3
-
-# Directories and copies that are not source. A bare `cli.py:79` matched
-# twelve files once a `.venv` was in scope, and `build/lib/` shadows every
-# module in `src/`, so "ambiguous" would report copies of a file rather than a
-# real choice between two places a reader might look.
-NOT_SOURCE = frozenset({
-    ".git", ".venv", "venv", "build", "dist", "node_modules", "__pycache__",
-    ".mypy_cache", ".pytest_cache", ".ruff_cache", "site-packages", ".tox",
-    # Worktrees live here. Without it, a repo with `.claude/worktrees/<name>/`
-    # reports every one of its own files as an ambiguous duplicate of itself.
-    ".claude",
-})
 
 # `path.ext:12`, `:12-34`, `:12,34`, each optionally followed by an anchor in
 # its own backticks. Bare `:12-34` continuations bind to the nearest preceding
 # named file -- a real form in these documents, and one a naive sweep misses,
 # undercounting by more than half.
-# `\s*` spans a NEWLINE, and must: prose wraps, so an anchor routinely lands
-# on the line after its citation. Matching per-line treated those as
-# unanchored -- silently downgrading a checkable citation to `unverifiable`,
-# a false negative concentrated exactly where paragraphs are reflowed.
-_ANCHOR = r"(?:\s*\(`(?P<anchor>[^`\n]+)`\))?"
+#
+# `[ \t]*`, NOT `\s*`: the anchor must sit on the citation's own line. Letting
+# it span a newline does catch the citation whose anchor wrapped in reflowed
+# prose -- but it also binds an ordinary parenthetical that merely follows a
+# citation, so a CORRECT unanchored citation fails demanding text it never
+# opted into:
+#
+#     The three phases are `SKILL.md:1`
+#     (`alpha`), then beta, then gamma.
+#
+# Markdown offers no signal separating that from a genuine wrap, so one of the
+# two errors is unavoidable. The false negative is the safe direction: a
+# wrapped anchor degrades to `unverifiable`, which is visible in the coverage
+# tally and fixed by joining the line. A false failure on correct text is what
+# teaches people to stop reading the output.
+_ANCHOR = r"(?:[ \t]*\(`(?P<anchor>[^`\n]+)`\))?"
 _NAMED = re.compile(
     r"`(?P<path>[\w./-]+\.\w+):(?P<lines>\d+(?:[,-]\d+)*)`" + _ANCHOR
 )
@@ -104,6 +118,11 @@ def _blank_fences(text: str) -> str:
     return _FENCE.sub(
         lambda m: "".join(c if c == "\n" else " " for c in m.group(0)), text
     )
+
+
+def _flat(text: str) -> str:
+    """Whitespace collapsed, so indentation changes are not drift."""
+    return " ".join(text.split())
 
 
 @dataclass
@@ -161,36 +180,58 @@ def citations(doc: Path) -> list[Citation]:
     return found
 
 
-def resolve(path: str, repo: Path) -> tuple[Path | None, str | None, list[str]]:
-    """(file, error, candidates). A bare filename must be unambiguous.
+@lru_cache(maxsize=None)
+def tracked(repo: Path) -> tuple[str, ...]:
+    """Repo-relative paths git knows about: tracked, plus unignored new files.
+
+    Asking git instead of walking the filesystem is not an optimization, it is
+    the difference between an allowlist and a denylist. A walk needs a list of
+    directories to skip -- `.venv`, `build/lib` shadowing every module in
+    `src/`, `node_modules` -- and that list is definitionally incomplete. The
+    one that bit this checker was `.claude/worktrees/`: a repo whose own
+    worktrees live inside it reported every file as an ambiguous duplicate of
+    itself. `.gitignore` already names all of these, correctly, per repo.
+
+    `--others --exclude-standard` keeps files that are new but not ignored, so
+    a spec can cite a file added in the same change that has not been staged.
+    """
+    result = subprocess.run(
+        ["git", "-C", str(repo), "ls-files", "-z", "--cached", "--others",
+         "--exclude-standard"],
+        capture_output=True, text=True, check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"git ls-files failed in {repo}: {result.stderr.strip()}"
+        )
+    # A tuple, and cached: `resolve` is called once per citation, and a
+    # subprocess per citation turns a 100-citation document into 100 forks.
+    return tuple(name for name in result.stdout.split("\0") if name)
+
+
+def resolve(path: str, repo: Path) -> tuple[Path | None, list[str]]:
+    """(file, ambiguous_candidates). A bare filename must be unambiguous.
 
     The sharpest failure this catches: six `README.md:NN` citations meant a
     nested README, resolved IN RANGE against the repo-root one, and returned
     plausible content. A checker that follows the wrong file confidently is
     worse than no checker, so ambiguity is an error rather than a guess.
     """
-    direct = repo / path
-    if direct.is_file():
-        return direct, None, []
-    # Parts relative to the repo, never absolute: a checkout can itself live
-    # under a directory named in NOT_SOURCE (a git worktree under `.claude/`,
-    # for instance), and filtering on absolute parts would then exclude every
-    # file in the repository and report "no such file" for paths that exist.
+    # `/` + path, never a bare suffix: `bar.py` must not match `foo/mybar.py`.
     matches = sorted(
-        p for p in repo.rglob(Path(path).name)
-        if not NOT_SOURCE & set(p.relative_to(repo).parts) and str(p).endswith(path)
+        name for name in tracked(repo)
+        if name == path or name.endswith("/" + path)
     )
     if not matches:
-        return None, "no such file", []
+        return None, []
     if len(matches) > 1:
-        rel = [str(p.relative_to(repo)) for p in matches]
-        return None, f"ambiguous: {len(matches)} files match", rel
-    return matches[0], None, []
+        return None, matches
+    return repo / matches[0], []
 
 
 def check(cite: Citation, repo: Path) -> tuple[str, str, str]:
     """(verdict, reality, correction). Verdicts: ok, unverifiable, broken."""
-    target, error, candidates = resolve(cite.path, repo)
+    target, candidates = resolve(cite.path, repo)
     if target is None:
         if candidates:
             shown = ", ".join(f"`{c}`" for c in candidates[:4])
@@ -228,38 +269,58 @@ def check(cite: Citation, repo: Path) -> tuple[str, str, str]:
         return (
             "broken",
             f"`{cite.path}` has {len(body)} lines; the citation names line {beyond[0]}.",
-            f"Re-point the citation, or drop the line number and name the symbol.",
+            "Re-point the citation, or drop the line number and name the symbol.",
         )
 
     if cite.anchor is None:
         return ("unverifiable", "", "")
 
-    if len(cite.anchor.strip()) < MIN_ANCHOR:
+    # Compared with runs of whitespace collapsed, so re-indenting a block does
+    # not read as drift. Per line, because an anchor is evidence about ONE
+    # line -- that is what makes "it moved to line N" a mechanical correction.
+    want = _flat(cite.anchor)
+    if not want:
         return (
             "broken",
-            f"The anchor `{cite.anchor}` is {len(cite.anchor.strip())} characters, "
-            f"short enough to match almost any line — it verifies nothing.",
-            f"Use a distinctive anchor of {MIN_ANCHOR}+ characters.",
+            "The anchor is empty, so it asserts nothing about the line.",
+            "Name the symbol or phrase the line is expected to contain.",
         )
 
-    cited = "\n".join(body[n - 1] for n in numbers)
-    if cite.anchor in cited:
+    at = [n for n, text in enumerate(body, start=1) if want in _flat(text)]
+
+    if not at:
+        return (
+            "broken",
+            f"`{cite.anchor}` does not appear anywhere in `{cite.path}`.",
+            "Re-anchor the citation to something the file actually contains.",
+        )
+
+    # Uniqueness is the property that makes an anchor evidence, and it is
+    # measured rather than approximated by a length floor. A floor rejects a
+    # short anchor that happens to be unique (which verifies fine) and accepts
+    # a long one that appears forty times (which does not): `return None` is
+    # eleven characters and identifies nothing, so after the cited code moves,
+    # a different `return None` sits at the same line and the citation still
+    # "verifies". That is the failure this whole mechanism exists to prevent.
+    if len(at) > 1:
+        return (
+            "broken",
+            f"`{cite.anchor}` appears on {len(at)} lines of `{cite.path}` "
+            f"({', '.join(str(n) for n in at[:5])}"
+            f"{', ...' if len(at) > 5 else ''}), so it identifies no single "
+            f"line — if the code moves, a different one of them lands at "
+            f"{cite.lines} and the citation still passes.",
+            "Extend the anchor until it is unique in the file.",
+        )
+
+    if at[0] in numbers:
         return ("ok", "", "")
 
     # The point of the design: say where it moved to, so the fix is one edit.
-    elsewhere = [i for i, text in enumerate(body, start=1) if cite.anchor in text]
-    if elsewhere:
-        extra = "" if len(elsewhere) == 1 else f" (and {len(elsewhere) - 1} other lines)"
-        return (
-            "broken",
-            f"`{cite.anchor}` is at `{cite.path}:{elsewhere[0]}`{extra}, "
-            f"not at {cite.lines}.",
-            f"`{cite.path}:{elsewhere[0]}` (`{cite.anchor}`)",
-        )
     return (
         "broken",
-        f"`{cite.anchor}` does not appear anywhere in `{cite.path}`.",
-        "Re-anchor the citation to something the file actually contains.",
+        f"`{cite.anchor}` is at `{cite.path}:{at[0]}`, not at {cite.lines}.",
+        f"`{cite.path}:{at[0]}` (`{cite.anchor}`)",
     )
 
 
@@ -286,8 +347,6 @@ def main() -> int:
     if args.repo_root:
         repo = Path(args.repo_root).resolve()
     else:
-        import subprocess
-
         result = subprocess.run(
             ["git", "-C", str(doc.parent), "rev-parse", "--show-toplevel"],
             capture_output=True, text=True, check=False,
@@ -296,6 +355,12 @@ def main() -> int:
             print("check-citations: not in a git repository", file=sys.stderr)
             return 2
         repo = Path(result.stdout.strip())
+
+    try:
+        tracked(repo)
+    except RuntimeError as exc:
+        print(f"check-citations: {exc}", file=sys.stderr)
+        return 2
 
     tally = {"ok": 0, "unverifiable": 0, "broken": 0}
     blocks: list[str] = []

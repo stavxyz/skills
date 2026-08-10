@@ -3,10 +3,10 @@
 #
 # The checker's failure mode is the quiet one: a citation it reports as
 # verified while it actually compared nothing. `:0` indexing from the end of
-# the file, a reversed range that iterates zero times, a one-character anchor
-# that matches every line — each of those returns "ok" and each of them checks
-# nothing. So this test asserts the VERDICT for one citation per class, not
-# just that the script exits 0.
+# the file, a reversed range that iterates zero times, an anchor that appears
+# on forty lines — each of those returns "ok" and each of them checks nothing.
+# So this test asserts the VERDICT for one citation per class, not just that
+# the script exits 0.
 #
 # `tests/validate-fixtures/fixture-citations.md` carries one citation per
 # class, at the line numbers asserted below. Editing that file means updating
@@ -50,8 +50,8 @@ want_total=$(grep -oE '`[A-Za-z0-9_./-]+\.[a-z]+:[0-9]+`' "$FIXTURE" | wc -l | t
 got_total=$(printf '%s' "$OUT" | sed -n 's/^<!-- citations: \([0-9]*\) found.*/\1/p')
 report "counts every citation in the fixture" "$want_total" "$got_total"
 
-report "one verified, one unverifiable, six broken" \
-  "1 verified, 1 unverifiable, 6 broken" \
+report "one verified, two unverifiable, six broken" \
+  "1 verified, 2 unverifiable, 6 broken" \
   "$(printf '%s' "$OUT" | sed -n 's/^<!-- citations: [0-9]* found, \(.*\) -->/\1/p')"
 
 # --- per-class verdicts ---------------------------------------------------
@@ -65,36 +65,52 @@ finding_at() {
 }
 
 report "an anchored citation that matches is NOT a finding" \
-  "" "$(finding_at 12 "$STRICT")"
+  "" "$(finding_at 15 "$STRICT")"
 
 report "a moved anchor reports where it moved TO" \
   'usr/bin/env` is at `skills/polish-pr/wait-for-pr-checks.sh:1`, not at 2.' \
-  "$(finding_at 17 "$OUT" | sed 's/^`//')"
+  "$(finding_at 21 "$OUT" | sed 's/^`//')"
 
 report "a line past EOF names the real length" \
   "skills/validate/SKILL.md\` has $(wc -l < "$REPO_ROOT/skills/validate/SKILL.md" | tr -d ' ') lines; the citation names line 99999." \
-  "$(finding_at 22 "$OUT" | sed 's/^`//')"
+  "$(finding_at 25 "$OUT" | sed 's/^`//')"
 
 report "a path that does not resolve is a finding" \
   "No file matching \`skills/validate/does-not-exist.md\` exists in the repository." \
-  "$(finding_at 27 "$OUT")"
+  "$(finding_at 30 "$OUT")"
 
 report "an ambiguous bare filename is a finding, not a guess" \
   "yes" \
-  "$(case "$(finding_at 31 "$OUT")" in *"is ambiguous"*) echo yes ;; *) echo no ;; esac)"
+  "$(case "$(finding_at 34 "$OUT")" in *"is ambiguous"*) echo yes ;; *) echo no ;; esac)"
 
-# The three that would silently "verify" while comparing nothing.
-report "a one-character anchor verifies nothing" \
+# Uniqueness is MEASURED, not approximated by a length floor: this anchor is
+# 14 characters and still identifies nothing, and the finding must name every
+# line it is on so the author can see why. The expected line numbers come from
+# grep rather than being hardcoded — an independent oracle, and one that does
+# not go stale the next time SKILL.md is edited.
+dupe_lines=$(grep -n 'OVERLOAD_TOTAL' "$REPO_ROOT/skills/validate/SKILL.md" \
+  | cut -d: -f1 | paste -sd, - | sed 's/,/, /g')
+dupe_count=$(grep -c 'OVERLOAD_TOTAL' "$REPO_ROOT/skills/validate/SKILL.md")
+report "a non-unique anchor names every line it is on" \
   "yes" \
-  "$(case "$(finding_at 37 "$OUT")" in *"verifies nothing"*) echo yes ;; *) echo no ;; esac)"
+  "$(case "$(finding_at 40 "$OUT")" in
+       *"appears on $dupe_count lines"*"($dupe_lines)"*) echo yes ;; *) echo no ;;
+     esac)"
 
 report "line 0 does not silently read the last line" \
   "Line numbers start at 1." \
-  "$(finding_at 41 "$OUT")"
+  "$(finding_at 47 "$OUT")"
 
 report "an unanchored citation is a finding only under --strict" \
   "|carries no anchor" \
-  "$(finding_at 46 "$OUT")|$(case "$(finding_at 46 "$STRICT")" in *"nothing records what"*) echo "carries no anchor" ;; *) echo "MISSING" ;; esac)"
+  "$(finding_at 52 "$OUT")|$(case "$(finding_at 52 "$STRICT")" in *"nothing records what"*) echo "carries no anchor" ;; *) echo "MISSING" ;; esac)"
+
+# An anchor on the NEXT line is not this citation's anchor. Binding across the
+# newline would fail correct unanchored citations that happen to be followed
+# by a parenthetical — see the `[ \t]*` comment in the checker.
+report "a wrapped anchor is unverifiable, not bound" \
+  "|carries no anchor" \
+  "$(finding_at 57 "$OUT")|$(case "$(finding_at 57 "$STRICT")" in *"nothing records what"*) echo "carries no anchor" ;; *) echo "MISSING" ;; esac)"
 
 # --- reversed range, checked directly -------------------------------------
 # Not in the fixture: a reversed range in a checked-in document would be a
@@ -108,6 +124,36 @@ report "a reversed range compares nothing, and says so" \
   "$(case "$(python3 "$CHECKER" "$TMP/reversed.md" --repo-root "$REPO_ROOT")" in
        *"empty or reversed line range"*) echo yes ;; *) echo no ;;
      esac)"
+
+# The reversed range must be caught WITHOUT an anchor too — the empty-range
+# check has to run before the anchor branch, or an unanchored `:58-42` sails
+# through every check that follows.
+printf '`skills/validate/SKILL.md:58-42` with no anchor at all.\n' > "$TMP/rev-bare.md"
+report "a reversed range is caught with no anchor present" \
+  "yes" \
+  "$(case "$(python3 "$CHECKER" "$TMP/rev-bare.md" --repo-root "$REPO_ROOT")" in
+       *"empty or reversed line range"*) echo yes ;; *) echo no ;;
+     esac)"
+
+# --- the false positive that same-line anchoring exists to prevent ---------
+# A CORRECT unanchored citation followed by an ordinary parenthetical. If the
+# anchor pattern spans newlines, this fails demanding text it never opted into
+# — the error that teaches people to stop reading the output.
+printf 'The three phases are `skills/validate/SKILL.md:1`\n(`alpha`), then beta, then gamma.\n' \
+  > "$TMP/parenthetical.md"
+report "a following parenthetical is not bound as an anchor" \
+  "0 broken" \
+  "$(python3 "$CHECKER" "$TMP/parenthetical.md" --repo-root "$REPO_ROOT" \
+     | sed -n 's/.*unverifiable, \([0-9]* broken\) -->/\1/p')"
+
+# --- resolution comes from git, so ignored paths are never candidates -----
+# The denylist this replaced could not name every non-source directory; the
+# one that bit it was this repo's own `.claude/worktrees/`, which made every
+# file an ambiguous duplicate of itself.
+report "gitignored paths are not resolution candidates" \
+  "0" \
+  "$(git -C "$REPO_ROOT" ls-files --cached --others --exclude-standard \
+     | grep -c '^\.claude/' || true)"
 
 # --- fenced code blocks -----------------------------------------------------
 # Two properties, and the second is the one that fails quietly: blanking the

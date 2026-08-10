@@ -104,6 +104,20 @@ samples name illustrative paths rather than asserting anything about the
 repository — including, unavoidably, the example two paragraphs above. Inline
 citations in prose are checked.
 
+**The anchor must sit on the citation's own line.** A citation whose anchor
+wrapped onto the next line is reported `unverifiable` rather than checked. This
+is deliberate: binding across the newline would also bind an ordinary
+parenthetical that merely follows an unanchored citation, failing a correct
+citation for text it never opted into. The missed check is visible in the
+coverage tally and fixed by joining the line; a false failure is what teaches
+an operator to stop reading the output.
+
+**Paths resolve against `git ls-files`**, including files that are new but not
+ignored, so what counts as source is the repository's own `.gitignore`. A
+worktree checked out inside the repo, a `.venv`, or a `build/lib` shadowing
+every module in `src/` therefore never enters the candidate set for an
+ambiguity check.
+
 **Anchors are opt-in, and that is the adoption path.** A citation with no
 anchor is reported as `unverifiable`, not as a finding, so this can be turned
 on against documents written before it existed without producing a wall of

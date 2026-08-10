@@ -42,6 +42,11 @@ and the check still catches what it can see without one -- a path that does not
 resolve, an ambiguous bare filename, a line past the end of the file, and a
 reversed range that names no lines at all.
 
+One verdict is neither: a citation into a submodule with no contents checked
+out -- what a plain `git clone` leaves behind -- is `unverifiable` and says so,
+because the citation may well be correct and nothing here can tell. Reporting
+it as a missing file would advise deleting a correct citation.
+
 Paths resolve against `git ls-files`, not a filesystem walk, so what counts as
 source is the repository's own `.gitignore` rather than a denylist here that
 would always be missing an entry.
@@ -186,8 +191,9 @@ def citations(doc: Path) -> list[Citation]:
     That ordering is what the interleave needs: a bare `:47-49` binds to the
     nearest PRECEDING named file, so running all named matches before all bare
     ones would let one bind to a file named later on the same line. A bare
-    citation with no preceding named file is dropped, since there is nothing
-    to resolve it against.
+    citation with no preceding named file gets an empty `path` and is reported
+    by `check` -- dropping it would hide it from the tally, which is the only
+    coverage signal the operator sees.
     """
     text = _blank_fences(doc.read_text(errors="replace"))
     matches = sorted(
@@ -231,7 +237,10 @@ MANUAL = "[manual] "
 
 @lru_cache(maxsize=None)
 def tracked(repo: Path) -> tuple[str, ...]:
-    """Repo-relative paths git knows about: tracked, plus unignored new files.
+    """Repo-relative paths git knows about.
+
+    Tracked files, the contents of initialised submodules, and files that are
+    new but not ignored.
 
     Asking git instead of walking the filesystem is not an optimization, it is
     the difference between an allowlist and a denylist. A walk needs a list of
@@ -289,11 +298,29 @@ def normalise(path: str, repo: Path) -> tuple[str, bool]:
     if path.startswith("./"):
         return path[2:], True
     if path.startswith("/"):
-        try:
-            return str(Path(path).relative_to(repo)), True
-        except ValueError:
-            pass  # Genuinely outside the repo; the miss below is correct.
+        for candidate in (Path(path), Path(path).resolve()):
+            try:
+                return str(candidate.relative_to(repo)), True
+            except ValueError:
+                continue
+        # Genuinely outside the repo; the miss below is the correct answer.
     return path, False
+
+
+@lru_cache(maxsize=None)
+def gitlinks(repo: Path) -> tuple[str, ...]:
+    """Submodule mount points, from the index's mode-160000 entries."""
+    result = subprocess.run(
+        ["git", "-C", str(repo), "ls-files", "--stage", "-z"],
+        capture_output=True, text=True, check=False,
+    )
+    if result.returncode != 0:
+        return ()
+    return tuple(
+        entry.split("\t", 1)[1]
+        for entry in result.stdout.split("\0")
+        if entry.startswith("160000 ") and "\t" in entry
+    )
 
 
 def resolve(path: str, repo: Path) -> tuple[Path | None, list[str]]:
@@ -347,6 +374,23 @@ def check(cite: Citation, repo: Path) -> tuple[str, str, str]:
                 f"{shown}{more}. A bare filename can resolve in range against "
                 f"the wrong file and return plausible content.",
                 MANUAL + f"Qualify the path, e.g. `{example}:{cite.lines}`",
+            )
+        # An uninitialised submodule is what a plain `git clone` leaves
+        # behind, and its contents are simply absent from the index. Saying
+        # "no such file" there advises deleting a correct citation.
+        inside = next(
+            (g for g in gitlinks(repo)
+             if normalise(cite.path, repo)[0].startswith(g + "/")),
+            None,
+        )
+        if inside is not None:
+            return (
+                "unverifiable",
+                f"`{inside}` is a submodule with no contents checked out, so "
+                f"`{cite.path}` cannot be read. The citation may well be "
+                f"correct; nothing here can tell.",
+                MANUAL + f"Run `git submodule update --init {inside}` and "
+                f"re-run, or ignore if submodule contents are out of scope.",
             )
         return (
             "broken",
@@ -493,6 +537,20 @@ def main() -> int:
                 f"**Reality:** {reality}\n"
                 f"**Suggested correction:** {correction}\n"
             )
+        elif verdict == "unverifiable" and reality:
+            # An `unverifiable` that CARRIES text is a real obstruction the
+            # operator can act on -- today, an unchecked-out submodule. It is
+            # reported unconditionally: `--strict` governs whether merely
+            # unanchored citations are noise, not whether the checker may stay
+            # silent about something it could not read.
+            blocks.append(
+                f"### Low: citation `{cite.path}:{cite.lines}` could not be "
+                f"checked\n"
+                f"**Location:** {doc.name}:{cite.line_no}\n"
+                f"**Claim:** {cite.raw}\n"
+                f"**Reality:** {reality}\n"
+                f"**Suggested correction:** {correction}\n"
+            )
         elif verdict == "unverifiable" and args.strict:
             blocks.append(
                 f"### Low: citation `{cite.path}:{cite.lines}` carries no anchor\n"
@@ -500,7 +558,9 @@ def main() -> int:
                 f"**Claim:** {cite.raw}\n"
                 f"**Reality:** The path and line resolve, but nothing records what "
                 f"the line is expected to contain, so drift cannot be detected.\n"
-                f"**Suggested correction:** {cite.raw} (`SYMBOL`)\n"
+                f"**Suggested correction:** {MANUAL}{cite.raw} "
+                f"(`SYMBOL` — replace with the real symbol; applying this "
+                f"verbatim would write the placeholder into the document)\n"
             )
 
     total = sum(tally.values())

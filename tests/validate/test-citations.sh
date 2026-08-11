@@ -459,25 +459,53 @@ report "the emitted Claim is the document's own bytes, two spaces and all" \
 # The predecessor rule ("reduce any leading path to its basename") passed review
 # three times and could not match ANY real reviewer output, because the noise is
 # on both ends. These strings are verbatim from the run that caught it.
-loc=$(printf '%s' "$OUT" | sed -n 's/^\*\*Location:\*\* //p' | head -1)
-case "$loc" in
-  *[!/]:[0-9]*) pass=$((pass + 1)) ;;
-  *) fail=$((fail + 1))
-     printf 'FAIL: the checker must emit a <file>:<line> Location\n  got: %s\n' "$loc" ;;
-esac
-
-key() {  # last <filename>:<line> in the string, reduced to basename:line
-  printf '%s' "$1" | grep -oE '[A-Za-z0-9_.-]+\.[a-z]+:[0-9]+' | tail -1
+# F10: `key()` is a faithful transcription of the documented rule, INCLUDING
+# its fallback ("the key is the whole string, trimmed"). An earlier version
+# echoed nothing on no-match, which silently made every section-only location
+# equal to every other — universal false-matching, the exact opposite of the
+# property the assertion below claims.
+SPEC_BASE="fixture-citations.md"
+key() {  # the <file>:<line> pair naming the DOCUMENT, else the whole string
+  local hit
+  # The character class excludes `/`, so a match is already `basename:line` —
+  # the rule's "reduced to basename:line" needs no separate step here. Said
+  # explicitly because a redundant `${hit##*/}` looked like coverage and was a
+  # no-op: mutating it away changed nothing.
+  hit=$(printf '%s' "$1" | grep -oE '[A-Za-z0-9_.-]+:[0-9]+' \
+        | grep -E "^${SPEC_BASE//./\\.}:[0-9]+$" | tail -1)
+  if [ -n "$hit" ]; then printf '%s' "$hit"; else printf '%s' "$1"; fi
 }
-report "the location key collapses the checker and fact-check spellings" \
-  "same" \
-  "$([ "$(key 'spec.md:17')" = "$(key '`docs/superpowers/specs/spec.md:17` (Components)')" ] \
-     && echo same || echo different)"
+
+# F11: assert extractability THROUGH the helper. The previous glob accepted
+# `Makefile:12`, from which the helper extracts nothing.
+loc=$(printf '%s' "$OUT" | sed -n 's/^\*\*Location:\*\* //p' | head -1)
+report "the checker emits a Location the key can be extracted from" \
+  "$loc" "$(key "$loc")"
+
+# F8: comparing two key() outputs for equality passed when BOTH were empty —
+# `[ "" = "" ]`. A dead regex satisfied it. Assert each side against the
+# literal instead, which is the fourth instance of this anti-pattern in this
+# PR series and the first one introduced by the change that documents it.
+report "the checker spelling keys to basename:line" \
+  "$SPEC_BASE:17" "$(key "$SPEC_BASE:17")"
+report "the fact-check spelling keys to the same thing" \
+  "$SPEC_BASE:17" "$(key "\`docs/superpowers/specs/$SPEC_BASE:17\` (Components)")"
 report "...and is not fooled by a path component that looks like the file" \
-  "spec.md:17" \
-  "$(key '`docs/spec.md.bak/spec.md:17` (Components)')"
-report "a section-only location yields no key, so it cannot false-match" \
-  "" \
+  "$SPEC_BASE:17" "$(key "\`docs/$SPEC_BASE.bak/$SPEC_BASE:17\` (Components)")"
+
+# F1/F9: the rule keys to the pair naming the DOCUMENT, never to a source file
+# the finding also cites. Taking the last pair instead — the obvious reading —
+# keys a design finding to `driver.py:42`, which leaves dedupe dead for the
+# SOLID reviewer and collapses findings its own template forbids collapsing.
+# Nothing exercised this before; `head -1` vs `tail -1` survived the suite.
+report "a trailing source-file citation does not capture the key" \
+  "$SPEC_BASE:17" "$(key "$SPEC_BASE:17 (see src/app/driver.py:42)")"
+report "a section location that cites a source file keys to the whole string" \
+  '"Components" (src/app/driver.py:42)' \
+  "$(key '"Components" (src/app/driver.py:42)')"
+
+report "a section-only location keys to itself, matching only an identical one" \
+  '"Components" (lines 17-22)' \
   "$(key '"Components" (lines 17-22)')"
 
 # --- the checker's own docs are not exempt --------------------------------
@@ -497,7 +525,7 @@ report "skills/validate/*.md carry no broken citations" \
 # A conditional case (the submodule one) means "0 failed" could otherwise hide
 # a silently smaller run. Counted outside `report` so this check cannot count
 # itself; bump it deliberately when you add an assertion.
-EXPECTED_ASSERTIONS=68
+EXPECTED_ASSERTIONS=71
 ran=$((pass + fail))
 if [ "$ran" -ne "$EXPECTED_ASSERTIONS" ]; then
   fail=$((fail + 1))

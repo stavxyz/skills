@@ -128,7 +128,17 @@ flag, so a workstation or CI image that wants hardening everywhere sets
 `CHECK_CITATIONS_STRICT=1` (in `~/.claude/settings.json` under `env`, or the
 shell) and every run is strict without changing this command. `--strict` and
 `--no-strict` override it for a single invocation; an unset, empty, or
-unrecognised value means off, so a typo cannot silently turn the gate on. If
+unrecognised value means off, so a typo cannot silently turn the gate on.
+
+**Setting it machine-wide is not a neutral convenience.** Every unanchored
+citation then gates, so on a repository whose documents predate anchors,
+`validate` will not clean-bless and will not auto-continue until they are
+anchored — measured on one repository, 1 of 13 documents gated by default and 13
+of 13 under a machine-wide default. That is the intended effect of a hardening
+policy; it should be a decision rather than a surprise. Note also that citation
+findings count toward `TOTAL_COUNT`, so a document with more than
+`OVERLOAD_TOTAL` citations will abort the run with "spec drifted significantly"
+— the wrong prescription for citations that merely lack anchors. If
 the operator asks for one non-strict run on a machine where it is defaulted on,
 add `--no-strict`.
 
@@ -192,9 +202,11 @@ suggested_direction: "..."              # solid-hygiene only
 
 5. **Per-finding fallback.** If a required field for a given finding is missing/malformed, surface only that block as raw text to the operator at report time; other findings parse normally. Per-finding fallback rather than whole-output fallback prevents one malformed reviewer block from poisoning the entire run.
 
-   **Severity carries the gate for citation findings.** `Important` means the checker PROVED the citation wrong — a path that does not resolve, a line past the end of the file, an anchor absent or at a different line, line zero, a reversed range. `Low` means it could not DETERMINE the answer — an ambiguous path, a non-unique anchor, an unreadable submodule, and (under `--strict`) a citation with no anchor at all. Only `Important` ones become clean-bless caveats. Under `--strict` the checker emits the second class at `Important` too, so everything it could not verify gates.
-
 6. **`CITATION_RAW` parses with the same code.** The checker emits the fact-check block shape (`### Important: …` with `Location`, `Claim`, `Reality`, `Suggested correction`), so run it through steps 1-5 unchanged and tag the resulting records `source: citations`. It also emits `### Low:` blocks, which parse identically: unconditionally for every citation it could not determine (ambiguous path, non-unique anchor, unreadable submodule), and under `--strict` these are promoted to `### Important:` along with every unanchored citation.
+
+   **Severity carries the gate for citation findings.** `Important` means the checker PROVED the citation wrong — a path that does not resolve, a line past the end of the file, an anchor absent or at a different line, line zero, a reversed range. `Low` means it could not DETERMINE the answer — an ambiguous path, an anchor identifying no single line, an unreadable submodule, a tracked file it could not open. Only `Important` findings become clean-bless caveats.
+
+   Under `--strict` there are no `Low` citation findings at all: every could-not-determine finding is emitted at `Important`, and every citation carrying no anchor is emitted at `Important` too. So everything the checker could not verify gates.
 
 Combine all three sources' parsed findings into a single list, `FINDINGS`.
 
@@ -272,11 +284,22 @@ Two findings count as overlapping if:
 2. Their `location` strings match **under the location key** defined above, AND
 3. The Levenshtein-style similarity between their `claim`/`concern` strings is ≥ `DEDUPE_SIMILARITY` (default 0.8).
 
-**A `citations` finding always wins its pair.** Where a `citations` finding
-overlaps one from either reviewer, keep the `citations` one and log the other in
+**An `Important` `citations` finding always wins its pair.** Where one overlaps
+a finding from either reviewer, keep the `citations` one and log the other in
 `DEDUPED_FINDINGS` regardless of which reads as more specific. It carries a line
 number read off disk this run; the reviewer's carries one the reviewer arrived
-at. Applying both would also mean two Edits against the same text, the second of
+at.
+
+**A `Low` `citations` finding never wins, and never displaces.** That
+justification is exactly inverted for it: a could-not-determine finding carries
+no line read off disk — it records that the checker DECLINED to look. A reviewer
+that did resolve the same location has strictly more information. Discarding the
+reviewer's finding would drop a real, mechanically fixable drift AND leave
+nothing to gate on, since `Low` citation findings are not clean-bless caveats —
+so a spec would auto-continue into planning with the drift unfixed and
+unmentioned. Keep both: apply the reviewer's finding, and report the `citations`
+one under "Manual citations:" as the note that the path could not be resolved
+automatically. Applying both would also mean two Edits against the same text, the second of
 which fails to match. Overlap here uses the same three conditions above.
 
 For each remaining overlapping pair, keep the "more specific" finding — defined as: the finding whose `claim`/`concern` text contains a named symbol (function name, type name, file path) wins over a finding with only vague references. If tied, the longer text wins. Discard the loser; log the discarded finding's text in a `DEDUPED_FINDINGS` list for the report.
@@ -299,7 +322,7 @@ For each contradictory pair, surface to the operator before triage. Call AskUser
 
 Compute:
 
-- `CI_COUNT` = number of findings with `severity in (Critical, Important)`, **excluding `source: citations`** (see the note under Tuning constants for why: they are all Important, and one renamed module can produce thirty, which would abort the run this pass exists to make cheap).
+- `CI_COUNT` = number of findings with `severity in (Critical, Important)`, **excluding `source: citations`** (see the note under Tuning constants for why: the `Important` ones are all mechanical one-line corrections, and one renamed module can produce thirty, which would abort the run this pass exists to make cheap).
 - `TOTAL_COUNT` = number of all findings (post-dedupe).
 
 If `CI_COUNT > OVERLOAD_CRITICAL_IMPORTANT` OR `TOTAL_COUNT > OVERLOAD_TOTAL`, abort before any edits. Report:
@@ -369,7 +392,7 @@ Apply findings in this order: **`source: citations` first**, then the reviewers'
 
 For each finding to apply (after gating resolutions), apply this loop:
 
-1. **Skip first, if the correction is marked.** If this is a `source: citations` finding whose `suggested_correction` begins with `[manual] `, add it to `MANUAL_FINDINGS`, make NO Edit, and move to the next finding — before step 2, so a `[manual]` finding can never be reclassified as superseded and slip past the `MANUAL_FINDINGS = 0` clean-bless caveat. This is a control-flow guard, not a formatting note — the text after the marker is an instruction to a human, and applying it would replace a citation with an English sentence.
+1. **Skip first, if the correction is marked.** If this is a `source: citations` finding whose `suggested_correction` begins with `[manual] `, add it to `MANUAL_FINDINGS`, make NO Edit, and move to the next finding — before step 2, so a `[manual]` finding can never be reclassified as superseded and slip past the `Important`-severity `MANUAL_FINDINGS` clean-bless caveat. This is a control-flow guard, not a formatting note — the text after the marker is an instruction to a human, and applying it would replace a citation with an English sentence.
 
 2. **Verify claim-text-in-spec.** Applies to findings carrying a `claim` (`fact-check` and `citations`); a `solid-hygiene` finding carries `concern` and no quoted text, so it skips to step 3. Read the spec content. Search for the exact `claim` string verbatim. If not found, decide WHY before classifying it:
 

@@ -42,10 +42,21 @@ and the check still catches what it can see without one -- a path that does not
 resolve, an ambiguous bare filename, a line past the end of the file, and a
 reversed range that names no lines at all.
 
-One verdict is neither: a citation into a submodule with no contents checked
-out -- what a plain `git clone` leaves behind -- is `unverifiable` and says so,
-because the citation may well be correct and nothing here can tell. Reporting
-it as a missing file would advise deleting a correct citation.
+`broken` and `unverifiable` divide on what the checker PROVED, not on how bad
+the citation looks. `broken` means it demonstrated the citation wrong: the path
+does not resolve, the line is past the end of the file, the anchor is absent or
+sits at a different line, the line number is zero, the range names nothing.
+`unverifiable` means it could not determine the answer -- a bare filename
+matching several files, an anchor identifying no single line, a submodule with
+no contents checked out, a tracked file it could not open, or simply no anchor
+at all. Those citations may well be correct.
+
+Severity carries that split: `broken` reports at `Important` and gates the
+caller's bless; `unverifiable`-with-a-reason reports at `Low` and does not.
+Measured on one repository, 55 of 57 findings were could-not-determine, so
+gating on them meant nothing ever passed -- and the two real ones were buried.
+`--strict` raises every could-not-determine finding to `Important`, which is
+where "every citation must resolve" belongs.
 
 Paths resolve against `git ls-files`, not a filesystem walk, so what counts as
 source is the repository's own `.gitignore` rather than a denylist here that
@@ -411,8 +422,11 @@ def check(cite: Citation, repo: Path) -> tuple[str, str, str]:
         # but not yet staged resolves here and then fails to open. Uncaught,
         # one such file aborted the entire citation pass with a traceback.
         return (
-            "broken",
-            f"`{cite.path}` is tracked by git but cannot be read ({exc.strerror}).",
+            "unverifiable",
+            f"`{cite.path}` is tracked by git but cannot be read "
+            f"({exc.strerror}), so the citation could not be checked. The most "
+            f"common cause is a file deleted from the worktree but not yet "
+            f"staged; the citation itself may well be correct.",
             MANUAL + "Restore the file, or drop the citation if it was deleted.",
         )
 
@@ -520,6 +534,9 @@ def main() -> int:
         "--no-strict",
         dest="strict",
         action="store_false",
+        default=None,  # order-independent: `store_false` otherwise defaults
+                       # True, and only the registration order of these two
+                       # arguments keeps that from turning the gate on.
         help="force non-strict for this run, overriding CHECK_CITATIONS_STRICT",
     )
     args = ap.parse_args()

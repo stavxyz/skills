@@ -125,7 +125,11 @@ anchor is reported as `unverifiable`, not as a finding, so this can be turned
 on against documents written before it existed without producing a wall of
 noise. Pass `--strict` to also emit those as Low findings — appropriate when
 the operator is deliberately hardening one document's citations, not as the
-default. Path resolution, ambiguity, and past-end-of-file are all checked with
+default. Note the consequence: `--strict` findings carry the `[manual] `
+marker, so under it a document with any unanchored citation gains a
+`MANUAL_FINDINGS` entry and will not clean-bless until every citation is
+anchored. That is the point of a hardening pass, but it is not the behaviour
+an operator expects from a flag described as "also report". Path resolution, ambiguity, and past-end-of-file are all checked with
 or without an anchor.
 
 ## Dispatch reviewers in parallel
@@ -180,7 +184,7 @@ suggested_direction: "..."              # solid-hygiene only
 
 5. **Per-finding fallback.** If a required field for a given finding is missing/malformed, surface only that block as raw text to the operator at report time; other findings parse normally. Per-finding fallback rather than whole-output fallback prevents one malformed reviewer block from poisoning the entire run.
 
-6. **`CITATION_RAW` parses with the same code.** The checker emits the fact-check block shape (`### Important: …` with `Location`, `Claim`, `Reality`, `Suggested correction`), so run it through steps 1-5 unchanged and tag the resulting records `source: citations`. Under `--strict` it also emits `### Low:` blocks; those parse identically.
+6. **`CITATION_RAW` parses with the same code.** The checker emits the fact-check block shape (`### Important: …` with `Location`, `Claim`, `Reality`, `Suggested correction`), so run it through steps 1-5 unchanged and tag the resulting records `source: citations`. It also emits `### Low:` blocks, which parse identically: under `--strict` for every unanchored citation, and **unconditionally** for a citation it could not read — today that means one inside a submodule with no contents checked out, whose correction is to run `git submodule update --init`.
 
 Combine all three sources' parsed findings into a single list, `FINDINGS`.
 
@@ -209,7 +213,7 @@ If two solid-hygiene findings (same source) share `location` and similar text, t
 
 Two findings count as contradictory if:
 
-1. They have different `source` — any two of `fact-check`, `solid-hygiene`, `citations` — AND
+1. One is `fact-check` and the other is `solid-hygiene`. **`citations` findings are excluded from this gate** — it exists to catch two reviewers disagreeing about an underlying premise, and a citation finding is a measurement rather than an opinion: it read the bytes at the cited line this run. A low-similarity citations finding sharing a location with a reviewer finding is two independent observations about one line, not a disagreement, and forcing a choice between them (the gate applies only the chosen finding) would discard one that is simply correct. Where they genuinely duplicate, the ≥ `DEDUPE_SIMILARITY` rule above already resolves it in the citation's favour. AND
 2. Their `location` strings match **under the location-matching rule** defined once under "Dedupe" above, AND
 3. The Levenshtein-style similarity between their `claim`/`concern` strings is **below** `DEDUPE_SIMILARITY` (so they're NOT duplicates) AND below 0.4 (low similarity — they're describing different concerns at the same spec location).
 
@@ -292,7 +296,7 @@ For each finding to apply (after gating resolutions), apply this loop:
 1. **Verify claim-text-in-spec.** Read the spec content. Search for the exact `claim` string verbatim. If not found:
    - The reviewer hallucinated a quote. Downgrade this finding to a Low-severity advisory.
    - Add to `HALLUCINATED_FINDINGS` list for the report.
-   - Skip the Edit — do NOT proceed to step 2 for this finding.
+   - Skip the Edit — do NOT proceed to step 2 or step 3 for this finding.
 2. **Skip first, if the correction is marked.** If this is a `source: citations` finding whose `suggested_correction` begins with `[manual] `, add it to `MANUAL_FINDINGS`, make NO Edit, and move to the next finding. This is a control-flow guard, not a formatting note — the text after the marker is an instruction to a human, and applying it would replace a citation with an English sentence.
 
 3. **Apply the Edit.** Use the Edit tool with:
@@ -304,7 +308,9 @@ For each finding to apply (after gating resolutions), apply this loop:
 
    - **Mechanical drift** (path moved, line range stale, function renamed): replace verbatim with the verified reality from the finding's `reality` field. No annotation needed.
 
-   - **`source: citations` findings** that reach this point (i.e. survived the step-2 guard, so their correction carries no `[manual] ` marker): the correction is a drop-in replacement for the `claim` text — in practice the anchor-moved verdict, whose correction is itself a citation. Apply it as mechanical drift, no annotation.
+   - **`source: citations` findings** that reach this point (i.e. survived the step-2 guard, so their correction carries no `[manual] ` marker): `old_string` = the `claim` text, `new_string` = the **`suggested_correction` verbatim**. No annotation.
+
+     **Not the `reality` field** — do not route these through the mechanical-drift bullet above. For a citation finding `reality` is prose explaining the drift (`` `usr/bin/env` is at `resolve-pr-remotes.sh:1`, not at 2. ``) while `suggested_correction` is the replacement citation (`` `resolve-pr-remotes.sh:1` (`usr/bin/env`) ``). Using `reality` here would write that sentence over the citation — the exact failure the `[manual]` marker exists to prevent, on the one verdict that both auto-applies and permits a clean bless.
 
      The marker is emitted by the checker rather than listed here on purpose. An exception list in this file is exactly what went stale the first time: it named a verdict the checker no longer had, and undercounted the ones needing a human. A new verdict added to the checker carries its own marker, so this rule does not need editing to stay correct.
 
@@ -341,7 +347,7 @@ For each finding in `FINDINGS` after triage:
      ```
 
 4. **`[manual]` citation findings:**
-   - No Edit was issued for these by design, so there is nothing to verify. Confirm only that each appears in the report's "Manual citations:" subsection — an unapplied finding that is also unreported is a silent drop.
+   - No Edit was issued for these by design, so there is nothing to verify. Confirm only that each is present in `MANUAL_FINDINGS`, which the Report step below is required to list under "Manual citations:" — an unapplied finding that is also unreported is a silent drop.
 
 5. **All other findings (advisory, mechanical, substantive, Critical fact-check applied):**
    - No verification needed; the Edit call either succeeded (the spec was modified) or threw (the run already aborted). Trust that the Edit happened.
@@ -369,7 +375,7 @@ If verification failed (any block fired), print:
 ```
 Findings:
   Critical:    <X> (fact-check: <A>, solid: <B>)
-  Important:   <X>
+  Important:   <X> (fact-check: <A>, solid: <B>, citations: <C>)
   Medium:      <X>
   Low:         <X>
   Nitpick:     <X>
@@ -385,6 +391,8 @@ Findings:
 Take the `Citations:` numbers from the `<!-- citations: … -->` comment on the first line of `CITATION_RAW`. Print the line even when all four numbers are zero: a run that found no citations and a run where the check never happened produce the same empty findings list, and only this line distinguishes them.
 
 **List every finding in `MANUAL_FINDINGS` under a "Manual citations:" subsection**, each with its `claim`, its `reality`, and its correction with the `[manual] ` prefix stripped. These were deliberately not applied as edits, so this subsection is the only place their text reaches the operator — count without list is a number the operator cannot act on.
+
+If any contradiction pairs were resolved at the contradiction gate, list them under a "Conflict resolutions:" subsection with the pair and the operator's choice.
 
 If any findings were deferred via Gate 1, list them under a "Deferred:" subsection with reasoning.
 If any findings hallucinated quotes (in `HALLUCINATED_FINDINGS`), list each with the original claim text and the reviewer's intended `reality` so the operator can manually triage.
@@ -445,7 +453,7 @@ A bless is **clean** only when the spec/plan is blessed AND every one of these c
 - Accepted net-negatives (`net_negative_remaining`, from Gate 2 `Accept`) = 0
 - Skipped Critical fact-checks (Gate 3 `Skip`, downgraded to advisory) = 0
 - Hallucinated findings (`HALLUCINATED_FINDINGS`) = 0
-- Unapplied citation findings (`MANUAL_FINDINGS`, the `[manual]` corrections surfaced rather than edited) = 0 — these are known-wrong citations that a human still has to fix. They are the one caveat class the skill deliberately declines to repair, so nothing downstream will catch them: without this line a spec with thirty broken citations blesses clean and auto-continues into planning with every one of them intact.
+- Unapplied citation findings (`MANUAL_FINDINGS`, the `[manual]` corrections surfaced rather than edited) = 0 — citations the checker could not repair on its own. Most are known-wrong; some are merely unreadable (a citation into an unchecked-out submodule may well be correct). They are the one caveat class the skill deliberately declines to repair, so nothing downstream will catch them: without this line a spec with thirty broken citations blesses clean and auto-continues into planning with every one of them intact.
 - Parse failures = 0 — counting BOTH classes from "Parse findings": a `### ` block whose heading failed the `^### (Critical|Important|Medium|Low|Nitpick):` match, AND any finding surfaced as raw text because a required field was missing/malformed
 - Reviewer contradictions that reached the contradiction gate ("Detect contradictions") = 0 — ANY operator resolution counts as a caveat, including picking a side (`Apply fact-check finding (skip SOLID)` / `Apply SOLID finding (skip fact-check)`), not only `Skip both — manual triage`. A triggered contradiction gate means the reviewers disagreed about an underlying premise and human judgment was required — that is less than maximal confidence regardless of how it was resolved.
 - `KIND` was determined by frontmatter, path, or content shape — NOT by the tie-break AskUserQuestion ("Detect kind" step 4). A tie-broken kind means the artifact's identity was itself ambiguous; do not auto-continue (especially into implementation) off a guess.

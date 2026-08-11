@@ -197,8 +197,18 @@ EXTRACTED from each, never by the raw strings and never by stripping a prefix:
 
 > **Location key** = the `<filename>:<line>` pair in the `location` string whose
 > basename equals the basename of `{spec_path}`, reduced to `basename:line`. If
-> several match, take the last. If none matches the document, the key is the
-> whole string, trimmed — not some other file's pair.
+> several match, take the last — they are all the document, so the choice only
+> affects which line wins, and a later mention is the more specific one. (A
+> tracked file elsewhere in the repo sharing the document's basename would also
+> match; that is the same basename ambiguity `check-citations.py` reports for
+> citations, and is rare enough in a `location` string to accept.) If none
+> matches the document, the key is the whole string, trimmed — not some other
+> file's pair.
+>
+> A location naming a RANGE keys to the range's first line — lines 17-22 of the
+> document key to line 17. Two findings on overlapping-but-unequal ranges
+> therefore do not match, which is a missed dedupe rather than a wrong merge:
+> the safe direction.
 >
 > Two findings match when their keys are equal. A `basename:line` key can never
 > equal a whole-string key, so a line-level finding never matches a
@@ -235,8 +245,8 @@ An earlier version of this rule said "reduce any leading path to its basename".
 That handled the directory prefix and nothing else, so the surrounding backticks
 and the trailing ` (Components)` survived and the keys never matched — the
 dedupe below could not fire at all, on any real reviewer output. The failure was
-silent and the consequence was not: see step 1, "Superseded claims", under
-"Edit the spec in place".
+silent and the consequence was not: see the **Superseded claims** bullet in
+step 2 of "Edit the spec in place".
 
 A `solid-hygiene` location naming a section rather than a line keys to that
 whole string. It therefore never matches a line-level key — a section-level
@@ -345,9 +355,13 @@ If `CURRENT_MTIME != INITIAL_MTIME`, abort with:
 
 After the first Edit call begins, validate's own writes will advance mtime — no further re-stats are meaningful.
 
+Apply findings in this order: **`source: citations` first**, then the reviewers'. Order matters because the supersession rule below drops whichever finding of a pair is reached second, and "a `citations` finding always wins its pair" would otherwise be reversed for every pair that dedupe does not cover (dedupe fires only at similarity ≥ `DEDUPE_SIMILARITY`; the band below it lands here instead).
+
 For each finding to apply (after gating resolutions), apply this loop:
 
-1. **Verify claim-text-in-spec.** Read the spec content. Search for the exact `claim` string verbatim. If not found, decide WHY before classifying it:
+1. **Skip first, if the correction is marked.** If this is a `source: citations` finding whose `suggested_correction` begins with `[manual] `, add it to `MANUAL_FINDINGS`, make NO Edit, and move to the next finding — before step 2, so a `[manual]` finding can never be reclassified as superseded and slip past the `MANUAL_FINDINGS = 0` clean-bless caveat. This is a control-flow guard, not a formatting note — the text after the marker is an instruction to a human, and applying it would replace a citation with an English sentence.
+
+2. **Verify claim-text-in-spec.** Applies to findings carrying a `claim` (`fact-check` and `citations`); a `solid-hygiene` finding carries `concern` and no quoted text, so it skips to step 3. Read the spec content. Search for the exact `claim` string verbatim. If not found, decide WHY before classifying it:
 
    Keep the spec's **pre-edit** content — the bytes as read before the first Edit of this run — and search THAT for the same `claim`:
 
@@ -356,11 +370,9 @@ For each finding to apply (after gating resolutions), apply this loop:
 
    The pre-edit content is the decisive test, and it is why this step does not consult the location key. A location-key proxy ("some finding at this location was applied, so this must be superseded") would classify an INVENTED quote as superseded whenever any other finding touched the same line — and superseded never blocks and is not a bless caveat, so a genuine hallucination would pass straight into auto-continue. The pre-edit bytes answer the actual question, cannot be fooled, and hold whether or not dedupe worked.
 
-   In both cases, do NOT proceed to step 2 or step 3 for this finding.
+   In both cases, do NOT proceed to step 3 for this finding.
 
    **Why the distinction is load-bearing.** Two sources reporting the same drift at one location is the normal case, not an anomaly — in one real run, every citation finding had a fact-check counterpart. Whichever Edit lands first necessarily invalidates the other's quoted text. Classing that as a hallucination made a CORRECT fix produce `⛔ validate blocked: reviewer claims didn't match spec text`, and hallucinated findings always block — so the better the citation check performed, the more likely the run was to fail. Dedupe should collapse most such pairs before they reach this step; this is the backstop for when it does not, and a backstop that turns a success into a block is worse than none.
-2. **Skip first, if the correction is marked.** If this is a `source: citations` finding whose `suggested_correction` begins with `[manual] `, add it to `MANUAL_FINDINGS`, make NO Edit, and move to the next finding. This is a control-flow guard, not a formatting note — the text after the marker is an instruction to a human, and applying it would replace a citation with an English sentence.
-
 3. **Apply the Edit.** Use the Edit tool with:
    - `file_path` = absolute path to spec
    - `old_string` = the verified claim text

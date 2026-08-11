@@ -508,6 +508,48 @@ report "a section-only location keys to itself, matching only an identical one" 
   '"Components" (lines 17-22)' \
   "$(key '"Components" (lines 17-22)')"
 
+# --- pin the suite to the artifact, not to its own restatement -------------
+# `key()` above is a bash reimplementation of a prose rule an LLM executes.
+# Testing it proves the semantics are well-defined; it proves NOTHING about
+# what ships, and mutation showed exactly that: reverting SKILL.md's rule to
+# the broken prefix-strip it replaced — or deleting the rule block outright —
+# left this suite green. These assertions couple the two, so a prose edit that
+# diverges from `key()` fails here instead of silently shipping.
+RULE=$(cat "$REPO_ROOT/skills/validate/SKILL.md")
+
+contains "SKILL.md keys on the DOCUMENT, not on position in the string" \
+  "$RULE" "basename equals the basename of"
+contains "SKILL.md still specifies the whole-string fallback key() implements" \
+  "$RULE" "the key is the whole string, trimmed"
+contains "SKILL.md still explains why the last pair is the wrong key" \
+  "$RULE" "Keying on the last pair would key a design finding"
+
+# The rule this replaced, in its own words. If it comes back, the bug is back.
+case "$RULE" in
+  *"reducing any leading path to its basename"*)
+    fail=$((fail + 1))
+    printf 'FAIL: SKILL.md has reverted to the prefix-strip rule that could never match\n' ;;
+  *) pass=$((pass + 1)) ;;
+esac
+
+# The supersession test must stay decisive. A location-key proxy classified an
+# invented quote as superseded whenever anything else touched the same line,
+# and superseded neither blocks nor caveats the bless.
+contains "supersession is decided from the pre-edit bytes, not a location key" \
+  "$RULE" "present in the pre-edit content, absent now"
+
+# The `[manual]` guard must run BEFORE claim verification, or a marked finding
+# whose text was overtaken is reclassified superseded and slips past the
+# MANUAL_FINDINGS clean-bless caveat.
+# Compare the STEP NUMBERS, not the byte positions: an LLM executes the list by
+# its numbering, so renumbering alone reorders it. A position-only check passed
+# with the guard renumbered to step 9.
+guard=$(printf '%s' "$RULE" | sed -n 's/^\([0-9]*\)\. \*\*Skip first, if the correction is marked.*/\1/p')
+verify=$(printf '%s' "$RULE" | sed -n 's/^\([0-9]*\)\. \*\*Verify claim-text-in-spec.*/\1/p')
+report "the [manual] guard is numbered before claim verification" \
+  "yes" \
+  "$([ -n "$guard" ] && [ -n "$verify" ] && [ "$guard" -lt "$verify" ] && echo yes || echo no)"
+
 # --- the checker's own docs are not exempt --------------------------------
 # Counts the per-document tally lines as well as summing them: a crashing
 # checker prints nothing, `sed` matches nothing, and `awk` would sum an empty
@@ -525,7 +567,7 @@ report "skills/validate/*.md carry no broken citations" \
 # A conditional case (the submodule one) means "0 failed" could otherwise hide
 # a silently smaller run. Counted outside `report` so this check cannot count
 # itself; bump it deliberately when you add an assertion.
-EXPECTED_ASSERTIONS=71
+EXPECTED_ASSERTIONS=77
 ran=$((pass + fail))
 if [ "$ran" -ne "$EXPECTED_ASSERTIONS" ]; then
   fail=$((fail + 1))

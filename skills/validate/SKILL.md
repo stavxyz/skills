@@ -123,13 +123,31 @@ ambiguity check.
 **Anchors are opt-in, and that is the adoption path.** A citation with no
 anchor is reported as `unverifiable`, not as a finding, so this can be turned
 on against documents written before it existed without producing a wall of
-noise. Pass `--strict` to also emit those as Low findings — appropriate when
-the operator is deliberately hardening one document's citations, not as the
-default. Note the consequence: `--strict` findings carry the `[manual] `
-marker, so under it a document with any unanchored citation gains a
-`MANUAL_FINDINGS` entry and will not clean-bless until every citation is
-anchored. That is the point of a hardening pass, but it is not the behaviour
-an operator expects from a flag described as "also report". Path resolution, ambiguity, and past-end-of-file are all checked with
+noise. **Strictness can default from the environment.** The command above passes no
+flag, so a workstation or CI image that wants hardening everywhere sets
+`CHECK_CITATIONS_STRICT=1` (in `~/.claude/settings.json` under `env`, or the
+shell) and every run is strict without changing this command. `--strict` and
+`--no-strict` override it for a single invocation; an unset, empty, or
+unrecognised value means off, so a typo cannot silently turn the gate on.
+
+**Setting it machine-wide is not a neutral convenience.** Every unanchored
+citation then gates, so on a repository whose documents predate anchors,
+`validate` will not clean-bless and will not auto-continue until they are
+anchored — measured on one repository, 1 of 13 documents gated by default and 13
+of 13 under a machine-wide default. That is the intended effect of a hardening
+policy; it should be a decision rather than a surprise. Note also that citation
+findings count toward `TOTAL_COUNT`, so a document with more than
+`OVERLOAD_TOTAL` citations will abort the run with "spec drifted significantly"
+— the wrong prescription for citations that merely lack anchors. If
+the operator asks for one non-strict run on a machine where it is defaulted on,
+add `--no-strict`.
+
+Pass `--strict` when deliberately hardening one document's citations. It does
+two things: emits the unanchored ones as findings, and promotes every
+could-not-determine finding from `Low` to `Important`. Both then gate the
+clean bless, so under `--strict` a document does not bless clean until every
+citation both carries an anchor and resolves unambiguously. That is the point
+of a hardening pass — and it is why the default does not do it. Path resolution, ambiguity, and past-end-of-file are all checked with
 or without an anchor.
 
 ## Dispatch reviewers in parallel
@@ -184,7 +202,11 @@ suggested_direction: "..."              # solid-hygiene only
 
 5. **Per-finding fallback.** If a required field for a given finding is missing/malformed, surface only that block as raw text to the operator at report time; other findings parse normally. Per-finding fallback rather than whole-output fallback prevents one malformed reviewer block from poisoning the entire run.
 
-6. **`CITATION_RAW` parses with the same code.** The checker emits the fact-check block shape (`### Important: …` with `Location`, `Claim`, `Reality`, `Suggested correction`), so run it through steps 1-5 unchanged and tag the resulting records `source: citations`. It also emits `### Low:` blocks, which parse identically: under `--strict` for every unanchored citation, and **unconditionally** for a citation it could not read — today that means one inside a submodule with no contents checked out, whose correction is to run `git submodule update --init`.
+6. **`CITATION_RAW` parses with the same code.** The checker emits the fact-check block shape (`### Important: …` with `Location`, `Claim`, `Reality`, `Suggested correction`), so run it through steps 1-5 unchanged and tag the resulting records `source: citations`. It also emits `### Low:` blocks, which parse identically: unconditionally for every citation it could not determine (ambiguous path, non-unique anchor, unreadable submodule), and under `--strict` these are promoted to `### Important:` along with every unanchored citation.
+
+   **Severity carries the gate for citation findings.** `Important` means the checker PROVED the citation wrong — a path that does not resolve, a line past the end of the file, an anchor absent or at a different line, line zero, a reversed range. `Low` means it could not DETERMINE the answer — an ambiguous path, an anchor identifying no single line, an unreadable submodule, a tracked file it could not open. Only `Important` findings become clean-bless caveats.
+
+   Under `--strict` there are no `Low` citation findings at all: every could-not-determine finding is emitted at `Important`, and every citation carrying no anchor is emitted at `Important` too. So everything the checker could not verify gates.
 
 Combine all three sources' parsed findings into a single list, `FINDINGS`.
 
@@ -262,11 +284,22 @@ Two findings count as overlapping if:
 2. Their `location` strings match **under the location key** defined above, AND
 3. The Levenshtein-style similarity between their `claim`/`concern` strings is ≥ `DEDUPE_SIMILARITY` (default 0.8).
 
-**A `citations` finding always wins its pair.** Where a `citations` finding
-overlaps one from either reviewer, keep the `citations` one and log the other in
+**An `Important` `citations` finding always wins its pair.** Where one overlaps
+a finding from either reviewer, keep the `citations` one and log the other in
 `DEDUPED_FINDINGS` regardless of which reads as more specific. It carries a line
 number read off disk this run; the reviewer's carries one the reviewer arrived
-at. Applying both would also mean two Edits against the same text, the second of
+at.
+
+**A `Low` `citations` finding never wins, and never displaces.** That
+justification is exactly inverted for it: a could-not-determine finding carries
+no line read off disk — it records that the checker DECLINED to look. A reviewer
+that did resolve the same location has strictly more information. Discarding the
+reviewer's finding would drop a real, mechanically fixable drift AND leave
+nothing to gate on, since `Low` citation findings are not clean-bless caveats —
+so a spec would auto-continue into planning with the drift unfixed and
+unmentioned. Keep both: apply the reviewer's finding, and report the `citations`
+one under "Manual citations:" as the note that the path could not be resolved
+automatically. Applying both would also mean two Edits against the same text, the second of
 which fails to match. Overlap here uses the same three conditions above.
 
 For each remaining overlapping pair, keep the "more specific" finding — defined as: the finding whose `claim`/`concern` text contains a named symbol (function name, type name, file path) wins over a finding with only vague references. If tied, the longer text wins. Discard the loser; log the discarded finding's text in a `DEDUPED_FINDINGS` list for the report.
@@ -289,7 +322,7 @@ For each contradictory pair, surface to the operator before triage. Call AskUser
 
 Compute:
 
-- `CI_COUNT` = number of findings with `severity in (Critical, Important)`, **excluding `source: citations`** (see the note under Tuning constants for why: they are all Important, and one renamed module can produce thirty, which would abort the run this pass exists to make cheap).
+- `CI_COUNT` = number of findings with `severity in (Critical, Important)`, **excluding `source: citations`** (see the note under Tuning constants for why: the `Important` ones are all mechanical one-line corrections, and one renamed module can produce thirty, which would abort the run this pass exists to make cheap).
 - `TOTAL_COUNT` = number of all findings (post-dedupe).
 
 If `CI_COUNT > OVERLOAD_CRITICAL_IMPORTANT` OR `TOTAL_COUNT > OVERLOAD_TOTAL`, abort before any edits. Report:
@@ -359,7 +392,7 @@ Apply findings in this order: **`source: citations` first**, then the reviewers'
 
 For each finding to apply (after gating resolutions), apply this loop:
 
-1. **Skip first, if the correction is marked.** If this is a `source: citations` finding whose `suggested_correction` begins with `[manual] `, add it to `MANUAL_FINDINGS`, make NO Edit, and move to the next finding — before step 2, so a `[manual]` finding can never be reclassified as superseded and slip past the `MANUAL_FINDINGS = 0` clean-bless caveat. This is a control-flow guard, not a formatting note — the text after the marker is an instruction to a human, and applying it would replace a citation with an English sentence.
+1. **Skip first, if the correction is marked.** If this is a `source: citations` finding whose `suggested_correction` begins with `[manual] `, add it to `MANUAL_FINDINGS`, make NO Edit, and move to the next finding — before step 2, so a `[manual]` finding can never be reclassified as superseded and slip past the `Important`-severity `MANUAL_FINDINGS` clean-bless caveat. This is a control-flow guard, not a formatting note — the text after the marker is an instruction to a human, and applying it would replace a citation with an English sentence.
 
 2. **Verify claim-text-in-spec.** Applies to findings carrying a `claim` (`fact-check` and `citations`); a `solid-hygiene` finding carries `concern` and no quoted text, so it skips to step 3. Read the spec content. Search for the exact `claim` string verbatim. If not found, decide WHY before classifying it:
 
@@ -459,7 +492,7 @@ Findings:
   ---
   Total:       <X>
   Citations:   <N> found, <V> verified, <U> unverifiable, <B> broken
-  Manual citations: <X> (corrections a human must make; listed below)
+  Manual citations: <X> (<Y> Important — gating; <Z> Low — reported only)
   Superseded:  <X> (a second source reported the same drift; not blocking)
   Deduped:     <X> (kept more-specific in each pair)
   Hallucinated: <X> (claim text not in spec; surfaced for manual review)
@@ -533,7 +566,9 @@ A bless is **clean** only when the spec/plan is blessed AND every one of these c
 - Accepted net-negatives (`net_negative_remaining`, from Gate 2 `Accept`) = 0
 - Skipped Critical fact-checks (Gate 3 `Skip`, downgraded to advisory) = 0
 - Hallucinated findings (`HALLUCINATED_FINDINGS`) = 0
-- Unapplied citation findings (`MANUAL_FINDINGS`, the `[manual]` corrections surfaced rather than edited) = 0 — citations the checker could not repair on its own. Most are known-wrong; some are merely unreadable (a citation into an unchecked-out submodule may well be correct). They are the one caveat class the skill deliberately declines to repair, so nothing downstream will catch them: without this line a spec with thirty broken citations blesses clean and auto-continues into planning with every one of them intact.
+- **Important**-severity unapplied citation findings (`MANUAL_FINDINGS`) = 0. These are citations the checker proved wrong and cannot repair mechanically, so nothing downstream will catch them: without this line a spec with thirty broken citations blesses clean and auto-continues into planning with every one intact.
+
+  **`Low`-severity `[manual]` findings do NOT gate.** Those are citations the checker could not *determine* — an ambiguous bare filename, an anchor that identifies no single line, a submodule with nothing checked out. The citation may well be correct. They are surfaced under "Manual citations:" and left alone. Measured on one real repository, 55 of 57 findings were that class; gating on them meant no document could ever bless clean, which is how a check stops being read. `--strict` promotes every one of them to `Important`, so a hardening run gates on all of them — that is what the flag is for.
 - Parse failures = 0 — counting BOTH classes from "Parse findings": a `### ` block whose heading failed the `^### (Critical|Important|Medium|Low|Nitpick):` match, AND any finding surfaced as raw text because a required field was missing/malformed
 - Reviewer contradictions that reached the contradiction gate ("Detect contradictions") = 0 — ANY operator resolution counts as a caveat, including picking a side (`Apply fact-check finding (skip SOLID)` / `Apply SOLID finding (skip fact-check)`), not only `Skip both — manual triage`. A triggered contradiction gate means the reviewers disagreed about an underlying premise and human judgment was required — that is less than maximal confidence regardless of how it was resolved.
 - `KIND` was determined by frontmatter, path, or content shape — NOT by the tie-break AskUserQuestion ("Detect kind" step 4). A tie-broken kind means the artifact's identity was itself ambiguous; do not auto-continue (especially into implementation) off a guess.

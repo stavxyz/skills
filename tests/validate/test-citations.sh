@@ -23,6 +23,16 @@
 
 set -uo pipefail
 
+# The checker takes its default strictness from CHECK_CITATIONS_STRICT, which a
+# workstation may set machine-wide. Clear it here: a test suite whose outcome
+# depends on the ambient environment is not a test suite. Every assertion that
+# cares sets the variable explicitly on its own invocation.
+#
+# Found the hard way — setting it in `~/.claude/settings.json` immediately
+# turned four green assertions red, in a suite that had just been reported
+# passing.
+unset CHECK_CITATIONS_STRICT
+
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 CHECKER="$REPO_ROOT/skills/validate/check-citations.py"
 FIXTURE="$REPO_ROOT/tests/validate-fixtures/fixture-citations.md"
@@ -75,8 +85,8 @@ report "counts every citation in the fixture, named and bare" \
   "$((named + bare))" \
   "$(printf '%s' "$OUT" | sed -n 's/^<!-- citations: \([0-9]*\) found.*/\1/p')"
 
-report "three verified, two unverifiable, eight broken" \
-  "3 verified, 2 unverifiable, 8 broken" \
+report "three verified, four unverifiable, six broken" \
+  "3 verified, 4 unverifiable, 6 broken" \
   "$(printf '%s' "$OUT" | sed -n 's/^<!-- citations: [0-9]* found, \(.*\) -->/\1/p')"
 
 # --- per-class verdicts ---------------------------------------------------
@@ -86,6 +96,15 @@ reality_for() {
   printf '%s' "$2" | awk -v want="$1" '
     index($0, "**Claim:** ") == 1 { hit = index($0, want) > 0; next }
     hit && index($0, "**Reality:** ") == 1 { print substr($0, 14); exit }
+  '
+}
+# The `### <Severity>:` heading of the finding whose Claim contains $1.
+severity_for() {
+  printf '%s' "$2" | awk -v want="$1" '
+    index($0, "### ") == 1 { head = $0; next }
+    index($0, "**Claim:** ") == 1 && index($0, want) > 0 {
+      sub(/^### /, "", head); sub(/:.*/, "", head); print head; exit
+    }
   '
 }
 # Same, for the Suggested correction.
@@ -183,6 +202,66 @@ done
 wants_marker "the --strict unanchored template" "$(fix_for '`skills/validate/SKILL.md:3`' "$STRICT")"
 contains "...and it warns that it is a placeholder" \
   "$(fix_for '`skills/validate/SKILL.md:3`' "$STRICT")" "would write the placeholder"
+
+# --- severity is the gate ---------------------------------------------------
+# `Important` = the checker PROVED the citation wrong. `Low` = it could not
+# determine. Only Important becomes a clean-bless caveat, because on one real
+# repository 55 of 57 findings were could-not-determine, and gating on those
+# meant no document ever blessed clean.
+report "a proved-wrong citation is Important" \
+  "Important" "$(severity_for 'SKILL.md:99999' "$OUT")"
+report "an absent anchor is proved wrong, so Important" \
+  "Important" "$(severity_for 'zzz_absent_symbol_zzz' "$OUT")"
+report "an ambiguous path is could-not-determine, so Low" \
+  "Low" "$(severity_for '`SKILL.md:1` (`name:`)' "$OUT")"
+report "a non-unique anchor is could-not-determine, so Low" \
+  "Low" "$(severity_for 'OVERLOAD_TOTAL' "$OUT")"
+
+# --strict is where "every citation must resolve" is enforced: it promotes
+# every could-not-determine finding to Important, so they all gate.
+report "--strict promotes an ambiguous path to Important" \
+  "Important" "$(severity_for '`SKILL.md:1` (`name:`)' "$STRICT")"
+report "--strict promotes a non-unique anchor to Important" \
+  "Important" "$(severity_for 'OVERLOAD_TOTAL' "$STRICT")"
+report "--strict leaves a proved-wrong citation Important" \
+  "Important" "$(severity_for 'SKILL.md:99999' "$STRICT")"
+report "--strict emits no Low findings at all" \
+  "0" "$(printf '%s' "$STRICT" | grep -c '^### Low:')"
+
+# --- strictness can default from the environment ---------------------------
+# `SKILL.md` invokes the checker with a fixed command line, so a flag alone
+# cannot be defaulted on for a workstation. Precedence must be: explicit flag,
+# then environment, then off — and a typo must never turn a gate ON.
+lowcount() { printf '%s' "$1" | grep -c '^### Low:'; }
+# Positive counterpart. A crashed checker emits neither, so asserting only the
+# absence of `Low` passes on total failure — demonstrated: a typo confined to
+# the strict path failed 7 assertions and not one was from this block.
+anchorless() { printf '%s' "$1" | grep -c 'carries no anchor'; }
+report "no env var means non-strict" \
+  "2" "$(lowcount "$(python3 "$CHECKER" "$FIXTURE" --repo-root "$REPO_ROOT")")"
+ENV_ON=$(CHECK_CITATIONS_STRICT=1 python3 "$CHECKER" "$FIXTURE" --repo-root "$REPO_ROOT" 2>&1)
+report "CHECK_CITATIONS_STRICT=1 turns strict on" \
+  "0 Low, 2 anchorless" \
+  "$(lowcount "$ENV_ON") Low, $(anchorless "$ENV_ON") anchorless"
+report "--no-strict overrides the environment for one run" \
+  "2" "$(lowcount "$(CHECK_CITATIONS_STRICT=1 python3 "$CHECKER" "$FIXTURE" --repo-root "$REPO_ROOT" --no-strict)")"
+FLAG_ON=$(CHECK_CITATIONS_STRICT=0 python3 "$CHECKER" "$FIXTURE" --repo-root "$REPO_ROOT" --strict 2>&1)
+report "--strict overrides an env var set to 0" \
+  "0 Low, 2 anchorless" \
+  "$(lowcount "$FLAG_ON") Low, $(anchorless "$FLAG_ON") anchorless"
+report "the env path and the flag path produce identical output" \
+  "same" "$([ "$ENV_ON" = "$FLAG_ON" ] && echo same || echo different)"
+report "a truthy alias in another case enables it (TRUE)" \
+  "0" "$(lowcount "$(CHECK_CITATIONS_STRICT=TRUE python3 "$CHECKER" "$FIXTURE" --repo-root "$REPO_ROOT")")"
+report "a whitespace-padded value still enables it" \
+  "0" "$(lowcount "$(CHECK_CITATIONS_STRICT=' on ' python3 "$CHECKER" "$FIXTURE" --repo-root "$REPO_ROOT")")"
+report "a numeric non-1 does NOT enable the gate" \
+  "2" "$(lowcount "$(CHECK_CITATIONS_STRICT=2 python3 "$CHECKER" "$FIXTURE" --repo-root "$REPO_ROOT")")"
+
+report "an unrecognised value does NOT enable the gate" \
+  "2" "$(lowcount "$(CHECK_CITATIONS_STRICT=maybe python3 "$CHECKER" "$FIXTURE" --repo-root "$REPO_ROOT")")"
+report "an empty value does NOT enable the gate" \
+  "2" "$(lowcount "$(CHECK_CITATIONS_STRICT= python3 "$CHECKER" "$FIXTURE" --repo-root "$REPO_ROOT")")"
 
 # --- boundaries, pinned from both sides ----------------------------------
 # `:len` must verify and `:len+1` must break. Off-by-one in either direction
@@ -302,6 +381,11 @@ printf '`pkg/doomed.py:1` (`doomed`)\n' > "$SCRATCH/doc5.md"
 MISSING=$(python3 "$CHECKER" "$SCRATCH/doc5.md" --repo-root "$SCRATCH" 2>&1)
 contains "a tracked-but-missing file is a finding, not a traceback" \
   "$MISSING" "cannot be read"
+# The path resolved and the checker proved nothing — same epistemic state as an
+# unchecked-out submodule, which sits ten lines away in the source and was
+# already `unverifiable`. Unpinned, flipping this verdict survived the suite.
+report "a tracked-but-unreadable file is could-not-determine, so Low" \
+  "Low" "$(severity_for 'pkg/doomed.py:1' "$MISSING")"
 wants_marker "the unreadable-file correction" "$(fix_for 'pkg/doomed.py:1' "$MISSING")"
 
 # `/`-boundary, tested where the basename index cannot mask it. The fixture's
@@ -535,6 +619,32 @@ esac
 # The supersession test must stay decisive. A location-key proxy classified an
 # invented quote as superseded whenever anything else touched the same line,
 # and superseded neither blocks nor caveats the bless.
+contains "SKILL.md gates on severity, not on the [manual] marker alone" \
+  "$RULE" "Low\`-severity \`[manual]\` findings do NOT gate"
+# Pin the GATE SENTENCE itself, not the anecdote beside it. Reverting that one
+# line to the severity-blind original survived the whole suite and left the
+# file self-contradictory two lines apart.
+contains "SKILL.md gates only Important-severity manual findings" \
+  "$RULE" '**Important**-severity unapplied citation findings (`MANUAL_FINDINGS`) = 0'
+# And the severity rule an executing LLM reads as authoritative. A stale clause
+# here told it to tag unanchored-under-strict findings Low, which would have
+# silently disabled half of --strict; nothing in the suite would have caught it.
+# A `Low` citations finding records that the checker DECLINED to resolve a
+# location. Letting it win a dedupe pair discarded a reviewer finding that HAD
+# resolved it — dropping a real fixable drift and leaving nothing to gate on,
+# because Low findings are not caveats.
+contains "SKILL.md restricts the citations-wins rule to Important findings" \
+  "$RULE" "**An \`Important\` \`citations\` finding always wins its pair.**"
+contains "...and says a Low one never displaces a reviewer finding" \
+  "$RULE" "never wins, and never displaces"
+
+# A machine-wide default is a policy decision, not a convenience.
+contains "SKILL.md warns what a machine-wide default costs" \
+  "$RULE" "not a neutral convenience"
+
+contains "SKILL.md says --strict leaves no Low citation findings" \
+  "$RULE" "Under \`--strict\` there are no \`Low\` citation findings at all"
+
 contains "supersession is decided from the pre-edit bytes, not a location key" \
   "$RULE" "present in the pre-edit content, absent now"
 
@@ -567,7 +677,7 @@ report "skills/validate/*.md carry no broken citations" \
 # A conditional case (the submodule one) means "0 failed" could otherwise hide
 # a silently smaller run. Counted outside `report` so this check cannot count
 # itself; bump it deliberately when you add an assertion.
-EXPECTED_ASSERTIONS=77
+EXPECTED_ASSERTIONS=102
 ran=$((pass + fail))
 if [ "$ran" -ne "$EXPECTED_ASSERTIONS" ]; then
   fail=$((fail + 1))

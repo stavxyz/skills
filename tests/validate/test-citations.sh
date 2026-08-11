@@ -23,6 +23,16 @@
 
 set -uo pipefail
 
+# The checker takes its default strictness from CHECK_CITATIONS_STRICT, which a
+# workstation may set machine-wide. Clear it here: a test suite whose outcome
+# depends on the ambient environment is not a test suite. Every assertion that
+# cares sets the variable explicitly on its own invocation.
+#
+# Found the hard way — setting it in `~/.claude/settings.json` immediately
+# turned four green assertions red, in a suite that had just been reported
+# passing.
+unset CHECK_CITATIONS_STRICT
+
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 CHECKER="$REPO_ROOT/skills/validate/check-citations.py"
 FIXTURE="$REPO_ROOT/tests/validate-fixtures/fixture-citations.md"
@@ -217,6 +227,24 @@ report "--strict leaves a proved-wrong citation Important" \
   "Important" "$(severity_for 'SKILL.md:99999' "$STRICT")"
 report "--strict emits no Low findings at all" \
   "0" "$(printf '%s' "$STRICT" | grep -c '^### Low:')"
+
+# --- strictness can default from the environment ---------------------------
+# `SKILL.md` invokes the checker with a fixed command line, so a flag alone
+# cannot be defaulted on for a workstation. Precedence must be: explicit flag,
+# then environment, then off — and a typo must never turn a gate ON.
+lowcount() { printf '%s' "$1" | grep -c '^### Low:'; }
+report "no env var means non-strict" \
+  "2" "$(lowcount "$(python3 "$CHECKER" "$FIXTURE" --repo-root "$REPO_ROOT")")"
+report "CHECK_CITATIONS_STRICT=1 turns strict on" \
+  "0" "$(lowcount "$(CHECK_CITATIONS_STRICT=1 python3 "$CHECKER" "$FIXTURE" --repo-root "$REPO_ROOT")")"
+report "--no-strict overrides the environment for one run" \
+  "2" "$(lowcount "$(CHECK_CITATIONS_STRICT=1 python3 "$CHECKER" "$FIXTURE" --repo-root "$REPO_ROOT" --no-strict)")"
+report "--strict overrides an env var set to 0" \
+  "0" "$(lowcount "$(CHECK_CITATIONS_STRICT=0 python3 "$CHECKER" "$FIXTURE" --repo-root "$REPO_ROOT" --strict)")"
+report "an unrecognised value does NOT enable the gate" \
+  "2" "$(lowcount "$(CHECK_CITATIONS_STRICT=maybe python3 "$CHECKER" "$FIXTURE" --repo-root "$REPO_ROOT")")"
+report "an empty value does NOT enable the gate" \
+  "2" "$(lowcount "$(CHECK_CITATIONS_STRICT= python3 "$CHECKER" "$FIXTURE" --repo-root "$REPO_ROOT")")"
 
 # --- boundaries, pinned from both sides ----------------------------------
 # `:len` must verify and `:len+1` must break. Off-by-one in either direction
@@ -606,7 +634,7 @@ report "skills/validate/*.md carry no broken citations" \
 # A conditional case (the submodule one) means "0 failed" could otherwise hide
 # a silently smaller run. Counted outside `report` so this check cannot count
 # itself; bump it deliberately when you add an assertion.
-EXPECTED_ASSERTIONS=87
+EXPECTED_ASSERTIONS=93
 ran=$((pass + fail))
 if [ "$ran" -ne "$EXPECTED_ASSERTIONS" ]; then
   fail=$((fail + 1))

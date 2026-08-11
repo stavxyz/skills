@@ -123,7 +123,16 @@ ambiguity check.
 **Anchors are opt-in, and that is the adoption path.** A citation with no
 anchor is reported as `unverifiable`, not as a finding, so this can be turned
 on against documents written before it existed without producing a wall of
-noise. Pass `--strict` when deliberately hardening one document's citations. It does
+noise. **Strictness can default from the environment.** The command above passes no
+flag, so a workstation or CI image that wants hardening everywhere sets
+`CHECK_CITATIONS_STRICT=1` (in `~/.claude/settings.json` under `env`, or the
+shell) and every run is strict without changing this command. `--strict` and
+`--no-strict` override it for a single invocation; an unset, empty, or
+unrecognised value means off, so a typo cannot silently turn the gate on. If
+the operator asks for one non-strict run on a machine where it is defaulted on,
+add `--no-strict`.
+
+Pass `--strict` when deliberately hardening one document's citations. It does
 two things: emits the unanchored ones as findings, and promotes every
 could-not-determine finding from `Low` to `Important`. Both then gate the
 clean bless, so under `--strict` a document does not bless clean until every

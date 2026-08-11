@@ -69,13 +69,18 @@ character class stops at the space). That produces no false finding, but it is
 an invisible gap rather than a reported one -- the tally simply will not count
 it.
 
+Strictness defaults from the `CHECK_CITATIONS_STRICT` environment variable
+(`1`/`true`/`yes`/`on`), so a workstation can make hardening the default for
+every run; `--strict` and `--no-strict` override it for one invocation.
+
 Usage:
-    check-citations.py <document.md> [--repo-root DIR] [--strict]
+    check-citations.py <document.md> [--repo-root DIR] [--strict|--no-strict]
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -486,6 +491,15 @@ def check(cite: Citation, repo: Path) -> tuple[str, str, str]:
     )
 
 
+def _env_flag(name: str) -> bool:
+    """True for 1/true/yes/on, case-insensitively. Anything else is False.
+
+    Deliberately narrow: an unset variable and a variable set to `0` or `false`
+    must both mean off, and a typo must not silently turn a gate on.
+    """
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("document", help="the spec or plan to check")
@@ -497,9 +511,26 @@ def main() -> int:
     ap.add_argument(
         "--strict",
         action="store_true",
-        help="also report citations that carry no anchor, as Low findings",
+        default=None,
+        help="gate on every citation the checker cannot verify: report the "
+             "unanchored ones, and raise could-not-determine findings to "
+             "Important. Default comes from CHECK_CITATIONS_STRICT.",
+    )
+    ap.add_argument(
+        "--no-strict",
+        dest="strict",
+        action="store_false",
+        help="force non-strict for this run, overriding CHECK_CITATIONS_STRICT",
     )
     args = ap.parse_args()
+
+    # Precedence: an explicit flag, else the environment, else off. The env var
+    # exists so a workstation or CI image can make hardening the default
+    # without every caller passing the flag -- `SKILL.md` invokes this script
+    # with a fixed command line, so a flag alone could not be defaulted on.
+    # `--no-strict` is what makes an ambient default escapable for one run.
+    if args.strict is None:
+        args.strict = _env_flag("CHECK_CITATIONS_STRICT")
 
     doc = Path(args.document).resolve()
     if not doc.is_file():

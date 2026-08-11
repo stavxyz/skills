@@ -369,10 +369,11 @@ def check(cite: Citation, repo: Path) -> tuple[str, str, str]:
                 candidates[0],
             )
             return (
-                "broken",
+                "unverifiable",
                 f"`{cite.path}` is ambiguous — {len(candidates)} files match: "
                 f"{shown}{more}. A bare filename can resolve in range against "
-                f"the wrong file and return plausible content.",
+                f"the wrong file and return plausible content, so this one is "
+                f"not followed rather than guessed at.",
                 MANUAL + f"Qualify the path, e.g. `{example}:{cite.lines}`",
             )
         # An uninitialised submodule is what a plain `git clone` leaves
@@ -465,7 +466,7 @@ def check(cite: Citation, repo: Path) -> tuple[str, str, str]:
     # "verifies". That is the failure this whole mechanism exists to prevent.
     if len(at) > 1:
         return (
-            "broken",
+            "unverifiable",
             f"`{cite.anchor}` appears on {len(at)} lines of `{cite.path}` "
             f"({', '.join(str(n) for n in at[:5])}"
             f"{', ...' if len(at) > 5 else ''}), so it identifies no single "
@@ -538,14 +539,20 @@ def main() -> int:
                 f"**Suggested correction:** {correction}\n"
             )
         elif verdict == "unverifiable" and reality:
-            # An `unverifiable` that CARRIES text is a real obstruction the
-            # operator can act on -- today, an unchecked-out submodule. It is
-            # reported unconditionally: `--strict` governs whether merely
-            # unanchored citations are noise, not whether the checker may stay
-            # silent about something it could not read.
+            # The checker could not DETERMINE this one: an ambiguous path, an
+            # anchor that identifies no single line, a submodule with nothing
+            # checked out. The citation may well be correct.
+            #
+            # Severity is the gate. `Important` findings become clean-bless
+            # caveats; `Low` ones are reported and do not gate. Measured on one
+            # real repository, 55 of 57 findings were this class -- gating on
+            # them by default meant no document could ever bless clean, which
+            # is how a check stops being read. `--strict` is where "every
+            # citation must be resolvable" is enforced.
+            severity = "Important" if args.strict else "Low"
             blocks.append(
-                f"### Low: citation `{cite.path}:{cite.lines}` could not be "
-                f"checked\n"
+                f"### {severity}: citation `{cite.path}:{cite.lines}` could not "
+                f"be checked\n"
                 f"**Location:** {doc.name}:{cite.line_no}\n"
                 f"**Claim:** {cite.raw}\n"
                 f"**Reality:** {reality}\n"
@@ -553,7 +560,8 @@ def main() -> int:
             )
         elif verdict == "unverifiable" and args.strict:
             blocks.append(
-                f"### Low: citation `{cite.path}:{cite.lines}` carries no anchor\n"
+                f"### Important: citation `{cite.path}:{cite.lines}` carries no "
+                f"anchor\n"
                 f"**Location:** {doc.name}:{cite.line_no}\n"
                 f"**Claim:** {cite.raw}\n"
                 f"**Reality:** The path and line resolve, but nothing records what "

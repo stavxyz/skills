@@ -75,8 +75,8 @@ report "counts every citation in the fixture, named and bare" \
   "$((named + bare))" \
   "$(printf '%s' "$OUT" | sed -n 's/^<!-- citations: \([0-9]*\) found.*/\1/p')"
 
-report "three verified, two unverifiable, eight broken" \
-  "3 verified, 2 unverifiable, 8 broken" \
+report "three verified, four unverifiable, six broken" \
+  "3 verified, 4 unverifiable, 6 broken" \
   "$(printf '%s' "$OUT" | sed -n 's/^<!-- citations: [0-9]* found, \(.*\) -->/\1/p')"
 
 # --- per-class verdicts ---------------------------------------------------
@@ -86,6 +86,15 @@ reality_for() {
   printf '%s' "$2" | awk -v want="$1" '
     index($0, "**Claim:** ") == 1 { hit = index($0, want) > 0; next }
     hit && index($0, "**Reality:** ") == 1 { print substr($0, 14); exit }
+  '
+}
+# The `### <Severity>:` heading of the finding whose Claim contains $1.
+severity_for() {
+  printf '%s' "$2" | awk -v want="$1" '
+    index($0, "### ") == 1 { head = $0; next }
+    index($0, "**Claim:** ") == 1 && index($0, want) > 0 {
+      sub(/^### /, "", head); sub(/:.*/, "", head); print head; exit
+    }
   '
 }
 # Same, for the Suggested correction.
@@ -183,6 +192,31 @@ done
 wants_marker "the --strict unanchored template" "$(fix_for '`skills/validate/SKILL.md:3`' "$STRICT")"
 contains "...and it warns that it is a placeholder" \
   "$(fix_for '`skills/validate/SKILL.md:3`' "$STRICT")" "would write the placeholder"
+
+# --- severity is the gate ---------------------------------------------------
+# `Important` = the checker PROVED the citation wrong. `Low` = it could not
+# determine. Only Important becomes a clean-bless caveat, because on one real
+# repository 55 of 57 findings were could-not-determine, and gating on those
+# meant no document ever blessed clean.
+report "a proved-wrong citation is Important" \
+  "Important" "$(severity_for 'SKILL.md:99999' "$OUT")"
+report "an absent anchor is proved wrong, so Important" \
+  "Important" "$(severity_for 'zzz_absent_symbol_zzz' "$OUT")"
+report "an ambiguous path is could-not-determine, so Low" \
+  "Low" "$(severity_for '`SKILL.md:1` (`name:`)' "$OUT")"
+report "a non-unique anchor is could-not-determine, so Low" \
+  "Low" "$(severity_for 'OVERLOAD_TOTAL' "$OUT")"
+
+# --strict is where "every citation must resolve" is enforced: it promotes
+# every could-not-determine finding to Important, so they all gate.
+report "--strict promotes an ambiguous path to Important" \
+  "Important" "$(severity_for '`SKILL.md:1` (`name:`)' "$STRICT")"
+report "--strict promotes a non-unique anchor to Important" \
+  "Important" "$(severity_for 'OVERLOAD_TOTAL' "$STRICT")"
+report "--strict leaves a proved-wrong citation Important" \
+  "Important" "$(severity_for 'SKILL.md:99999' "$STRICT")"
+report "--strict emits no Low findings at all" \
+  "0" "$(printf '%s' "$STRICT" | grep -c '^### Low:')"
 
 # --- boundaries, pinned from both sides ----------------------------------
 # `:len` must verify and `:len+1` must break. Off-by-one in either direction
@@ -535,6 +569,11 @@ esac
 # The supersession test must stay decisive. A location-key proxy classified an
 # invented quote as superseded whenever anything else touched the same line,
 # and superseded neither blocks nor caveats the bless.
+contains "SKILL.md gates on severity, not on the [manual] marker alone" \
+  "$RULE" "Low\`-severity \`[manual]\` findings do NOT gate"
+contains "SKILL.md still explains why could-not-determine does not gate" \
+  "$RULE" "55 of 57 findings were that class"
+
 contains "supersession is decided from the pre-edit bytes, not a location key" \
   "$RULE" "present in the pre-edit content, absent now"
 
@@ -567,7 +606,7 @@ report "skills/validate/*.md carry no broken citations" \
 # A conditional case (the submodule one) means "0 failed" could otherwise hide
 # a silently smaller run. Counted outside `report` so this check cannot count
 # itself; bump it deliberately when you add an assertion.
-EXPECTED_ASSERTIONS=77
+EXPECTED_ASSERTIONS=87
 ran=$((pass + fail))
 if [ "$ran" -ne "$EXPECTED_ASSERTIONS" ]; then
   fail=$((fail + 1))

@@ -4,7 +4,7 @@ A small [Claude Code](https://claude.com/claude-code) plugin marketplace with th
 
 | Skill | Command | What it does |
 | --- | --- | --- |
-| **validate** | `/stavxyz:validate <path-to-spec-or-plan.md>` | Runs two reviewers in parallel against your codebase — a **fact-check** pass (are the spec's claims about existing code true?) and a **SOLID / hygiene** pass (is the design direction sound?) — then addresses the findings in-spec, with gates for deferrals, Critical corrections, and net-negative design. |
+| **validate** | `/stavxyz:validate <path-to-spec-or-plan.md>` | Checks a spec's `file.py:NN` citations deterministically, then runs two reviewers in parallel against your codebase — a **fact-check** pass (are the spec's claims about existing code true?) and a **SOLID / hygiene** pass (is the design direction sound?) — and addresses the findings in-spec, with gates for deferrals, Critical corrections, and net-negative design. |
 | **polish-pr** | `/stavxyz:polish-pr <PR#>` | Rebases a PR, runs two independent code reviews in parallel, addresses **every** finding at every severity in-PR, updates docs, runs a test plan, and pushes. |
 | **reboot-ready** | `/stavxyz:reboot-ready` | Pre-reboot sweep: censuses running Claude Code sessions, dirty worktrees, and unpushed branches, parks dirty checkouts as zero-touch rescue refs, and writes a resume manifest to `~/.claude/reboot-manifest.md` + `.json`. |
 
@@ -37,14 +37,23 @@ for the why and the contributor workflow.
 /stavxyz:validate docs/specs/2026-05-31-my-feature-design.md
 ```
 
-Validates a **spec or plan** markdown file against the current `HEAD` of its git repo. It dispatches two `general-purpose` subagents in parallel using the bespoke reviewer prompts shipped alongside the skill:
+Validates a **spec or plan** markdown file against the current `HEAD` of its git repo, from three sources:
 
-- **fact-check** — verifies claims the spec makes about existing code (paths, symbols, behavior) against the real codebase.
-- **solid-hygiene** — audits the design direction for SOLID/hygiene problems and flags anything **net-negative** (a change that would make the codebase worse).
+- **citations** — a deterministic pass, run before the reviewers. Reads every `path/to/file.py:NN` citation in the document, resolves the path, and checks the line. Where the citation names what it expects to find —
+
+  ```text
+  `driver.py:73` (`state_mod.load`)
+  ```
+
+  — it asserts that symbol is unique in the file and sits on a cited line, and reports the line it is really on when it does not. Uniqueness is measured rather than approximated by a minimum anchor length: `return None` is eleven characters and identifies nothing. Only that one verdict produces a correction validate can apply as an edit; the rest are marked `[manual]` and surfaced to you instead. Anchors are opt-in, so it can be turned on against existing documents without a mass rewrite; an unanchored citation is `unverifiable`, not a finding, and path resolution, ambiguity, and past-end-of-file are checked either way.
+- **fact-check** — a `general-purpose` subagent verifying claims the spec makes about existing code (paths, symbols, behavior) against the real codebase.
+- **solid-hygiene** — a `general-purpose` subagent auditing the design direction for SOLID/hygiene problems, flagging anything **net-negative** (a change that would make the codebase worse).
+
+The two subagents are dispatched in parallel using the bespoke reviewer prompts shipped alongside the skill. All three sources emit the same finding format, so they are parsed, deduped, and applied by one code path — and where the citation check and a reviewer disagree about a line number, the measured one wins.
 
 Findings are deduped, triaged, and addressed in-place in the spec. Three conditions gate on your approval before edits proceed: deferral candidates, Critical fact-check findings, and net-negative design findings. On success the spec's frontmatter gets a `validated:` block recording the SHA, date, and finding counts.
 
-On a **clean bless** — blessed with zero caveats (e.g. no deferrals, accepted net-negatives, skipped Critical fact-checks, hallucinated quotes, parse failures, or reviewer contradictions; both reviewers ran; and the spec/plan kind wasn't a tie-break guess) — validate auto-continues to the next stage of the pipeline: a blessed **spec** flows straight into `superpowers:writing-plans`, and a blessed **plan** flows straight into `superpowers:subagent-driven-development`. It announces this with a banner and proceeds without a prompt. If the bless carries any caveat — or the next-stage skill isn't available to invoke (not installed, or model-invocation disabled) — validate stops and recommends the next step for you to run by hand. The skill's "Auto-continue on clean bless" section holds the authoritative caveat list.
+On a **clean bless** — blessed with zero caveats (e.g. no deferrals, accepted net-negatives, skipped Critical fact-checks, hallucinated quotes, unapplied `[manual]` citation corrections, parse failures, or reviewer contradictions; both reviewers ran; and the spec/plan kind wasn't a tie-break guess) — validate auto-continues to the next stage of the pipeline: a blessed **spec** flows straight into `superpowers:writing-plans`, and a blessed **plan** flows straight into `superpowers:subagent-driven-development`. It announces this with a banner and proceeds without a prompt. If the bless carries any caveat — or the next-stage skill isn't available to invoke (not installed, or model-invocation disabled) — validate stops and recommends the next step for you to run by hand. The skill's "Auto-continue on clean bless" section holds the authoritative caveat list.
 
 ### `/stavxyz:polish-pr`
 
@@ -107,15 +116,20 @@ Installed this way they are **user skills**, which are not namespaced — so you
 ├── skills/                # distributed to installers
 │   ├── validate/
 │   │   ├── SKILL.md
+│   │   ├── check-citations.py
 │   │   ├── fact-check-reviewer.md
 │   │   └── solid-hygiene-reviewer.md
 │   ├── polish-pr/
-│   │   └── SKILL.md
+│   │   ├── SKILL.md
+│   │   ├── resolve-pr-remotes.sh
+│   │   └── wait-for-pr-checks.sh
 │   └── reboot-ready/
 │       ├── SKILL.md
 │       └── census.sh
 └── tests/                 # dev-only, not part of the installed plugin
+    ├── validate/          # automated tests for check-citations.py
     ├── validate-fixtures/ # sample specs for exercising validate by hand
+    ├── polish-pr/         # automated tests for resolve-pr-remotes.sh
     └── reboot-ready/      # automated tests for census.sh
 ```
 

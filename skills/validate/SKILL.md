@@ -28,6 +28,8 @@ Adjust these after inaugural runs reveal real-world thresholds:
 - `OVERLOAD_TOTAL = 100` — same abort condition, total finding count.
 - `DEDUPE_SIMILARITY = 0.8` — Levenshtein-style similarity threshold for treating two findings at the same location as duplicates. Above threshold = duplicate (keep more specific); below = independent.
 
+Note: **`source: citations` findings do NOT count toward `CI_COUNT`.** Every broken citation is emitted at `Important`, and one module renamed across a large spec can produce thirty of them — enough on its own to trip `OVERLOAD_CRITICAL_IMPORTANT` and abort the run with "spec drifted significantly … consider rebasing the spec via brainstorming." That is the wrong prescription for thirty mechanical one-line corrections, which are precisely what this pass exists to make cheap. Count them in `TOTAL_COUNT` and report them in full; just exclude them from the Critical+Important abort trigger.
+
 Note: the reviewer templates' **repeated-pattern sweep** (see `fact-check-reviewer.md` / `solid-hygiene-reviewer.md`) deliberately emits one finding per location for a recurring anti-pattern, so a single systemic root cause can legitimately raise the counts above. Tripping the overload abort on such a pattern is defensible (a pattern at many sites *is* significant drift), but re-tune both `OVERLOAD_*` constants once real runs show how often the sweep pushes one genuine root cause past the threshold.
 
 ## Preconditions
@@ -41,7 +43,9 @@ Verify in order, exiting on the first failure:
    - **Plugin install:** if the `$CLAUDE_PLUGIN_ROOT` environment variable is set, `SKILL_DIR="$CLAUDE_PLUGIN_ROOT/skills/validate"`.
    - **Manual install:** otherwise `SKILL_DIR` is the directory containing this `SKILL.md` (e.g. `~/.claude/skills/validate` when symlinked into the user skills folder).
 
-   Then run `ls "$SKILL_DIR/fact-check-reviewer.md" "$SKILL_DIR/solid-hygiene-reviewer.md"` via Bash. If either file is missing, report `⛔ validate: reviewer template <filename> missing from skill folder. Reinstall the skill or restore from version control.` and exit.
+   Then run `ls "$SKILL_DIR/fact-check-reviewer.md" "$SKILL_DIR/solid-hygiene-reviewer.md" "$SKILL_DIR/check-citations.py"` via Bash. If any is missing, report `⛔ validate: <filename> missing from skill folder. Reinstall the skill or restore from version control.` and exit.
+
+   `check-citations.py` is hard-stopped alongside the templates on purpose. A missing deterministic check that merely warns would be skipped silently, and a citation check that runs on some invocations and not others is worse than none — the frontmatter bless would then mean two different things depending on what happened to be installed.
 5. Capture `REPO_ROOT` via `git -C "$(dirname "$ARGUMENTS")" rev-parse --show-toplevel`.
 
 ## Detect kind
@@ -62,6 +66,71 @@ INITIAL_MTIME=$(stat -f "%m" "$ARGUMENTS" 2>/dev/null || stat -c "%Y" "$ARGUMENT
 ```
 
 Store `INITIAL_MTIME` for later use. The check is not load-bearing if it fails (the value will be `"0"` which compares unequal to any real mtime); the worst case is one false-positive abort, which is recoverable via re-running.
+
+## Check citations (deterministic, before dispatch)
+
+Run the bundled checker over the document:
+
+```bash
+python3 "$SKILL_DIR/check-citations.py" "<spec_path>" --repo-root "$REPO_ROOT"
+```
+
+It reads every `path/to/file.py:NN` citation in the document, resolves the path
+against `REPO_ROOT`, and — where the citation carries an anchor, naming what the
+line is expected to contain — asserts the cited lines actually contain that
+symbol, reporting the corrected line number when they do not. The anchored form:
+
+```text
+`driver.py:73` (`state_mod.load`)
+```
+
+Findings print in this skill's own finding format, so they need no separate
+parser. Capture stdout as `CITATION_RAW`.
+
+**Why deterministic and why first.** A fact-check reviewer reads the cited file
+and forms an impression; this reads the line and compares bytes. On the class of
+finding they overlap on — "the spec says line 53 and it is line 61" — the
+byte comparison is right by construction and cheaper by three orders of
+magnitude, and it never reports a line number it did not read. Running it before
+dispatch also means its corrections are in hand when the reviewers' claims about
+the same locations arrive, so triage has the measured answer to compare against.
+
+The exit code is 0 whether or not it found anything, because these are findings
+for triage, not a gate — the gates are the three in "Triage findings" below. A
+non-zero exit means the run itself failed (bad path, not a git repo); surface
+that to the operator and continue with the two reviewers rather than aborting,
+since a broken citation check does not invalidate a design review.
+
+**Citations inside fenced code blocks are skipped**, since a document's code
+samples name illustrative paths rather than asserting anything about the
+repository — including, unavoidably, the example two paragraphs above. Inline
+citations in prose are checked.
+
+**The anchor must sit on the citation's own line.** A citation whose anchor
+wrapped onto the next line is reported `unverifiable` rather than checked. This
+is deliberate: binding across the newline would also bind an ordinary
+parenthetical that merely follows an unanchored citation, failing a correct
+citation for text it never opted into. The missed check is visible in the
+coverage tally and fixed by joining the line; a false failure is what teaches
+an operator to stop reading the output.
+
+**Paths resolve against `git ls-files`**, including files that are new but not
+ignored, so what counts as source is the repository's own `.gitignore`. A
+worktree checked out inside the repo, a `.venv`, or a `build/lib` shadowing
+every module in `src/` therefore never enters the candidate set for an
+ambiguity check.
+
+**Anchors are opt-in, and that is the adoption path.** A citation with no
+anchor is reported as `unverifiable`, not as a finding, so this can be turned
+on against documents written before it existed without producing a wall of
+noise. Pass `--strict` to also emit those as Low findings — appropriate when
+the operator is deliberately hardening one document's citations, not as the
+default. Note the consequence: `--strict` findings carry the `[manual] `
+marker, so under it a document with any unanchored citation gains a
+`MANUAL_FINDINGS` entry and will not clean-bless until every citation is
+anchored. That is the point of a hardening pass, but it is not the behaviour
+an operator expects from a flag described as "also report". Path resolution, ambiguity, and past-end-of-file are all checked with
+or without an anchor.
 
 ## Dispatch reviewers in parallel
 
@@ -115,7 +184,9 @@ suggested_direction: "..."              # solid-hygiene only
 
 5. **Per-finding fallback.** If a required field for a given finding is missing/malformed, surface only that block as raw text to the operator at report time; other findings parse normally. Per-finding fallback rather than whole-output fallback prevents one malformed reviewer block from poisoning the entire run.
 
-Combine both reviewers' parsed findings into a single list, `FINDINGS`.
+6. **`CITATION_RAW` parses with the same code.** The checker emits the fact-check block shape (`### Important: …` with `Location`, `Claim`, `Reality`, `Suggested correction`), so run it through steps 1-5 unchanged and tag the resulting records `source: citations`. It also emits `### Low:` blocks, which parse identically: under `--strict` for every unanchored citation, and **unconditionally** for a citation it could not read — today that means one inside a submodule with no contents checked out, whose correction is to run `git submodule update --init`.
+
+Combine all three sources' parsed findings into a single list, `FINDINGS`.
 
 ## Triage findings
 
@@ -123,11 +194,18 @@ Combine both reviewers' parsed findings into a single list, `FINDINGS`.
 
 Two findings count as overlapping if:
 
-1. They have different `source` (one fact-check, one solid-hygiene), AND
-2. Their `location` strings match (after trimming whitespace), AND
+1. They have different `source` — any two of `fact-check`, `solid-hygiene`, `citations` — AND
+2. Their `location` strings match — compared after trimming whitespace AND reducing any leading path to its basename, because the sources spell it differently: the checker emits the document's bare filename followed by a line number, while a reviewer, handed `{spec_path}` as an absolute path, may emit that full absolute path followed by the same line number, or a section heading instead. Compared raw, those never match, and the rule below cannot fire. A location that is a section heading rather than a line will still not match after normalization; that is expected, and it stays an independent finding. AND
 3. The Levenshtein-style similarity between their `claim`/`concern` strings is ≥ `DEDUPE_SIMILARITY` (default 0.8).
 
-For each overlapping pair, keep the "more specific" finding — defined as: the finding whose `claim`/`concern` text contains a named symbol (function name, type name, file path) wins over a finding with only vague references. If tied, the longer text wins. Discard the loser; log the discarded finding's text in a `DEDUPED_FINDINGS` list for the report.
+**A `citations` finding always wins its pair.** Where a `citations` finding
+overlaps one from either reviewer, keep the `citations` one and log the other in
+`DEDUPED_FINDINGS` regardless of which reads as more specific. It carries a line
+number read off disk this run; the reviewer's carries one the reviewer arrived
+at. Applying both would also mean two Edits against the same text, the second of
+which fails to match. Overlap here uses the same three conditions above.
+
+For each remaining overlapping pair, keep the "more specific" finding — defined as: the finding whose `claim`/`concern` text contains a named symbol (function name, type name, file path) wins over a finding with only vague references. If tied, the longer text wins. Discard the loser; log the discarded finding's text in a `DEDUPED_FINDINGS` list for the report.
 
 If two solid-hygiene findings (same source) share `location` and similar text, they're duplicates from one reviewer — keep one, log the other in `DEDUPED_FINDINGS`.
 
@@ -135,8 +213,8 @@ If two solid-hygiene findings (same source) share `location` and similar text, t
 
 Two findings count as contradictory if:
 
-1. They have different `source` (one fact-check, one solid-hygiene), AND
-2. Their `location` strings match (after trimming whitespace), AND
+1. One is `fact-check` and the other is `solid-hygiene`. **`citations` findings are excluded from this gate** — it exists to catch two reviewers disagreeing about an underlying premise, and a citation finding is a measurement rather than an opinion: it read the bytes at the cited line this run. A low-similarity citations finding sharing a location with a reviewer finding is two independent observations about one line, not a disagreement, and forcing a choice between them (the gate applies only the chosen finding) would discard one that is simply correct. Where they genuinely duplicate, the ≥ `DEDUPE_SIMILARITY` rule above already resolves it in the citation's favour. AND
+2. Their `location` strings match **under the location-matching rule** defined once under "Dedupe" above, AND
 3. The Levenshtein-style similarity between their `claim`/`concern` strings is **below** `DEDUPE_SIMILARITY` (so they're NOT duplicates) AND below 0.4 (low similarity — they're describing different concerns at the same spec location).
 
 Crossing the same location from different angles is normal (e.g., a fact-check finding about a file path AND a SOLID finding about the design at that same path); those proceed as independent findings. But low-similarity findings at the same location may indicate the reviewers disagree about the underlying premise (one assumes X is true, the other's design feedback assumes X is false).
@@ -147,7 +225,7 @@ For each contradictory pair, surface to the operator before triage. Call AskUser
 
 Compute:
 
-- `CI_COUNT` = number of findings with `severity in (Critical, Important)`.
+- `CI_COUNT` = number of findings with `severity in (Critical, Important)`, **excluding `source: citations`** (see the note under Tuning constants for why: they are all Important, and one renamed module can produce thirty, which would abort the run this pass exists to make cheap).
 - `TOTAL_COUNT` = number of all findings (post-dedupe).
 
 If `CI_COUNT > OVERLOAD_CRITICAL_IMPORTANT` OR `TOTAL_COUNT > OVERLOAD_TOTAL`, abort before any edits. Report:
@@ -218,8 +296,10 @@ For each finding to apply (after gating resolutions), apply this loop:
 1. **Verify claim-text-in-spec.** Read the spec content. Search for the exact `claim` string verbatim. If not found:
    - The reviewer hallucinated a quote. Downgrade this finding to a Low-severity advisory.
    - Add to `HALLUCINATED_FINDINGS` list for the report.
-   - Skip the Edit — do NOT proceed to step 2 for this finding.
-2. **Apply the Edit.** Use the Edit tool with:
+   - Skip the Edit — do NOT proceed to step 2 or step 3 for this finding.
+2. **Skip first, if the correction is marked.** If this is a `source: citations` finding whose `suggested_correction` begins with `[manual] `, add it to `MANUAL_FINDINGS`, make NO Edit, and move to the next finding. This is a control-flow guard, not a formatting note — the text after the marker is an instruction to a human, and applying it would replace a citation with an English sentence.
+
+3. **Apply the Edit.** Use the Edit tool with:
    - `file_path` = absolute path to spec
    - `old_string` = the verified claim text
    - `new_string` = the corrected text per the type below
@@ -228,13 +308,17 @@ For each finding to apply (after gating resolutions), apply this loop:
 
    - **Mechanical drift** (path moved, line range stale, function renamed): replace verbatim with the verified reality from the finding's `reality` field. No annotation needed.
 
-   - **Substantive drift** (claim about behavior was wrong): replace with verified reality, then append a one-line note explaining what changed about the design's premise. Format the appended note in italics: `*(Verified <date>: was incorrect — <one-line summary of change>.)*`. Use the date from `date +%Y-%m-%d`.
+   - **`source: citations` findings** that reach this point (i.e. survived the step-2 guard, so their correction carries no `[manual] ` marker): `old_string` = the `claim` text, `new_string` = the **`suggested_correction` verbatim**. No annotation.
+
+     **Not the `reality` field** — do not route these through the mechanical-drift bullet above. For a citation finding `reality` is prose explaining the drift (`` `usr/bin/env` is at `resolve-pr-remotes.sh:1`, not at 2. ``) while `suggested_correction` is the replacement citation (`` `resolve-pr-remotes.sh:1` (`usr/bin/env`) ``). Using `reality` here would write that sentence over the citation — the exact failure the `[manual]` marker exists to prevent, on the one verdict that both auto-applies and permits a clean bless.
+
+     The marker is emitted by the checker rather than listed here on purpose. An exception list in this file is exactly what went stale the first time: it named a verdict the checker no longer had, and undercounted the ones needing a human. A new verdict added to the checker carries its own marker, so this rule does not need editing to stay correct.
 
    - **Advisory SOLID findings** (`gate_status: advisory`): address by adding/revising design notes within the relevant section. Add a "Design note (<date>):" subsection at the end of the section explaining the improvement made in response to the SOLID concern. Format: `> **Design note (<date>):** <description of how the section was revised in response to the SOLID concern>`.
 
    - **Accepted net-negative findings** (gated as `Accept`): append an "Accepted net-negative tradeoff" annotation. Format: `> **Accepted net-negative tradeoff (<date>):** <reviewer's concern verbatim>. <user's reasoning if provided; otherwise "explicit operator approval">`.
 
-3. **One Edit call per logical concern.** Don't batch unrelated findings into a single Edit. If a single finding requires multiple text replacements (e.g., the claim text appears in three places), use Edit's `replace_all: true` only if all instances are the same drift; otherwise issue one Edit per location.
+4. **One Edit call per logical concern.** Don't batch unrelated findings into a single Edit. If a single finding requires multiple text replacements (e.g., the claim text appears in three places), use Edit's `replace_all: true` only if all instances are the same drift; otherwise issue one Edit per location.
 
 Preserve the spec's voice — don't rewrite paragraphs you didn't have a finding about. The goal is targeted correction, not stylistic refresh.
 
@@ -262,7 +346,10 @@ For each finding in `FINDINGS` after triage:
      ⛔ validate: <count> findings could not be auto-edited because reviewer claims didn't match spec text. Manual triage required. See report below for the affected findings.
      ```
 
-4. **All other findings (advisory, mechanical, substantive, Critical fact-check applied):**
+4. **`[manual]` citation findings:**
+   - No Edit was issued for these by design, so there is nothing to verify. Confirm only that each is present in `MANUAL_FINDINGS`, which the Report step below is required to list under "Manual citations:" — an unapplied finding that is also unreported is a silent drop.
+
+5. **All other findings (advisory, mechanical, substantive, Critical fact-check applied):**
    - No verification needed; the Edit call either succeeded (the spec was modified) or threw (the run already aborted). Trust that the Edit happened.
 
 If all checks pass, the spec is BLESSED. Proceed to the report. If any block fires, the spec is NOT blessed; do NOT update the frontmatter `validated:` block.
@@ -288,16 +375,24 @@ If verification failed (any block fired), print:
 ```
 Findings:
   Critical:    <X> (fact-check: <A>, solid: <B>)
-  Important:   <X>
+  Important:   <X> (fact-check: <A>, solid: <B>, citations: <C>)
   Medium:      <X>
   Low:         <X>
   Nitpick:     <X>
   ---
   Total:       <X>
+  Citations:   <N> found, <V> verified, <U> unverifiable, <B> broken
+  Manual citations: <X> (corrections a human must make; listed below)
   Deduped:     <X> (kept more-specific in each pair)
   Hallucinated: <X> (claim text not in spec; surfaced for manual review)
   Net-negative: <X> (<Y> addressed, <Z> accepted, <W> remaining → BLOCKING)
 ```
+
+Take the `Citations:` numbers from the `<!-- citations: … -->` comment on the first line of `CITATION_RAW`. Print the line even when all four numbers are zero: a run that found no citations and a run where the check never happened produce the same empty findings list, and only this line distinguishes them.
+
+**List every finding in `MANUAL_FINDINGS` under a "Manual citations:" subsection**, each with its `claim`, its `reality`, and its correction with the `[manual] ` prefix stripped. These were deliberately not applied as edits, so this subsection is the only place their text reaches the operator — count without list is a number the operator cannot act on.
+
+If any contradiction pairs were resolved at the contradiction gate, list them under a "Conflict resolutions:" subsection with the pair and the operator's choice.
 
 If any findings were deferred via Gate 1, list them under a "Deferred:" subsection with reasoning.
 If any findings hallucinated quotes (in `HALLUCINATED_FINDINGS`), list each with the original claim text and the reviewer's intended `reality` so the operator can manually triage.
@@ -358,6 +453,7 @@ A bless is **clean** only when the spec/plan is blessed AND every one of these c
 - Accepted net-negatives (`net_negative_remaining`, from Gate 2 `Accept`) = 0
 - Skipped Critical fact-checks (Gate 3 `Skip`, downgraded to advisory) = 0
 - Hallucinated findings (`HALLUCINATED_FINDINGS`) = 0
+- Unapplied citation findings (`MANUAL_FINDINGS`, the `[manual]` corrections surfaced rather than edited) = 0 — citations the checker could not repair on its own. Most are known-wrong; some are merely unreadable (a citation into an unchecked-out submodule may well be correct). They are the one caveat class the skill deliberately declines to repair, so nothing downstream will catch them: without this line a spec with thirty broken citations blesses clean and auto-continues into planning with every one of them intact.
 - Parse failures = 0 — counting BOTH classes from "Parse findings": a `### ` block whose heading failed the `^### (Critical|Important|Medium|Low|Nitpick):` match, AND any finding surfaced as raw text because a required field was missing/malformed
 - Reviewer contradictions that reached the contradiction gate ("Detect contradictions") = 0 — ANY operator resolution counts as a caveat, including picking a side (`Apply fact-check finding (skip SOLID)` / `Apply SOLID finding (skip fact-check)`), not only `Skip both — manual triage`. A triggered contradiction gate means the reviewers disagreed about an underlying premise and human judgment was required — that is less than maximal confidence regardless of how it was resolved.
 - `KIND` was determined by frontmatter, path, or content shape — NOT by the tie-break AskUserQuestion ("Detect kind" step 4). A tie-broken kind means the artifact's identity was itself ambiguous; do not auto-continue (especially into implementation) off a guess.

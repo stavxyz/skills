@@ -449,6 +449,37 @@ report "the emitted Claim is the document's own bytes, two spaces and all" \
   '`skills/validate/SKILL.md:0`  (`Tuning`)' \
   "$claim"
 
+# --- the location key, which SKILL.md's dedupe depends on -------------------
+# SKILL.md compares findings from three sources by a key EXTRACTED from each
+# `Location`. That rule is prose an LLM executes, so it has no harness — but
+# both halves of it are checkable here: that the checker emits a location the
+# rule can extract from, and that the rule as specified actually collapses the
+# real shapes the other two sources emit.
+#
+# The predecessor rule ("reduce any leading path to its basename") passed review
+# three times and could not match ANY real reviewer output, because the noise is
+# on both ends. These strings are verbatim from the run that caught it.
+loc=$(printf '%s' "$OUT" | sed -n 's/^\*\*Location:\*\* //p' | head -1)
+case "$loc" in
+  *[!/]:[0-9]*) pass=$((pass + 1)) ;;
+  *) fail=$((fail + 1))
+     printf 'FAIL: the checker must emit a <file>:<line> Location\n  got: %s\n' "$loc" ;;
+esac
+
+key() {  # last <filename>:<line> in the string, reduced to basename:line
+  printf '%s' "$1" | grep -oE '[A-Za-z0-9_.-]+\.[a-z]+:[0-9]+' | tail -1
+}
+report "the location key collapses the checker and fact-check spellings" \
+  "same" \
+  "$([ "$(key 'spec.md:17')" = "$(key '`docs/superpowers/specs/spec.md:17` (Components)')" ] \
+     && echo same || echo different)"
+report "...and is not fooled by a path component that looks like the file" \
+  "spec.md:17" \
+  "$(key '`docs/spec.md.bak/spec.md:17` (Components)')"
+report "a section-only location yields no key, so it cannot false-match" \
+  "" \
+  "$(key '"Components" (lines 17-22)')"
+
 # --- the checker's own docs are not exempt --------------------------------
 # Counts the per-document tally lines as well as summing them: a crashing
 # checker prints nothing, `sed` matches nothing, and `awk` would sum an empty
@@ -466,7 +497,7 @@ report "skills/validate/*.md carry no broken citations" \
 # A conditional case (the submodule one) means "0 failed" could otherwise hide
 # a silently smaller run. Counted outside `report` so this check cannot count
 # itself; bump it deliberately when you add an assertion.
-EXPECTED_ASSERTIONS=64
+EXPECTED_ASSERTIONS=68
 ran=$((pass + fail))
 if [ "$ran" -ne "$EXPECTED_ASSERTIONS" ]; then
   fail=$((fail + 1))

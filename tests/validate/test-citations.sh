@@ -449,6 +449,107 @@ report "the emitted Claim is the document's own bytes, two spaces and all" \
   '`skills/validate/SKILL.md:0`  (`Tuning`)' \
   "$claim"
 
+# --- the location key, which SKILL.md's dedupe depends on -------------------
+# SKILL.md compares findings from three sources by a key EXTRACTED from each
+# `Location`. That rule is prose an LLM executes, so it has no harness — but
+# both halves of it are checkable here: that the checker emits a location the
+# rule can extract from, and that the rule as specified actually collapses the
+# real shapes the other two sources emit.
+#
+# The predecessor rule ("reduce any leading path to its basename") passed review
+# three times and could not match ANY real reviewer output, because the noise is
+# on both ends. These strings are verbatim from the run that caught it.
+# F10: `key()` is a faithful transcription of the documented rule, INCLUDING
+# its fallback ("the key is the whole string, trimmed"). An earlier version
+# echoed nothing on no-match, which silently made every section-only location
+# equal to every other — universal false-matching, the exact opposite of the
+# property the assertion below claims.
+SPEC_BASE="fixture-citations.md"
+key() {  # the <file>:<line> pair naming the DOCUMENT, else the whole string
+  local hit
+  # The character class excludes `/`, so a match is already `basename:line` —
+  # the rule's "reduced to basename:line" needs no separate step here. Said
+  # explicitly because a redundant `${hit##*/}` looked like coverage and was a
+  # no-op: mutating it away changed nothing.
+  hit=$(printf '%s' "$1" | grep -oE '[A-Za-z0-9_.-]+:[0-9]+' \
+        | grep -E "^${SPEC_BASE//./\\.}:[0-9]+$" | tail -1)
+  if [ -n "$hit" ]; then printf '%s' "$hit"; else printf '%s' "$1"; fi
+}
+
+# F11: assert extractability THROUGH the helper. The previous glob accepted
+# `Makefile:12`, from which the helper extracts nothing.
+loc=$(printf '%s' "$OUT" | sed -n 's/^\*\*Location:\*\* //p' | head -1)
+report "the checker emits a Location the key can be extracted from" \
+  "$loc" "$(key "$loc")"
+
+# F8: comparing two key() outputs for equality passed when BOTH were empty —
+# `[ "" = "" ]`. A dead regex satisfied it. Assert each side against the
+# literal instead, which is the fourth instance of this anti-pattern in this
+# PR series and the first one introduced by the change that documents it.
+report "the checker spelling keys to basename:line" \
+  "$SPEC_BASE:17" "$(key "$SPEC_BASE:17")"
+report "the fact-check spelling keys to the same thing" \
+  "$SPEC_BASE:17" "$(key "\`docs/superpowers/specs/$SPEC_BASE:17\` (Components)")"
+report "...and is not fooled by a path component that looks like the file" \
+  "$SPEC_BASE:17" "$(key "\`docs/$SPEC_BASE.bak/$SPEC_BASE:17\` (Components)")"
+
+# F1/F9: the rule keys to the pair naming the DOCUMENT, never to a source file
+# the finding also cites. Taking the last pair instead — the obvious reading —
+# keys a design finding to `driver.py:42`, which leaves dedupe dead for the
+# SOLID reviewer and collapses findings its own template forbids collapsing.
+# Nothing exercised this before; `head -1` vs `tail -1` survived the suite.
+report "a trailing source-file citation does not capture the key" \
+  "$SPEC_BASE:17" "$(key "$SPEC_BASE:17 (see src/app/driver.py:42)")"
+report "a section location that cites a source file keys to the whole string" \
+  '"Components" (src/app/driver.py:42)' \
+  "$(key '"Components" (src/app/driver.py:42)')"
+
+report "a section-only location keys to itself, matching only an identical one" \
+  '"Components" (lines 17-22)' \
+  "$(key '"Components" (lines 17-22)')"
+
+# --- pin the suite to the artifact, not to its own restatement -------------
+# `key()` above is a bash reimplementation of a prose rule an LLM executes.
+# Testing it proves the semantics are well-defined; it proves NOTHING about
+# what ships, and mutation showed exactly that: reverting SKILL.md's rule to
+# the broken prefix-strip it replaced — or deleting the rule block outright —
+# left this suite green. These assertions couple the two, so a prose edit that
+# diverges from `key()` fails here instead of silently shipping.
+RULE=$(cat "$REPO_ROOT/skills/validate/SKILL.md")
+
+contains "SKILL.md keys on the DOCUMENT, not on position in the string" \
+  "$RULE" "basename equals the basename of"
+contains "SKILL.md still specifies the whole-string fallback key() implements" \
+  "$RULE" "the key is the whole string, trimmed"
+contains "SKILL.md still explains why the last pair is the wrong key" \
+  "$RULE" "Keying on the last pair would key a design finding"
+
+# The rule this replaced, in its own words. If it comes back, the bug is back.
+case "$RULE" in
+  *"reducing any leading path to its basename"*)
+    fail=$((fail + 1))
+    printf 'FAIL: SKILL.md has reverted to the prefix-strip rule that could never match\n' ;;
+  *) pass=$((pass + 1)) ;;
+esac
+
+# The supersession test must stay decisive. A location-key proxy classified an
+# invented quote as superseded whenever anything else touched the same line,
+# and superseded neither blocks nor caveats the bless.
+contains "supersession is decided from the pre-edit bytes, not a location key" \
+  "$RULE" "present in the pre-edit content, absent now"
+
+# The `[manual]` guard must run BEFORE claim verification, or a marked finding
+# whose text was overtaken is reclassified superseded and slips past the
+# MANUAL_FINDINGS clean-bless caveat.
+# Compare the STEP NUMBERS, not the byte positions: an LLM executes the list by
+# its numbering, so renumbering alone reorders it. A position-only check passed
+# with the guard renumbered to step 9.
+guard=$(printf '%s' "$RULE" | sed -n 's/^\([0-9]*\)\. \*\*Skip first, if the correction is marked.*/\1/p')
+verify=$(printf '%s' "$RULE" | sed -n 's/^\([0-9]*\)\. \*\*Verify claim-text-in-spec.*/\1/p')
+report "the [manual] guard is numbered before claim verification" \
+  "yes" \
+  "$([ -n "$guard" ] && [ -n "$verify" ] && [ "$guard" -lt "$verify" ] && echo yes || echo no)"
+
 # --- the checker's own docs are not exempt --------------------------------
 # Counts the per-document tally lines as well as summing them: a crashing
 # checker prints nothing, `sed` matches nothing, and `awk` would sum an empty
@@ -466,7 +567,7 @@ report "skills/validate/*.md carry no broken citations" \
 # A conditional case (the submodule one) means "0 failed" could otherwise hide
 # a silently smaller run. Counted outside `report` so this check cannot count
 # itself; bump it deliberately when you add an assertion.
-EXPECTED_ASSERTIONS=64
+EXPECTED_ASSERTIONS=77
 ran=$((pass + fail))
 if [ "$ran" -ne "$EXPECTED_ASSERTIONS" ]; then
   fail=$((fail + 1))

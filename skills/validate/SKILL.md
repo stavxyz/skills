@@ -190,12 +190,76 @@ Combine all three sources' parsed findings into a single list, `FINDINGS`.
 
 ## Triage findings
 
+### The location key
+
+The three sources spell `Location` differently, so they are compared by a key
+EXTRACTED from each, never by the raw strings and never by stripping a prefix:
+
+> **Location key** = the `<filename>:<line>` pair in the `location` string whose
+> basename equals the basename of `{spec_path}`, reduced to `basename:line`. If
+> several match, take the last — they are all the document, so the choice only
+> affects which line wins, and a later mention is the more specific one. (A
+> tracked file elsewhere in the repo sharing the document's basename would also
+> match; that is the same basename ambiguity `check-citations.py` reports for
+> citations, and is rare enough in a `location` string to accept.) If none
+> matches the document, the key is the whole string, trimmed — not some other
+> file's pair.
+>
+> A location naming a RANGE keys to the range's first line — lines 17-22 of the
+> document key to line 17. Two findings on overlapping-but-unequal ranges
+> therefore do not match, which is a missed dedupe rather than a wrong merge:
+> the safe direction.
+>
+> Two findings match when their keys are equal. A `basename:line` key can never
+> equal a whole-string key, so a line-level finding never matches a
+> section-level one. Two section-level findings with the same location string DO
+> match, which is what same-source dedupe below relies on.
+
+**Why it is keyed to the document and not simply "the last pair".** A finding's
+`location` may name a SOURCE file as well as the spec: `solid-hygiene-reviewer.md`
+specifies `<section heading in the {kind}, plus optional file:line if referencing
+existing code>`, and that reference is trailing, so it is always the last pair.
+Keying on the last pair would key a design finding to that source file's line — which
+leaves dedupe just as dead for the SOLID reviewer as the old rule left it for
+fact-check, and is actively worse: two solid findings in DIFFERENT spec sections
+that both cite the same source line would share a key and be collapsed. Both reviewer
+templates forbid exactly that ("findings at distinct locations are never
+collapsed"), and the repeated-pattern sweep is designed to produce those pairs.
+
+Extraction, not stripping, because the noise is on BOTH ends. Observed in a real
+run, all three of these denote the same line of the same document:
+
+```text
+source        Location as emitted                              -> key
+citations     spec.md:17                                       -> spec.md:17
+fact-check    `docs/superpowers/specs/spec.md:17` (Components)  -> spec.md:17
+solid         "Components" (src/app/driver.py:42)               -> "Components" (src/app/driver.py:42)
+solid         spec.md:17 (see src/app/driver.py:42)             -> spec.md:17
+```
+
+(Fenced deliberately: those are illustrative locations, not claims about this
+repository, and the citation checker reads unfenced ones. Its own documentation
+is the first place that bites.)
+
+An earlier version of this rule said "reduce any leading path to its basename".
+That handled the directory prefix and nothing else, so the surrounding backticks
+and the trailing ` (Components)` survived and the keys never matched — the
+dedupe below could not fire at all, on any real reviewer output. The failure was
+silent and the consequence was not: see the **Superseded claims** bullet in
+step 2 of "Edit the spec in place".
+
+A `solid-hygiene` location naming a section rather than a line keys to that
+whole string. It therefore never matches a line-level key — a section-level
+design concern and a line-level citation are independent findings, not
+duplicates — but it DOES match another finding at the identical section, which
+is how same-source dedupe below fires.
+
 ### Dedupe
 
 Two findings count as overlapping if:
 
 1. They have different `source` — any two of `fact-check`, `solid-hygiene`, `citations` — AND
-2. Their `location` strings match — compared after trimming whitespace AND reducing any leading path to its basename, because the sources spell it differently: the checker emits the document's bare filename followed by a line number, while a reviewer, handed `{spec_path}` as an absolute path, may emit that full absolute path followed by the same line number, or a section heading instead. Compared raw, those never match, and the rule below cannot fire. A location that is a section heading rather than a line will still not match after normalization; that is expected, and it stays an independent finding. AND
+2. Their `location` strings match **under the location key** defined above, AND
 3. The Levenshtein-style similarity between their `claim`/`concern` strings is ≥ `DEDUPE_SIMILARITY` (default 0.8).
 
 **A `citations` finding always wins its pair.** Where a `citations` finding
@@ -214,7 +278,7 @@ If two solid-hygiene findings (same source) share `location` and similar text, t
 Two findings count as contradictory if:
 
 1. One is `fact-check` and the other is `solid-hygiene`. **`citations` findings are excluded from this gate** — it exists to catch two reviewers disagreeing about an underlying premise, and a citation finding is a measurement rather than an opinion: it read the bytes at the cited line this run. A low-similarity citations finding sharing a location with a reviewer finding is two independent observations about one line, not a disagreement, and forcing a choice between them (the gate applies only the chosen finding) would discard one that is simply correct. Where they genuinely duplicate, the ≥ `DEDUPE_SIMILARITY` rule above already resolves it in the citation's favour. AND
-2. Their `location` strings match **under the location-matching rule** defined once under "Dedupe" above, AND
+2. Their `location` strings match **under the location key** defined under "The location key" above, AND
 3. The Levenshtein-style similarity between their `claim`/`concern` strings is **below** `DEDUPE_SIMILARITY` (so they're NOT duplicates) AND below 0.4 (low similarity — they're describing different concerns at the same spec location).
 
 Crossing the same location from different angles is normal (e.g., a fact-check finding about a file path AND a SOLID finding about the design at that same path); those proceed as independent findings. But low-similarity findings at the same location may indicate the reviewers disagree about the underlying premise (one assumes X is true, the other's design feedback assumes X is false).
@@ -291,14 +355,24 @@ If `CURRENT_MTIME != INITIAL_MTIME`, abort with:
 
 After the first Edit call begins, validate's own writes will advance mtime — no further re-stats are meaningful.
 
+Apply findings in this order: **`source: citations` first**, then the reviewers'. Order matters because the supersession rule below drops whichever finding of a pair is reached second, and "a `citations` finding always wins its pair" would otherwise be reversed for every pair that dedupe does not cover (dedupe fires only at similarity ≥ `DEDUPE_SIMILARITY`; the band below it lands here instead).
+
 For each finding to apply (after gating resolutions), apply this loop:
 
-1. **Verify claim-text-in-spec.** Read the spec content. Search for the exact `claim` string verbatim. If not found:
-   - The reviewer hallucinated a quote. Downgrade this finding to a Low-severity advisory.
-   - Add to `HALLUCINATED_FINDINGS` list for the report.
-   - Skip the Edit — do NOT proceed to step 2 or step 3 for this finding.
-2. **Skip first, if the correction is marked.** If this is a `source: citations` finding whose `suggested_correction` begins with `[manual] `, add it to `MANUAL_FINDINGS`, make NO Edit, and move to the next finding. This is a control-flow guard, not a formatting note — the text after the marker is an instruction to a human, and applying it would replace a citation with an English sentence.
+1. **Skip first, if the correction is marked.** If this is a `source: citations` finding whose `suggested_correction` begins with `[manual] `, add it to `MANUAL_FINDINGS`, make NO Edit, and move to the next finding — before step 2, so a `[manual]` finding can never be reclassified as superseded and slip past the `MANUAL_FINDINGS = 0` clean-bless caveat. This is a control-flow guard, not a formatting note — the text after the marker is an instruction to a human, and applying it would replace a citation with an English sentence.
 
+2. **Verify claim-text-in-spec.** Applies to findings carrying a `claim` (`fact-check` and `citations`); a `solid-hygiene` finding carries `concern` and no quoted text, so it skips to step 3. Read the spec content. Search for the exact `claim` string verbatim. If not found, decide WHY before classifying it:
+
+   Keep the spec's **pre-edit** content — the bytes as read before the first Edit of this run — and search THAT for the same `claim`:
+
+   - **Superseded claims** — present in the pre-edit content, absent now. An Edit applied earlier in this run overtook it. Add to `SUPERSEDED_FINDINGS`, make no Edit, continue. **This is not a hallucination and must not block.**
+   - **Hallucinated** — absent from the pre-edit content too. The reviewer quoted text the spec never contained. Downgrade to a Low-severity advisory, add to `HALLUCINATED_FINDINGS`, and skip the Edit.
+
+   The pre-edit content is the decisive test, and it is why this step does not consult the location key. A location-key proxy ("some finding at this location was applied, so this must be superseded") would classify an INVENTED quote as superseded whenever any other finding touched the same line — and superseded never blocks and is not a bless caveat, so a genuine hallucination would pass straight into auto-continue. The pre-edit bytes answer the actual question, cannot be fooled, and hold whether or not dedupe worked.
+
+   In both cases, do NOT proceed to step 3 for this finding.
+
+   **Why the distinction is load-bearing.** Two sources reporting the same drift at one location is the normal case, not an anomaly — in one real run, every citation finding had a fact-check counterpart. Whichever Edit lands first necessarily invalidates the other's quoted text. Classing that as a hallucination made a CORRECT fix produce `⛔ validate blocked: reviewer claims didn't match spec text`, and hallucinated findings always block — so the better the citation check performed, the more likely the run was to fail. Dedupe should collapse most such pairs before they reach this step; this is the backstop for when it does not, and a backstop that turns a success into a block is worse than none.
 3. **Apply the Edit.** Use the Edit tool with:
    - `file_path` = absolute path to spec
    - `old_string` = the verified claim text
@@ -340,16 +414,19 @@ For each finding in `FINDINGS` after triage:
    - Confirm the "Accepted net-negative tradeoff" annotation appears in the spec body at the finding's location.
    - If absent, block (same form as above; "annotation absent").
 
-3. **Findings in `HALLUCINATED_FINDINGS`** (claim text not found verbatim):
+3. **Findings in `SUPERSEDED_FINDINGS`** (claim present in the pre-edit content, absent after this run's Edits):
+   - Never blocking, and nothing to verify: membership already required that the claim was in the pre-edit content and that an Edit removed it, so the drift was addressed by construction. List them in the report so the operator can see that two sources agreed.
+
+4. **Findings in `HALLUCINATED_FINDINGS`** (claim text absent with no applied Edit accounting for it):
    - Always block. Report:
      ```
      ⛔ validate: <count> findings could not be auto-edited because reviewer claims didn't match spec text. Manual triage required. See report below for the affected findings.
      ```
 
-4. **`[manual]` citation findings:**
+5. **`[manual]` citation findings:**
    - No Edit was issued for these by design, so there is nothing to verify. Confirm only that each is present in `MANUAL_FINDINGS`, which the Report step below is required to list under "Manual citations:" — an unapplied finding that is also unreported is a silent drop.
 
-5. **All other findings (advisory, mechanical, substantive, Critical fact-check applied):**
+6. **All other findings (advisory, mechanical, substantive, Critical fact-check applied):**
    - No verification needed; the Edit call either succeeded (the spec was modified) or threw (the run already aborted). Trust that the Edit happened.
 
 If all checks pass, the spec is BLESSED. Proceed to the report. If any block fires, the spec is NOT blessed; do NOT update the frontmatter `validated:` block.
@@ -383,6 +460,7 @@ Findings:
   Total:       <X>
   Citations:   <N> found, <V> verified, <U> unverifiable, <B> broken
   Manual citations: <X> (corrections a human must make; listed below)
+  Superseded:  <X> (a second source reported the same drift; not blocking)
   Deduped:     <X> (kept more-specific in each pair)
   Hallucinated: <X> (claim text not in spec; surfaced for manual review)
   Net-negative: <X> (<Y> addressed, <Z> accepted, <W> remaining → BLOCKING)
@@ -396,6 +474,8 @@ If any contradiction pairs were resolved at the contradiction gate, list them un
 
 If any findings were deferred via Gate 1, list them under a "Deferred:" subsection with reasoning.
 If any findings hallucinated quotes (in `HALLUCINATED_FINDINGS`), list each with the original claim text and the reviewer's intended `reality` so the operator can manually triage.
+
+If any findings were superseded (in `SUPERSEDED_FINDINGS`), list each with the finding that superseded it. Two sources independently reporting one drift is corroboration and worth seeing; it is not a caveat, and it does not affect the bless.
 
 ### Update the spec's frontmatter (only on bless)
 

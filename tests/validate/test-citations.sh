@@ -64,6 +64,20 @@ contains() {
   esac
 }
 
+# Fails if `$3` IS present. The counterpart to `contains`, and the one this
+# suite lacked: a substring pin detects a phrase being deleted, never a
+# contradicting phrase being added beside it. Twelve mutations survived for
+# want of this — including re-adding a superseded rule next to its
+# replacement, which left the contract self-contradictory at 107/107 green.
+lacks() {
+  local desc=$1 haystack=$2 needle=$3
+  case "$haystack" in
+    *"$needle"*) fail=$((fail + 1))
+       printf 'FAIL: %s\n  must NOT contain: %s\n' "$desc" "$needle" ;;
+    *) pass=$((pass + 1)) ;;
+  esac
+}
+
 OUT=$(python3 "$CHECKER" "$FIXTURE" --repo-root "$REPO_ROOT" 2>&1)
 rc=$?
 report "exits 0 (findings are data, not a gate)" 0 "$rc"
@@ -647,19 +661,47 @@ contains "SKILL.md says --strict leaves no Low citation findings" \
 
 # A net-negative resolved with `Address` used to clear the bless on a
 # diff-non-emptiness check — a one-word edit inside the named section — and was
-# not a caveat, so it auto-continued into autonomous implementation. Three
-# rules now stand between that and the handoff.
+# not a caveat, so it auto-continued into autonomous implementation.
+#
+# These pin the VERBS that enforce, not the sentences that describe. Mutation
+# showed the difference is the whole ballgame: with only descriptive pins,
+# downgrading `block` to `report and continue` gutted the change in full and
+# the suite stayed green.
 contains "an Addressed net-negative is re-reviewed, not diff-checked" \
-  "$RULE" "re-dispatch the SOLID reviewer against the edited spec"
+  "$RULE" "Re-dispatch the SOLID reviewer once**, against the edited spec"
+contains "...and ANY returned net-negative blocks, unmatched by location" \
+  "$RULE" "**c. ANY \`net-negative\` in the result blocks**"
+contains "...an unchanged section blocks before spending a reviewer" \
+  "$RULE" "block now, without dispatching anything"
+contains "...and a re-dispatch that fails or times out blocks" \
+  "$RULE" "If it fails or times out, BLOCK"
+contains "re-review output is quarantined from FINDINGS" \
+  "$RULE" "Never merge it into \`FINDINGS\`"
+
+# Location matching here fails open: the re-review reads the EDITED spec, so a
+# surviving concern legitimately reports a different line. Reintroducing it is
+# the specific regression to guard.
+lacks "the block is not conditioned on a location-key match" \
+  "$RULE" "whose location key (see \"The location key\") equals the original"
+lacks "...and the different-location carve-out has not returned" \
+  "$RULE" "report it, do not block on it here"
+
 contains "...and every Gate 2 resolution is a clean-bless caveat" \
   "$RULE" "Net-negative findings **raised** = 0"
 contains "...including one that cleared re-review" \
   "$RULE" "including an \`Address\` that cleared the re-review"
-contains "the frontmatter records net-negatives RAISED, not only accepted" \
+lacks "the Accept-only caveat has not been re-added beside it" \
+  "$RULE" "- Accepted net-negatives (\`net_negative_remaining\`, from Gate 2 \`Accept\`) = 0"
+
+contains "the frontmatter records net-negatives RAISED" \
   "$RULE" "net_negative_raised:"
-# The header claimed nothing here re-dispatches a reviewer; one thing now does.
-contains "the verify header no longer claims nothing is re-dispatched" \
+contains "...defined as what reached Gate 2, not what was accepted" \
+  "$RULE" "count that reached Gate 2, post-dedupe"
+
+contains "the verify header names the one exception" \
   "$RULE" "The one exception is a net-negative marked"
+lacks "...and no longer claims nothing is re-dispatched" \
+  "$RULE" "This is NOT a re-dispatch of the SOLID reviewer"
 
 contains "supersession is decided from the pre-edit bytes, not a location key" \
   "$RULE" "present in the pre-edit content, absent now"
@@ -693,7 +735,7 @@ report "skills/validate/*.md carry no broken citations" \
 # A conditional case (the submodule one) means "0 failed" could otherwise hide
 # a silently smaller run. Counted outside `report` so this check cannot count
 # itself; bump it deliberately when you add an assertion.
-EXPECTED_ASSERTIONS=107
+EXPECTED_ASSERTIONS=116
 ran=$((pass + fail))
 if [ "$ran" -ne "$EXPECTED_ASSERTIONS" ]; then
   fail=$((fail + 1))

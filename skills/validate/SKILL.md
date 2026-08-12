@@ -348,7 +348,7 @@ If user picks `defer`, the finding will not be applied as an edit; instead, the 
 
 **Gate 2 — SOLID `net-negative` findings.** For each finding with `source: solid-hygiene` AND `gate_status: net-negative`, call AskUserQuestion: question = "<finding's concern>. The reviewer flags this as net-negative — the spec actively makes the codebase worse. Address (re-design the section), accept (record explicit approval that design moves backward), or escalate (back to brainstorming)?", header = "Net-negative", options = `[{label: "Address (re-design section)"}, {label: "Accept (record approval)"}, {label: "Escalate (back to brainstorming)"}]`.
 
-If user picks `Address`: continue to next gate; the edit phase will redesign the spec section.
+If user picks `Address`: continue to next gate; the edit phase will redesign the spec section, and "Verify net-positive" will re-dispatch the SOLID reviewer against the result and block if the net-negative survives. Note for the operator being asked: `Address` does NOT restore a clean bless — every Gate 2 resolution is a caveat, so the run will not auto-continue whichever option is chosen here.
 If user picks `Accept`: record acceptance in the finding's metadata; the edit phase will append an "Accepted net-negative tradeoff" annotation to the spec section.
 If user picks `Escalate`: see "Escalate path" below.
 
@@ -431,17 +431,24 @@ Preserve the spec's voice — don't rewrite paragraphs you didn't have a finding
 
 ## Verify net-positive
 
-Deterministic re-scan of the post-edit spec. This is NOT a re-dispatch of the SOLID reviewer — it's a check that the user's gating choices were honored.
+Mostly a deterministic re-scan of the post-edit spec — a check that the user's gating choices were honored. The one exception is a net-negative marked `Address`, which re-dispatches the SOLID reviewer: see step 1. Nothing else re-runs a reviewer.
 
 For each finding in `FINDINGS` after triage:
 
 1. **Net-negative finding marked `Address`:**
-   - Diff the spec's section at the finding's `location` between pre-edit and post-edit content (compare the section's text before and after the Edit phase).
-   - If unchanged, block with:
-     ```
-     ⛔ validate blocked: <finding's concern>. User selected `address`, but the spec section at <location> is unchanged. Re-run validate after manually addressing this finding.
-     ```
-   - If changed, the user's choice was honored; continue.
+
+   First, the cheap check. Diff the spec's section at the finding's `location` between pre-edit and post-edit content. If unchanged, block without re-dispatching anything:
+   ```
+   ⛔ validate blocked: <finding's concern>. User selected `address`, but the spec section at <location> is unchanged. Re-run validate after manually addressing this finding.
+   ```
+
+   If it changed, **re-dispatch the SOLID reviewer against the edited spec** — the same `solid-hygiene-reviewer.md` template with the same placeholder substitution, dispatched exactly as in "Dispatch reviewers in parallel". Parse its output with the same code. Then, for each original `Address` finding, look for a returned finding with `gate_status: net-negative` whose location key (see "The location key") equals the original's. If one is found, block:
+   ```
+   ⛔ validate blocked: the redesign at <location> did not resolve the net-negative. Reviewer still reports: <returned concern>. Re-run validate after redesigning further.
+   ```
+   If none is found for that location, the redesign cleared re-review; continue. (A net-negative the reviewer raises at a DIFFERENT location is a new finding on already-edited text, not a failure of this one — report it, do not block on it here, and let the operator run validate again.)
+
+   **Why this is the one thing worth re-dispatching.** Every other verification here checks that an edit happened. This one has to check that an edit WORKED, and the two are not the same: the redesign clearing the gate is authored by the same controller that then dispatches the implementation of it, and the operator chose `Address` before seeing the result, so their approval was of the intent. A diff-non-emptiness check is satisfied by a one-word edit inside the named section. That made the strongest signal the skill produces — "this actively makes the codebase worse" — the one signal dischargeable by grading your own homework. One extra reviewer run, on a path that is by definition already in trouble, is cheap against that.
 
 2. **Net-negative finding marked `Accept`:**
    - Confirm the "Accepted net-negative tradeoff" annotation appears in the spec body at the finding's location.
@@ -496,7 +503,8 @@ Findings:
   Superseded:  <X> (a second source reported the same drift; not blocking)
   Deduped:     <X> (kept more-specific in each pair)
   Hallucinated: <X> (claim text not in spec; surfaced for manual review)
-  Net-negative: <X> (<Y> addressed, <Z> accepted, <W> remaining → BLOCKING)
+  Net-negative: <X> raised (<Y> addressed and cleared re-review, <Z> accepted)
+                — any non-zero count is a clean-bless caveat
 ```
 
 Take the `Citations:` numbers from the `<!-- citations: … -->` comment on the first line of `CITATION_RAW`. Print the line even when all four numbers are zero: a run that found no citations and a run where the check never happened produce the same empty findings list, and only this line distinguishes them.
@@ -529,7 +537,9 @@ validated:
     medium: <count>
     low: <count>
     nitpick: <count>
-  net_negative_remaining: <count of accepted net-negatives>
+  net_negative_raised: <count of net-negative findings the reviewer returned>
+  net_negative_addressed: <count resolved via Gate 2 `Address`, all of which cleared re-review — a blocked run never reaches the frontmatter>
+  net_negative_remaining: <count of accepted net-negatives, from Gate 2 `Accept`>
 ```
 
 If a `validated:` block already exists from a prior validate run, replace it (the new block always reflects the most recent run).
@@ -563,7 +573,9 @@ This section runs ONLY after a successful bless. If any block fired during "Veri
 A bless is **clean** only when the spec/plan is blessed AND every one of these caveat counts is zero (and both reviewers ran):
 
 - Deferred findings (Gate 1 deferrals) = 0
-- Accepted net-negatives (`net_negative_remaining`, from Gate 2 `Accept`) = 0
+- Net-negative findings **raised** = 0 — ANY Gate 2 resolution counts as a caveat, including `Address`, and including an `Address` that cleared the re-review in "Verify net-positive". Clearing re-review establishes that the redesign WORKS; it does not establish that the design never needed rescuing. A raised net-negative means a reviewer judged the change actively harmful and human judgment was required to resolve it — less than maximal confidence however it went.
+
+  This is the same rule already applied to reviewer contradictions below, and a net-negative is the stronger signal: one reviewer asserting the change is harmful, not two reviewers disagreeing. Note the incentives if `Address` were exempt — `Accept`, where the operator consciously takes the tradeoff with eyes open, would block, while `Address`, where the controller rewrites the section, would not. The honest resolution would be penalized and the self-graded one rewarded.
 - Skipped Critical fact-checks (Gate 3 `Skip`, downgraded to advisory) = 0
 - Hallucinated findings (`HALLUCINATED_FINDINGS`) = 0
 - **Important**-severity unapplied citation findings (`MANUAL_FINDINGS`) = 0. These are citations the checker proved wrong and cannot repair mechanically, so nothing downstream will catch them: without this line a spec with thirty broken citations blesses clean and auto-continues into planning with every one intact.

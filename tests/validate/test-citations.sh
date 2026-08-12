@@ -645,6 +645,22 @@ contains "SKILL.md warns what a machine-wide default costs" \
 contains "SKILL.md says --strict leaves no Low citation findings" \
   "$RULE" "Under \`--strict\` there are no \`Low\` citation findings at all"
 
+# A net-negative resolved with `Address` used to clear the bless on a
+# diff-non-emptiness check — a one-word edit inside the named section — and was
+# not a caveat, so it auto-continued into autonomous implementation. Three
+# rules now stand between that and the handoff.
+contains "an Addressed net-negative is re-reviewed, not diff-checked" \
+  "$RULE" "re-dispatch the SOLID reviewer against the edited spec"
+contains "...and every Gate 2 resolution is a clean-bless caveat" \
+  "$RULE" "Net-negative findings **raised** = 0"
+contains "...including one that cleared re-review" \
+  "$RULE" "including an \`Address\` that cleared the re-review"
+contains "the frontmatter records net-negatives RAISED, not only accepted" \
+  "$RULE" "net_negative_raised:"
+# The header claimed nothing here re-dispatches a reviewer; one thing now does.
+contains "the verify header no longer claims nothing is re-dispatched" \
+  "$RULE" "The one exception is a net-negative marked"
+
 contains "supersession is decided from the pre-edit bytes, not a location key" \
   "$RULE" "present in the pre-edit content, absent now"
 
@@ -677,7 +693,7 @@ report "skills/validate/*.md carry no broken citations" \
 # A conditional case (the submodule one) means "0 failed" could otherwise hide
 # a silently smaller run. Counted outside `report` so this check cannot count
 # itself; bump it deliberately when you add an assertion.
-EXPECTED_ASSERTIONS=102
+EXPECTED_ASSERTIONS=107
 ran=$((pass + fail))
 if [ "$ran" -ne "$EXPECTED_ASSERTIONS" ]; then
   fail=$((fail + 1))

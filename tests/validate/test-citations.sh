@@ -64,6 +64,20 @@ contains() {
   esac
 }
 
+# Fails if `$3` IS present. The counterpart to `contains`, and the one this
+# suite lacked: a substring pin detects a phrase being deleted, never a
+# contradicting phrase being added beside it. Twelve mutations survived for
+# want of this — including re-adding a superseded rule next to its
+# replacement, which left the contract self-contradictory at 107/107 green.
+lacks() {
+  local desc=$1 haystack=$2 needle=$3
+  case "$haystack" in
+    *"$needle"*) fail=$((fail + 1))
+       printf 'FAIL: %s\n  must NOT contain: %s\n' "$desc" "$needle" ;;
+    *) pass=$((pass + 1)) ;;
+  esac
+}
+
 OUT=$(python3 "$CHECKER" "$FIXTURE" --repo-root "$REPO_ROOT" 2>&1)
 rc=$?
 report "exits 0 (findings are data, not a gate)" 0 "$rc"
@@ -645,6 +659,64 @@ contains "SKILL.md warns what a machine-wide default costs" \
 contains "SKILL.md says --strict leaves no Low citation findings" \
   "$RULE" "Under \`--strict\` there are no \`Low\` citation findings at all"
 
+# A net-negative resolved with `Address` used to clear the bless on a
+# diff-non-emptiness check — a one-word edit inside the named section — and was
+# not a caveat, so it auto-continued into autonomous implementation.
+#
+# These pin the VERBS that enforce, not the sentences that describe. Mutation
+# showed the difference is the whole ballgame: with only descriptive pins,
+# downgrading `block` to `report and continue` gutted the change in full and
+# the suite stayed green.
+contains "an Addressed net-negative is re-reviewed, not diff-checked" \
+  "$RULE" "**re-dispatch the SOLID reviewer once** against the edited spec"
+contains "...the re-review runs once for the run, not once per finding" \
+  "$RULE" "This runs once for the whole run, not per finding"
+contains "...an unchanged section blocks, listing every one of them" \
+  "$RULE" "listing EVERY unchanged one"
+contains "...and a failed dispatch and ANY returned net-negative both block" \
+  "$RULE" "**Block if that dispatch fails or times out, and block if it returns any \`net-negative\`**"
+contains "...with the one exception that stops the Accept treadmill" \
+  "$RULE" "a section this run annotated as an accepted tradeoff"
+contains "re-review output is kept out of FINDINGS at the parse step" \
+  "$RULE" "do NOT run its final \"Combine … into \`FINDINGS\`\" line"
+# The redesign Edit no section instructed: without it the honest path issues no
+# Edit and is then blocked by the unchanged-section check for complying.
+contains "the edit phase says how to edit an Address-gated section" \
+  "$RULE" "**Addressed net-negative findings** (gated as \`Address\`)"
+# Gate 2 is where the operator chooses, so it must disclose the real condition.
+contains "Gate 2 discloses that ANY returned net-negative blocks" \
+  "$RULE" "not only one at your finding's location"
+
+# `lacks` can only forbid wordings already seen, so pin the RATIONALE
+# positively as well: anyone reintroducing location matching has to delete the
+# paragraph explaining why it was removed, and that is what fails here. A
+# mutation that reintroduced matching in NEW words slipped past the `lacks`
+# pins below for exactly this reason.
+contains "the file still records why location matching was removed" \
+  "$RULE" "**Why not matched to the original finding's location.**"
+
+lacks "the block is not conditioned on a location-key match" \
+  "$RULE" "whose location key (see \"The location key\") equals the original"
+lacks "...and the different-location carve-out has not returned" \
+  "$RULE" "report it, do not block on it here"
+
+contains "...and every Gate 2 resolution is a clean-bless caveat" \
+  "$RULE" "Net-negative findings **raised** = 0"
+contains "...including one that cleared re-review" \
+  "$RULE" "including an \`Address\` that cleared the re-review"
+lacks "the Accept-only caveat has not been re-added beside it" \
+  "$RULE" "- Accepted net-negatives (\`net_negative_remaining\`, from Gate 2 \`Accept\`) = 0"
+
+contains "the frontmatter records net-negatives RAISED" \
+  "$RULE" "net_negative_raised:"
+contains "...defined as what reached Gate 2, not what was accepted" \
+  "$RULE" "count that reached Gate 2, post-dedupe"
+
+contains "the verify header names the one exception" \
+  "$RULE" "The one exception is a net-negative marked"
+lacks "...and no longer claims nothing is re-dispatched" \
+  "$RULE" "This is NOT a re-dispatch of the SOLID reviewer"
+
 contains "supersession is decided from the pre-edit bytes, not a location key" \
   "$RULE" "present in the pre-edit content, absent now"
 
@@ -677,7 +749,7 @@ report "skills/validate/*.md carry no broken citations" \
 # A conditional case (the submodule one) means "0 failed" could otherwise hide
 # a silently smaller run. Counted outside `report` so this check cannot count
 # itself; bump it deliberately when you add an assertion.
-EXPECTED_ASSERTIONS=102
+EXPECTED_ASSERTIONS=120
 ran=$((pass + fail))
 if [ "$ran" -ne "$EXPECTED_ASSERTIONS" ]; then
   fail=$((fail + 1))

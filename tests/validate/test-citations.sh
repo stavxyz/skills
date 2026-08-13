@@ -668,19 +668,33 @@ contains "SKILL.md says --strict leaves no Low citation findings" \
 # downgrading `block` to `report and continue` gutted the change in full and
 # the suite stayed green.
 contains "an Addressed net-negative is re-reviewed, not diff-checked" \
-  "$RULE" "Re-dispatch the SOLID reviewer once**, against the edited spec"
-contains "...and ANY returned net-negative blocks, unmatched by location" \
-  "$RULE" "**c. ANY \`net-negative\` in the result blocks**"
-contains "...an unchanged section blocks before spending a reviewer" \
-  "$RULE" "block now, without dispatching anything"
-contains "...and a re-dispatch that fails or times out blocks" \
-  "$RULE" "If it fails or times out, BLOCK"
-contains "re-review output is quarantined from FINDINGS" \
-  "$RULE" "Never merge it into \`FINDINGS\`"
+  "$RULE" "**re-dispatch the SOLID reviewer once** against the edited spec"
+contains "...the re-review runs once for the run, not once per finding" \
+  "$RULE" "This runs once for the whole run, not per finding"
+contains "...an unchanged section blocks, listing every one of them" \
+  "$RULE" "listing EVERY unchanged one"
+contains "...and a failed dispatch and ANY returned net-negative both block" \
+  "$RULE" "**Block if that dispatch fails or times out, and block if it returns any \`net-negative\`**"
+contains "...with the one exception that stops the Accept treadmill" \
+  "$RULE" "a section this run annotated as an accepted tradeoff"
+contains "re-review output is kept out of FINDINGS at the parse step" \
+  "$RULE" "do NOT run its final \"Combine … into \`FINDINGS\`\" line"
+# The redesign Edit no section instructed: without it the honest path issues no
+# Edit and is then blocked by the unchanged-section check for complying.
+contains "the edit phase says how to edit an Address-gated section" \
+  "$RULE" "**Addressed net-negative findings** (gated as \`Address\`)"
+# Gate 2 is where the operator chooses, so it must disclose the real condition.
+contains "Gate 2 discloses that ANY returned net-negative blocks" \
+  "$RULE" "not only one at your finding's location"
 
-# Location matching here fails open: the re-review reads the EDITED spec, so a
-# surviving concern legitimately reports a different line. Reintroducing it is
-# the specific regression to guard.
+# `lacks` can only forbid wordings already seen, so pin the RATIONALE
+# positively as well: anyone reintroducing location matching has to delete the
+# paragraph explaining why it was removed, and that is what fails here. A
+# mutation that reintroduced matching in NEW words slipped past the `lacks`
+# pins below for exactly this reason.
+contains "the file still records why location matching was removed" \
+  "$RULE" "**Why not matched to the original finding's location.**"
+
 lacks "the block is not conditioned on a location-key match" \
   "$RULE" "whose location key (see \"The location key\") equals the original"
 lacks "...and the different-location carve-out has not returned" \
@@ -735,7 +749,7 @@ report "skills/validate/*.md carry no broken citations" \
 # A conditional case (the submodule one) means "0 failed" could otherwise hide
 # a silently smaller run. Counted outside `report` so this check cannot count
 # itself; bump it deliberately when you add an assertion.
-EXPECTED_ASSERTIONS=116
+EXPECTED_ASSERTIONS=120
 ran=$((pass + fail))
 if [ "$ran" -ne "$EXPECTED_ASSERTIONS" ]; then
   fail=$((fail + 1))

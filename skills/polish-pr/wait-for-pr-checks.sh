@@ -5,11 +5,14 @@
 # Usage:
 #   wait-for-pr-checks.sh <pr-number>
 #   wait-for-pr-checks.sh <pr-number> --interval 30 --timeout 1800
+#   wait-for-pr-checks.sh <pr-number> --empty-grace 180
 #
-# Defaults: poll every 20s, give up after 1800s (30 min).
+# Defaults: poll every 20s, give up after 1800s (30 min), and wait up to 120s
+# for a check to appear at all before concluding the PR has none.
 #
 # Exit codes:
-#   0  — all checks settled and none failed (or the PR has no checks at all)
+#   0  — all checks settled and none failed (or the PR still reports no checks
+#        after --empty-grace has elapsed)
 #   1  — at least one check is in the `fail` or `cancel` bucket
 #   2  — timed out before all checks settled
 #   3  — usage error / `gh` missing / `gh` invocation failed
@@ -26,11 +29,23 @@
 # pass | fail | pending | skipping | cancel. We poll (rather than use
 # `gh pr checks --watch`) because the skill runs this with run_in_background
 # and wants a custom wall-clock timeout, which `--watch` does not provide.
+#
+# Why --empty-grace: "no checks" and "no checks YET" look identical. In the
+# seconds after a push, GitHub has not registered the workflow run, so
+# `gh pr checks` reports nothing for the head SHA. This script used to read
+# that as "nothing to wait for" and exit 0 immediately — so a caller that
+# pushed and then waited was told the run was green before it had started.
+# Observed on backsight PR #153 (2026-09-01): the script exited 0 with "no
+# checks on this PR" seconds after a push, and a direct `gh pr checks` moments
+# later listed 17 checks with 3 still pending. Exiting 0 on an empty result is
+# the same defect this file exists to prevent, one level up: an empty answer
+# read as a passing one. An empty result is now treated as "not yet", and only
+# becomes "genuinely none" after --empty-grace of continuous emptiness.
 
 set -euo pipefail
 
 usage() {
-  echo "usage: wait-for-pr-checks.sh <pr-number> [--interval SECONDS] [--timeout SECONDS]" >&2
+  echo "usage: wait-for-pr-checks.sh <pr-number> [--interval SECONDS] [--timeout SECONDS] [--empty-grace SECONDS]" >&2
   exit 3
 }
 
@@ -41,17 +56,19 @@ pr="$1"; shift
 
 interval=20
 timeout=1800
+empty_grace=120
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --interval) [[ $# -ge 2 ]] || { echo "--interval needs a value" >&2; exit 3; }; interval="$2"; shift 2 ;;
     --timeout)  [[ $# -ge 2 ]] || { echo "--timeout needs a value"  >&2; exit 3; }; timeout="$2";  shift 2 ;;
+    --empty-grace) [[ $# -ge 2 ]] || { echo "--empty-grace needs a value" >&2; exit 3; }; empty_grace="$2"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 3 ;;
   esac
 done
 
 # Validate every numeric input up front (not just the PR number).
-for pair in "pr-number:$pr" "interval:$interval" "timeout:$timeout"; do
+for pair in "pr-number:$pr" "interval:$interval" "timeout:$timeout" "empty-grace:$empty_grace"; do
   name="${pair%%:*}"; val="${pair#*:}"
   [[ "$val" =~ ^[0-9]+$ ]] || { echo "$name must be numeric, got: $val" >&2; exit 3; }
 done
@@ -75,16 +92,31 @@ while :; do
   fi
   err="$(cat "$errfile")"
 
-  # No rows came back — either the PR genuinely has no checks (treat as
-  # green: nothing to wait for) or gh actually failed (treat as error).
+  # No rows came back. Three causes look alike here, and only one of them is
+  # green: the PR genuinely has no checks; the checks have not been registered
+  # yet (the seconds after a push); or gh failed for a real reason.
   if [[ -z "$rows" ]]; then
-    if grep -qi 'no checks reported' <<<"$err" || [[ $rc -eq 0 ]]; then
-      echo "=== no checks on this PR — nothing to wait for (green) ===" >&2
-      exit 0
+    # A real gh failure is not an empty result — fail fast rather than
+    # spending the grace period on an auth error or a bad PR number.
+    if [[ $rc -ne 0 ]] && ! grep -qi 'no checks reported' <<<"$err"; then
+      echo "gh pr checks failed (rc=$rc): ${err:-unknown error}" >&2
+      exit 3
     fi
-    echo "gh pr checks failed (rc=$rc): ${err:-unknown error}" >&2
-    exit 3
+    # Benign empty. Start the clock the FIRST time we see it, so the grace is
+    # measured over continuous emptiness rather than reset by each poll.
+    : "${empty_since:=$(date +%s)}"
+    empty_for=$(( $(date +%s) - empty_since ))
+    if [[ $empty_for -lt $empty_grace ]]; then
+      echo "[wait-for-pr-checks] no checks reported yet (${empty_for}s of ${empty_grace}s grace), sleeping ${interval}s" >&2
+      sleep "$interval"
+      continue
+    fi
+    echo "=== no checks on this PR after ${empty_grace}s — nothing to wait for (green) ===" >&2
+    exit 0
   fi
+  # Checks appeared: any later empty poll is a fresh transient, not a
+  # continuation of the earlier one.
+  unset empty_since
 
   # Rows present — decide from the bucket column regardless of gh's exit code.
   failed="$(awk -F'\t' '$2 == "fail" || $2 == "cancel"' <<<"$rows" || true)"

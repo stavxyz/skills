@@ -68,7 +68,7 @@ stable contract — it applies `insteadOf` rewrites (so a remote configured as
 whitespace-splits, so a local path containing a space breaks positional
 parsing. The script reads `git config --get-regexp` instead, compares host as
 well as owner/repo so an enterprise remote never matches a github.com PR, and
-folds case. `tests/polish-pr/test-resolve.sh` locks the URL dialects in.
+folds case. `tests/polish-pr/test-resolve.sh` locks the URL dialects in, and `tests/polish-pr/test-wait-for-checks.sh` does the same for the check watcher. Both stub their externals and run offline; run them after touching either script.
 
 **`BASE_REMOTE` and `HEAD_REMOTE` are different remotes on a fork PR**, and
 each has one correct use: fetch and compare against `BASE_REMOTE`, but push the
@@ -180,11 +180,13 @@ GH_REPO=<owner>/<repo> "$CLAUDE_PLUGIN_ROOT/skills/polish-pr/wait-for-pr-checks.
 
 If `$CLAUDE_PLUGIN_ROOT` is unset (some skill installations), resolve the skill's directory by reading the path of this SKILL.md file at invocation time and use the sibling `wait-for-pr-checks.sh`.
 
-The script polls every 20s by default (override with `--interval N`), times out at 1800s (override with `--timeout N`), and exits:
-- `0` — all checks settled, none failed (green) — **also** the exit when the PR has no checks at all (nothing to wait for, so proceed)
+The script polls every 20s by default (override with `--interval N`), times out at 1800s (override with `--timeout N`), and waits up to 120s for a check to appear at all before concluding the PR has none (override with `--empty-grace N`). It exits:
+- `0` — all checks settled, none failed (green) — **also** the exit when the PR reports no checks *after the empty-grace has elapsed*, which is why that answer now takes ~2 minutes rather than being instant
 - `1` — at least one check is in the `fail` or `cancel` bucket
-- `2` — timed out before all checks settled
-- `3` — usage error, `gh` missing, or a real `gh` invocation failure (auth, bad PR)
+- `2` — timed out before all checks settled, including while waiting on an empty result
+- `3` — usage error, `gh` missing, or a `gh` invocation that keeps failing (auth, bad PR); a transient failure is retried a few times first
+
+**Do not "fix" the delay before that first answer.** An empty check list means "no checks" and "no checks *yet*" identically, and the seconds after a push are exactly when a caller asks. Three shapes of false green are guarded here, all of them observed live: an empty result before the run registers; an empty result *after* checks were seen, because a rebase moved the head SHA mid-wait; and every visible check settled while the rest of the matrix has not registered yet. The last one is why a green requires the same check set on two consecutive polls, costing one extra interval. `tests/polish-pr/test-wait-for-checks.sh` pins all three.
 
 Run it with `run_in_background: true` so the harness notifies you on completion instead of blocking the conversation. Do not poll, do not chain sleeps — wait for the completion notification, then read the output file. When it exits 0, proceed to the browser-open gate; on non-zero, surface the failed-check list to the user before doing anything else.
 

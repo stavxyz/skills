@@ -5,11 +5,14 @@
 # Usage:
 #   wait-for-pr-checks.sh <pr-number>
 #   wait-for-pr-checks.sh <pr-number> --interval 30 --timeout 1800
+#   wait-for-pr-checks.sh <pr-number> --empty-grace 180
 #
-# Defaults: poll every 20s, give up after 1800s (30 min).
+# Defaults: poll every 20s, give up after 1800s (30 min), and wait up to 120s
+# for a check to appear at all before concluding the PR has none.
 #
 # Exit codes:
-#   0  — all checks settled and none failed (or the PR has no checks at all)
+#   0  — all checks settled and none failed (or the PR still reports no checks
+#        after --empty-grace has elapsed)
 #   1  — at least one check is in the `fail` or `cancel` bucket
 #   2  — timed out before all checks settled
 #   3  — usage error / `gh` missing / `gh` invocation failed
@@ -26,11 +29,38 @@
 # pass | fail | pending | skipping | cancel. We poll (rather than use
 # `gh pr checks --watch`) because the skill runs this with run_in_background
 # and wants a custom wall-clock timeout, which `--watch` does not provide.
+#
+# Three shapes of false green are guarded, all observed live. A green from
+# this script opens a merge gate, so each one is a wrong merge:
+#
+#   1. Empty because the run has not registered (--empty-grace, below).
+#   2. Empty AFTER checks were seen, because a rebase moved the head SHA
+#      mid-wait - polish-pr rebases and force-pushes, so this is the common
+#      case, not an exotic one. Once `saw_checks` is set, empty means
+#      "waiting", never "none": the script keeps polling to the deadline and
+#      exits 2 rather than 0.
+#   3. Every VISIBLE check settled while the rest of the matrix has not
+#      registered yet. Seen on backsight #202: a table of all-pass printed
+#      while `analyzers-tests (3.14)` was in the fail bucket moments later.
+#      So a green requires the same set of check NAMES on two consecutive
+#      polls - one extra interval, against a false green reaching a merge.
+#
+# Why --empty-grace: "no checks" and "no checks YET" look identical. In the
+# seconds after a push, GitHub has not registered the workflow run, so
+# `gh pr checks` reports nothing for the head SHA. This script used to read
+# that as "nothing to wait for" and exit 0 immediately — so a caller that
+# pushed and then waited was told the run was green before it had started.
+# Observed on backsight PR #153 (2026-09-01): the script exited 0 with "no
+# checks on this PR" seconds after a push, and a direct `gh pr checks` moments
+# later listed 17 checks with 3 still pending. Exiting 0 on an empty result is
+# the same defect this file exists to prevent, one level up: an empty answer
+# read as a passing one. An empty result is now treated as "not yet", and only
+# becomes "genuinely none" after --empty-grace of continuous emptiness.
 
 set -euo pipefail
 
 usage() {
-  echo "usage: wait-for-pr-checks.sh <pr-number> [--interval SECONDS] [--timeout SECONDS]" >&2
+  echo "usage: wait-for-pr-checks.sh <pr-number> [--interval SECONDS] [--timeout SECONDS] [--empty-grace SECONDS]" >&2
   exit 3
 }
 
@@ -41,20 +71,27 @@ pr="$1"; shift
 
 interval=20
 timeout=1800
+empty_grace=120
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --interval) [[ $# -ge 2 ]] || { echo "--interval needs a value" >&2; exit 3; }; interval="$2"; shift 2 ;;
     --timeout)  [[ $# -ge 2 ]] || { echo "--timeout needs a value"  >&2; exit 3; }; timeout="$2";  shift 2 ;;
+    --empty-grace) [[ $# -ge 2 ]] || { echo "--empty-grace needs a value" >&2; exit 3; }; empty_grace="$2"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 3 ;;
   esac
 done
 
 # Validate every numeric input up front (not just the PR number).
-for pair in "pr-number:$pr" "interval:$interval" "timeout:$timeout"; do
+for pair in "pr-number:$pr" "interval:$interval" "timeout:$timeout" "empty-grace:$empty_grace"; do
   name="${pair%%:*}"; val="${pair#*:}"
   [[ "$val" =~ ^[0-9]+$ ]] || { echo "$name must be numeric, got: $val" >&2; exit 3; }
 done
+# `--interval 0` turns every sleep into a busy loop against the same API this
+# script is waiting on - 28 `gh` invocations in 6 seconds, measured, which is a
+# good way to get rate-limited on the call you need. Zero is valid for a
+# timeout (give up at once) but never for a poll interval.
+[[ "$interval" -ge 1 ]] || { echo "interval must be at least 1 second, got: $interval" >&2; exit 3; }
 
 deadline=$(( $(date +%s) + timeout ))
 errfile="$(mktemp)"
@@ -64,6 +101,18 @@ trap 'rm -f "$errfile"' EXIT
 print_rows() { printf '%s\n' "$rows"; }
 
 while :; do
+  # The deadline governs EVERY waiting branch. Checked once here rather than
+  # in each of them: it lived only in the pending branch, so an empty result
+  # slept past the timeout and then returned 0 - `--timeout 2 --empty-grace 10`
+  # ran ten seconds and exited green. A contract that holds only for the
+  # default values is not a contract.
+  if [[ -n "${polled:-}" ]] && [[ $(date +%s) -ge $deadline ]]; then
+    echo "=== TIMEOUT after ${timeout}s (${last_state:-still waiting}) ===" >&2
+    [[ -n "${rows:-}" ]] && print_rows
+    exit 2
+  fi
+  polled=1
+
   # One structured call per poll. With --json, gh exits 0 whenever it
   # retrieved data (regardless of pass/fail/pending); it exits non-zero
   # mainly when the query itself can't run (no checks, auth, bad PR). jq
@@ -75,16 +124,59 @@ while :; do
   fi
   err="$(cat "$errfile")"
 
-  # No rows came back — either the PR genuinely has no checks (treat as
-  # green: nothing to wait for) or gh actually failed (treat as error).
+  # No rows came back. Three causes look alike here, and only one of them is
+  # green: the PR genuinely has no checks; the checks have not been registered
+  # yet (the seconds after a push); or gh failed for a real reason.
   if [[ -z "$rows" ]]; then
-    if grep -qi 'no checks reported' <<<"$err" || [[ $rc -eq 0 ]]; then
-      echo "=== no checks on this PR — nothing to wait for (green) ===" >&2
-      exit 0
+    # A real gh failure is not an empty result — fail fast rather than
+    # spending the grace period on an auth error or a bad PR number.
+    if [[ $rc -ne 0 ]] && ! grep -qi 'no checks reported' <<<"$err"; then
+      # Not every gh failure is permanent. A 502 or a rate-limit answer would
+      # otherwise kill a half-hour background wait outright, and the caller
+      # cannot tell that from a real auth error. Retry a few times, then give
+      # up with the message gh actually printed.
+      gh_fails=$(( ${gh_fails:-0} + 1 ))
+      if [[ $gh_fails -le ${GH_RETRIES:-3} ]]; then
+        last_state="gh failed ${gh_fails}x: ${err:-unknown error}"
+        echo "[wait-for-pr-checks] gh failed (rc=$rc, attempt $gh_fails): ${err:-unknown error}" >&2
+        sleep "$interval"
+        continue
+      fi
+      echo "gh pr checks failed ${gh_fails}x (rc=$rc): ${err:-unknown error}" >&2
+      exit 3
     fi
-    echo "gh pr checks failed (rc=$rc): ${err:-unknown error}" >&2
-    exit 3
+    gh_fails=0
+    # Once checks have been SEEN, an empty answer is a transient - never
+    # "this PR has none". The head SHA moving mid-wait (polish-pr rebases and
+    # force-pushes, which is the common case) empties the API for as long as
+    # the new run takes to queue, and without this the script watched two
+    # checks go pending, saw the gap, and announced the PR had no checks and
+    # exited 0. That is the very defect --empty-grace was added to close,
+    # displaced in time.
+    if [[ -n "${saw_checks:-}" ]]; then
+      last_state='checks were reported, then vanished from the API'
+      echo "[wait-for-pr-checks] checks vanished from the API (head moved?); waiting, not calling it green" >&2
+      sleep "$interval"
+      continue
+    fi
+    # Never seen a check. Start the clock the FIRST time we see empty, so the
+    # grace measures continuous emptiness rather than being reset each poll.
+    : "${empty_since:=$(date +%s)}"
+    empty_for=$(( $(date +%s) - empty_since ))
+    if [[ $empty_for -lt $empty_grace ]]; then
+      last_state='no checks were ever reported'
+      echo "[wait-for-pr-checks] no checks reported yet (${empty_for}s of ${empty_grace}s grace), sleeping ${interval}s" >&2
+      sleep "$interval"
+      continue
+    fi
+    echo "=== no checks on this PR after ${empty_grace}s — nothing to wait for (green) ===" >&2
+    exit 0
   fi
+  # Checks appeared. `saw_checks` makes every later empty poll a transient
+  # that can never be read as "this PR has none", which subsumes what an
+  # `unset empty_since` here used to do: the grace clock is unreachable once
+  # this is set, so resetting it would be a line no test could distinguish.
+  saw_checks=1
 
   # Rows present — decide from the bucket column regardless of gh's exit code.
   failed="$(awk -F'\t' '$2 == "fail" || $2 == "cancel"' <<<"$rows" || true)"
@@ -97,12 +189,28 @@ while :; do
 
   pending_count="$(awk -F'\t' '$2 == "pending" { c++ } END { print c + 0 }' <<<"$rows")"
   if [[ "$pending_count" -gt 0 ]]; then
-    if [[ $(date +%s) -ge $deadline ]]; then
-      echo "=== TIMEOUT after ${timeout}s ($pending_count still pending) ===" >&2
-      print_rows
-      exit 2
-    fi
+    last_state="$pending_count still pending"
     echo "[wait-for-pr-checks] $pending_count check(s) still pending, sleeping ${interval}s" >&2
+    sleep "$interval"
+    continue
+  fi
+
+  # Everything visible has settled - but "everything visible" is not
+  # "everything". Checks register in waves: the fast ones appear and pass
+  # while a matrix job has not been created yet, so a single all-settled poll
+  # can be a green snapshot of a third of the run. Seen live on backsight
+  # #202, where the watcher printed a table whose every row said pass while
+  # `analyzers-tests (3.14)` was in the fail bucket moments later.
+  #
+  # So require the set of check NAMES to be identical on two consecutive
+  # polls before calling it. One extra interval on every green run, against a
+  # false green reaching a merge gate.
+  names="$(cut -f1 <<<"$rows" | LC_ALL=C sort | tr '\n' '\036')"
+  if [[ "${settled_names:-}" != "$names" ]]; then
+    last_state='the check set was still changing'
+    n_now="$(wc -l <<<"$rows" | tr -d ' ')"
+    echo "[wait-for-pr-checks] all $n_now settled, but the set changed since the last poll; confirming once more" >&2
+    settled_names="$names"
     sleep "$interval"
     continue
   fi

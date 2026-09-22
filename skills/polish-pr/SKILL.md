@@ -33,7 +33,7 @@ The branch MUST be fully up to date with the branch the PR merges into
 Prose like "make sure the branch is rebased" is not enough — a controller
 once "verified" currency by counting commits AHEAD of the base and checking
 sync with the branch's own upstream, neither of which detects being BEHIND.
-Learned the hard way (2026-08-01, graftpunk PR #142): the base had moved 3
+Learned the hard way (2026-08-01, on a private repo): the base had moved 3
 days earlier (two PRs), polish-pr certified a green run on the stale
 combination, and the staleness was only caught at merge time — the
 reviewers never saw the code that would actually land.
@@ -127,7 +127,7 @@ Polish-pr's controller does NOT own the reviewer prompt templates (they live ins
 
 > **Repeated-pattern sweep — REQUIRED.** When you identify a finding that names an anti-pattern (e.g., "imports from wrong path," "uses wrong API option," "mounts on root app instead of sub-router," "redeclared regex that already exists upstream"), do NOT stop at the first instance. **Grep the rest of the diff for the same anti-pattern and emit one finding per location, at the same severity.** Operators apply fixes surgically (one Edit per finding); if N locations exhibit the same bug and you report only one, the surgical fix covers only the named site and the other N-1 ship broken. Each location must be named explicitly so it gets its own Edit. If the anti-pattern appears once, that's one finding — no inflation. If it appears N times, that's N findings — no collapsing.
 
-Why this exists: polish-pr v2 on PR stavxyz/already.events#264 caught a mount-point anti-pattern at one task site but missed three other sites in the same diff with the identical bug. The surgical fix shipped, the siblings did not, and a follow-up validate caught the rest. The sweep instruction makes the reviewer responsible for enumerating every instance up front so the operator's first round of edits covers all of them.
+Why this exists: a polish-pr v2 run caught a mount-point anti-pattern at one task site but missed three other sites in the same diff with the identical bug. The surgical fix shipped, the siblings did not, and a follow-up validate caught the rest. The sweep instruction makes the reviewer responsible for enumerating every instance up front so the operator's first round of edits covers all of them.
 
 Apply this to both Reviewer A and Reviewer B, in whatever form each is dispatched — the `pr-review-toolkit:code-reviewer` Task prompt, the `general-purpose` subagent prompt you assemble from `superpowers:requesting-code-review`'s template, or (deprecated path) the `superpowers:code-reviewer` Task prompt. It composes with whatever finding format their internal templates already prescribe — it asks the reviewer to multiply findings, not to change the format.
 
@@ -181,10 +181,21 @@ GH_REPO=<owner>/<repo> "$CLAUDE_PLUGIN_ROOT/skills/polish-pr/wait-for-pr-checks.
 If `$CLAUDE_PLUGIN_ROOT` is unset (some skill installations), resolve the skill's directory by reading the path of this SKILL.md file at invocation time and use the sibling `wait-for-pr-checks.sh`.
 
 The script polls every 20s by default (override with `--interval N`), times out at 1800s (override with `--timeout N`), and exits:
-- `0` — all checks settled, none failed (green) — **also** the exit when the PR has no checks at all (nothing to wait for, so proceed)
-- `1` — at least one check is in the `fail` or `cancel` bucket
-- `2` — timed out before all checks settled
-- `3` — usage error, `gh` missing, or a real `gh` invocation failure (auth, bad PR)
+- `0`: all checks settled, none failed (green), **or** the PR has no checks at all and an empty result held for the settle window (nothing to wait for, so proceed)
+- `1`: at least one check is in the `fail` or `cancel` bucket
+- `2`: timed out before all checks settled
+- `3`: usage error, `gh` missing, or a real `gh` invocation failure (auth, bad PR)
+
+**Why an empty result is not believed immediately.** `gh pr checks` reports "no
+checks reported" both for a repo without CI and for a head pushed seconds ago
+whose check runs GitHub has not registered yet, and a single reading cannot tell
+them apart. Since this skill calls the script right after the closing push, the
+second case is the likely one, and treating it as green opens the
+ready-to-merge gate before a single check has started. Measured 2026-09-22 on a
+repo with five checks: the empty reading lasted 62 seconds. An empty result must
+therefore hold for `--settle N` seconds (default 90) before it counts as "no
+CI"; pass `--settle 0` to restore the old immediate behavior. A repo that
+genuinely has no CI pays that wait once.
 
 Run it with `run_in_background: true` so the harness notifies you on completion instead of blocking the conversation. Do not poll, do not chain sleeps — wait for the completion notification, then read the output file. When it exits 0, proceed to the browser-open gate; on non-zero, surface the failed-check list to the user before doing anything else.
 

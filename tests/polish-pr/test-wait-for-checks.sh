@@ -1,0 +1,178 @@
+#!/usr/bin/env bash
+# test-wait-for-checks.sh — decision fixtures for wait-for-pr-checks.sh.
+#
+# The verdict is the whole product: exit 0 is what SKILL.md treats as "open the
+# browser, this is ready to merge". Every path that can reach exit 0 gets a
+# fixture, and so does the race that used to reach it wrongly: an empty result
+# right after a push, before the check runs are registered, is indistinguishable
+# from a repo with no CI in a single reading.
+#
+# gh is replaced by a stub that emits a scripted sequence, one reading per line
+# of a fixture file, so the loop runs with no network and no live PR.
+#
+# Usage: tests/polish-pr/test-wait-for-checks.sh
+# Exit:  0 all passed, 1 otherwise.
+
+set -uo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../skills/polish-pr" && pwd)
+WATCHER="$SCRIPT_DIR/wait-for-pr-checks.sh"
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+# The stub reads one "reading" per invocation from a script file. A reading is
+# either TSV rows, or the literal EMPTY for the no-rows-with-rc-0 case that this
+# suite exists for, or ERROR for a genuine gh failure.
+cat > "$tmp/gh" <<'STUB'
+#!/usr/bin/env bash
+state="$GH_STUB_STATE"
+script="$GH_STUB_SCRIPT"
+n=$(cat "$state" 2>/dev/null || echo 0)
+n=$((n + 1))
+echo "$n" > "$state"
+line=$(sed -n "${n}p" "$script")
+[ -z "$line" ] && line=$(tail -n 1 "$script")   # last reading repeats forever
+case "$line" in
+  EMPTY) exit 0 ;;
+  ERROR) echo "some gh failure" >&2; exit 1 ;;
+  *)     printf '%s\n' "$line" | tr '|' '\n' ;;
+esac
+STUB
+chmod +x "$tmp/gh"
+
+pass=0
+fail=0
+
+# run <desc> <want-exit> <readings...>
+run() {
+  local desc=$1 want=$2; shift 2
+  local script="$tmp/script.txt"
+  printf '%s\n' "$@" > "$script"
+  : > "$tmp/state"
+  local out got
+  out=$(GH_STUB_STATE="$tmp/state" GH_STUB_SCRIPT="$script" \
+        WAIT_FOR_PR_CHECKS_GH="$tmp/gh" \
+        "$WATCHER" 1 --interval 0 --settle 0 --timeout 5 2>&1)
+  got=$?
+  if [ "$got" = "$want" ]; then
+    pass=$((pass + 1))
+  else
+    fail=$((fail + 1))
+    printf 'FAIL: %s\n  want exit: %s\n  got exit:  %s\n  output:\n%s\n' \
+      "$desc" "$want" "$got" "$out"
+  fi
+}
+
+# run_settle_output <desc> <want-exit> <want-substring> <settle> <timeout> <readings...>
+run_settle_output() {
+  local desc=$1 want=$2 want_out=$3 settle=$4 timeout=$5; shift 5
+  local script="$tmp/script.txt"
+  printf '%s\n' "$@" > "$script"
+  : > "$tmp/state"
+  local out got
+  out=$(GH_STUB_STATE="$tmp/state" GH_STUB_SCRIPT="$script" \
+        WAIT_FOR_PR_CHECKS_GH="$tmp/gh" \
+        "$WATCHER" 1 --interval 0 --settle "$settle" --timeout "$timeout" 2>&1)
+  got=$?
+  if [ "$got" = "$want" ] && grep -qF "$want_out" <<<"$out"; then
+    pass=$((pass + 1))
+  else
+    fail=$((fail + 1))
+    printf 'FAIL: %s\n  want exit %s and output containing %s\n  got exit %s, output:\n%s\n' \
+      "$desc" "$want" "$want_out" "$got" "$out"
+  fi
+}
+
+# run_settle_refute <desc> <forbidden-substring> <settle> <timeout> <readings...>
+run_settle_refute() {
+  local desc=$1 forbidden=$2 settle=$3 timeout=$4; shift 4
+  local script="$tmp/script.txt"
+  printf '%s\n' "$@" > "$script"
+  : > "$tmp/state"
+  local out
+  out=$(GH_STUB_STATE="$tmp/state" GH_STUB_SCRIPT="$script" \
+        WAIT_FOR_PR_CHECKS_GH="$tmp/gh" \
+        "$WATCHER" 1 --interval 0 --settle "$settle" --timeout "$timeout" 2>&1)
+  if grep -qF "$forbidden" <<<"$out"; then
+    fail=$((fail + 1))
+    printf 'FAIL: %s\n  output must NOT contain %s, but it did:\n%s\n' "$desc" "$forbidden" "$out"
+  else
+    pass=$((pass + 1))
+  fi
+}
+
+# run_settle <desc> <want-exit> <settle> <timeout> <readings...>
+run_settle() {
+  local desc=$1 want=$2 settle=$3 timeout=$4; shift 4
+  local script="$tmp/script.txt"
+  printf '%s\n' "$@" > "$script"
+  : > "$tmp/state"
+  local out got
+  out=$(GH_STUB_STATE="$tmp/state" GH_STUB_SCRIPT="$script" \
+        WAIT_FOR_PR_CHECKS_GH="$tmp/gh" \
+        "$WATCHER" 1 --interval 0 --settle "$settle" --timeout "$timeout" 2>&1)
+  got=$?
+  if [ "$got" = "$want" ]; then
+    pass=$((pass + 1))
+  else
+    fail=$((fail + 1))
+    printf 'FAIL: %s\n  want exit: %s\n  got exit:  %s\n  output:\n%s\n' \
+      "$desc" "$want" "$got" "$out"
+  fi
+}
+
+P=$'build\tpass'
+F=$'build\tfail'
+W=$'build\tpending'
+C=$'build\tcancel'
+S=$'build\tskipping'
+MULTI="E2E (Playwright)"$'\t'"pending|Code Quality - Python"$'\t'"pass"
+
+# Settled verdicts.
+run "all pass"                       0 "$P"
+run "a skipping check is not a fail" 0 "$S"
+run "one failing check"              1 "$F"
+run "a cancelled check"              1 "$C"
+run "pending then pass"              0 "$W" "$P"
+run "pending then fail"              1 "$W" "$F"
+run "gh itself fails"                3 "ERROR"
+
+# A multi-word check name must not be read as settled while it is pending.
+# This is the failure the --json rewrite was for; it stays covered.
+run "multi-word name still pending"  0 "$MULTI" "$P"
+
+# The race this file exists for. With --settle 0 the old behaviour is preserved
+# for anyone who opts out; above 0, an empty reading must persist.
+run "empty with --settle 0 is green" 0 "EMPTY"
+
+# Exit 0 alone cannot distinguish "waited, then saw them pass" from "reported
+# green before any check existed", so this one asserts on the output too.
+run_settle_output "empty, then checks appear, must wait rather than shortcut" \
+  0 "CI GREEN (all checks settled)" 5 30 \
+  "EMPTY" "EMPTY" "$W" "$P"
+
+run_settle_refute "empty, then checks appear, must not claim there is no CI" \
+  "no checks on this PR" 5 30 \
+  "EMPTY" "EMPTY" "$W" "$P"
+
+run_settle "empty, then checks appear and one fails" 1 5 30 \
+  "EMPTY" "EMPTY" "$F"
+
+run_settle "empty throughout the settle window is genuinely no CI" 0 1 30 \
+  "EMPTY"
+
+run_settle "checks that never register hit the timeout, not green" 2 30 1 \
+  "EMPTY"
+
+# An empty reading AFTER checks have been seen must not resurrect the no-CI
+# path: the window restarts rather than carrying stale elapsed time.
+run_settle "empty after checks were seen does not shortcut" 0 1 30 \
+  "$W" "EMPTY" "$P"
+
+if [ "$fail" -eq 0 ]; then
+  printf 'ok — %d verdict cases passed\n' "$pass"
+  exit 0
+fi
+printf '%d passed, %d failed\n' "$pass" "$fail"
+exit 1

@@ -8,7 +8,9 @@
 #   wait-for-pr-checks.sh <pr-number> --settle 0      # accept "no checks" at once
 #
 # Defaults: poll every 20s, give up after 1800s (30 min), and require an empty
-# result to hold for 90s before believing it (see --settle below).
+# result to hold for at least 90s before believing it (see --settle below). The
+# settle window is only evaluated at a poll boundary, so the real wait rounds up
+# to the next interval: 100s at the default 20s interval.
 #
 # Exit codes:
 #   0  all checks settled and none failed, or the PR has no checks and an empty
@@ -49,8 +51,9 @@ usage() {
   exit 3
 }
 
-# Overridable so the tests can drive the whole loop with a scripted stub instead
-# of a live PR. Nothing but the tests should set it.
+# WAIT_FOR_PR_CHECKS_GH overrides which gh answers, so the tests can drive the
+# whole loop with a scripted stub instead of a live PR. Nothing but the tests
+# should set it, and a non-default value is announced on stderr below.
 GH_BIN="${WAIT_FOR_PR_CHECKS_GH:-gh}"
 
 command -v "$GH_BIN" >/dev/null 2>&1 || { echo "gh is not installed or not on PATH" >&2; exit 3; }
@@ -76,6 +79,10 @@ for pair in "pr-number:$pr" "interval:$interval" "timeout:$timeout" "settle:$set
   name="${pair%%:*}"; val="${pair#*:}"
   [[ "$val" =~ ^[0-9]+$ ]] || { echo "$name must be numeric, got: $val" >&2; exit 3; }
 done
+
+# An inherited or stray override silently redirects the merge-gate verdict to
+# another binary, so say which one is answering.
+[[ "$GH_BIN" != "gh" ]] && echo "[wait-for-pr-checks] using gh binary: $GH_BIN" >&2
 
 deadline=$(( $(date +%s) + timeout ))
 errfile="$(mktemp)"
@@ -107,24 +114,43 @@ while :; do
         empty_since=$now
       fi
       held=$(( now - empty_since ))
-      if [[ $held -ge $settle ]]; then
+      # Only a PR whose checks were NEVER seen can be called "no CI". Once a
+      # reading has returned rows, that claim is disproved by this run's own
+      # history, and an empty list afterwards is an anomaly (a force-push
+      # landing mid-wait resets the head's check runs, a suite can be re-run,
+      # and the API can simply blip). Exiting 0 there would open the merge gate
+      # for a PR whose only observed check never passed, so the anomaly is left
+      # to resolve or to reach the deadline as a timeout.
+      if [[ -z "${checks_seen:-}" && $held -ge $settle ]]; then
         echo "=== no checks on this PR after ${held}s, nothing to wait for (green) ===" >&2
         exit 0
       fi
       if [[ $now -ge $deadline ]]; then
-        echo "=== TIMEOUT after ${timeout}s (no checks ever registered) ===" >&2
+        if [[ -n "${checks_seen:-}" ]]; then
+          echo "=== TIMEOUT after ${timeout}s (checks were seen earlier, then the list went empty) ===" >&2
+        else
+          echo "=== TIMEOUT after ${timeout}s (no checks ever registered) ===" >&2
+        fi
         exit 2
       fi
-      echo "[wait-for-pr-checks] no checks yet (${held}s of ${settle}s settle), sleeping ${interval}s" >&2
+      if [[ -n "${checks_seen:-}" ]]; then
+        echo "[wait-for-pr-checks] check list went empty after checks were seen, re-polling in ${interval}s" >&2
+      else
+        echo "[wait-for-pr-checks] no checks yet (${held}s of ${settle}s settle), sleeping ${interval}s" >&2
+      fi
       sleep "$interval"
       continue
     fi
     echo "gh pr checks failed (rc=$rc): ${err:-unknown error}" >&2
     exit 3
   fi
-  # Checks appeared, so the empty readings were the registration lag, not a
-  # repo without CI. Forget them: a later empty reading starts its own window.
-  empty_since=""
+  # Checks appeared, so any earlier empty readings were the registration lag and
+  # not a repo without CI. This latch is what carries that knowledge: every use
+  # of the settle window above is gated on it being unset, so once it is set no
+  # empty reading can reach the no-CI exit no matter how long it persists.
+  # Resetting empty_since here would be dead weight, because held is then
+  # unreachable, and a test could not tell the reset from its absence.
+  checks_seen=1
 
   # Rows present, so decide from the bucket column regardless of gh's exit code.
   failed="$(awk -F'\t' '$2 == "fail" || $2 == "cancel"' <<<"$rows" || true)"

@@ -22,8 +22,18 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
 # The stub reads one "reading" per invocation from a script file. A reading is
-# either TSV rows, or the literal EMPTY for the no-rows-with-rc-0 case that this
-# suite exists for, or ERROR for a genuine gh failure.
+# TSV rows, one of the two empty forms, or ERROR for a genuine gh failure.
+#
+# EMPTY reproduces what gh actually does, which is NOT what the obvious stub
+# would do. Measured against gh 2.96.0 on a PR with no checks: it exits 1 and
+# writes "no checks reported on the '<branch>' branch" to stderr. It does not
+# exit 0. So the arm of the condition that fires in production is the stderr
+# grep, and a stub that exits 0 silently exercises only the other arm. An
+# earlier version of this file did exactly that, and deleting the grep arm left
+# all of its cases green.
+#
+# EMPTY_RC0 keeps the rc=0 arm covered as well, since the script accepts both
+# and a future gh may change which one it uses.
 cat > "$tmp/gh" <<'STUB'
 #!/usr/bin/env bash
 state="$GH_STUB_STATE"
@@ -34,9 +44,10 @@ echo "$n" > "$state"
 line=$(sed -n "${n}p" "$script")
 [ -z "$line" ] && line=$(tail -n 1 "$script")   # last reading repeats forever
 case "$line" in
-  EMPTY) exit 0 ;;
-  ERROR) echo "some gh failure" >&2; exit 1 ;;
-  *)     printf '%s\n' "$line" | tr '|' '\n' ;;
+  EMPTY)     echo "no checks reported on the 'some-branch' branch" >&2; exit 1 ;;
+  EMPTY_RC0) exit 0 ;;
+  ERROR)     echo "some gh failure" >&2; exit 1 ;;
+  *)         printf '%s\n' "$line" | tr '|' '\n' ;;
 esac
 STUB
 chmod +x "$tmp/gh"
@@ -145,6 +156,9 @@ run "multi-word name still pending"  0 "$MULTI" "$P"
 # The race this file exists for. With --settle 0 the old behaviour is preserved
 # for anyone who opts out; above 0, an empty reading must persist.
 run "empty with --settle 0 is green" 0 "EMPTY"
+run "the rc=0 empty form is also accepted" 0 "EMPTY_RC0"
+
+run_settle "rc=0 empty form settles the same way" 0 1 30 "EMPTY_RC0"
 
 # Exit 0 alone cannot distinguish "waited, then saw them pass" from "reported
 # green before any check existed", so this one asserts on the output too.

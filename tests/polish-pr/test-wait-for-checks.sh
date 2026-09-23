@@ -279,11 +279,18 @@ run_usage "missing pr number"      3
 run_usage "unknown argument"       3 1 --nope
 
 # The seam makes the "gh is missing" arm testable for the first time.
-if WAIT_FOR_PR_CHECKS_GH=/nonexistent/gh "$WATCHER" 1 >/dev/null 2>&1; then
-  fail=$((fail + 1)); printf 'FAIL: a missing gh binary should exit 3\n'
-else
-  [ $? -eq 3 ] && pass=$((pass + 1)) || { fail=$((fail + 1)); printf 'FAIL: missing gh exited non-3\n'; }
-fi
+run_missing_gh() {
+  local got
+  WAIT_FOR_PR_CHECKS_GH=/nonexistent/gh "$WATCHER" 1 >/dev/null 2>&1
+  got=$?
+  if [ "$got" = 3 ]; then
+    pass=$((pass + 1))
+  else
+    fail=$((fail + 1))
+    printf 'FAIL: a missing gh binary should exit 3, got %s\n' "$got"
+  fi
+}
+run_missing_gh
 
 if [ "$fail" -eq 0 ]; then
   printf 'ok: %d verdict cases passed\n' "$pass"

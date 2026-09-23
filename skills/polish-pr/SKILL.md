@@ -183,7 +183,7 @@ If `$CLAUDE_PLUGIN_ROOT` is unset (some skill installations), resolve the skill'
 The script polls every 20s by default (override with `--interval N`), times out at 1800s (override with `--timeout N`), and exits:
 - `0`: all checks settled, none failed (green), **or** the PR has no checks at all and an empty result held for the settle window (nothing to wait for, so proceed)
 - `1`: at least one check is in the `fail` or `cancel` bucket
-- `2`: timed out before all checks settled
+- `2`: timed out before all checks settled, including checks that never registered at all
 - `3`: usage error, `gh` missing, or a real `gh` invocation failure (auth, bad PR)
 
 **Why an empty result is not believed immediately.** `gh pr checks` reports "no
@@ -194,8 +194,11 @@ second case is the likely one, and treating it as green opens the
 ready-to-merge gate before a single check has started. Measured 2026-09-22 on a
 repo with five checks: the empty reading lasted 62 seconds. An empty result must
 therefore hold for `--settle N` seconds (default 90) before it counts as "no
-CI"; pass `--settle 0` to restore the old immediate behavior. A repo that
-genuinely has no CI pays that wait once.
+CI"; pass `--settle 0` to restore the old immediate behavior. The window is
+evaluated at poll boundaries, so the real wait rounds up to the next interval:
+about 100s at the default 20s interval. A repo that genuinely has no CI pays
+that wait on every run, this one included, since it has no CI of its own.
+`tests/polish-pr/test-wait-for-checks.sh` locks the verdicts in.
 
 Run it with `run_in_background: true` so the harness notifies you on completion instead of blocking the conversation. Do not poll, do not chain sleeps — wait for the completion notification, then read the output file. When it exits 0, proceed to the browser-open gate; on non-zero, surface the failed-check list to the user before doing anything else.
 

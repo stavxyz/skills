@@ -129,7 +129,7 @@ Installed this way they are **user skills**, which are not namespaced — so you
 └── tests/                 # dev-only, not part of the installed plugin
     ├── validate/          # automated tests for check-citations.py
     ├── validate-fixtures/ # sample specs for exercising validate by hand
-    ├── polish-pr/         # automated tests for resolve-pr-remotes.sh
+    ├── polish-pr/         # automated tests for resolve-pr-remotes.sh and wait-for-pr-checks.sh
     └── reboot-ready/      # automated tests for census.sh
 ```
 

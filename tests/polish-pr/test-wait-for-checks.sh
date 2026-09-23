@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# test-wait-for-checks.sh — decision fixtures for wait-for-pr-checks.sh.
+# test-wait-for-checks.sh: decision fixtures for wait-for-pr-checks.sh.
 #
 # The verdict is the whole product: exit 0 is what SKILL.md treats as "open the
 # browser, this is ready to merge". Every path that can reach exit 0 gets a
@@ -185,7 +185,7 @@ run_settle "empty after checks were seen does not shortcut" 0 1 30 \
   "$W" "EMPTY" "$P"
 
 if [ "$fail" -eq 0 ]; then
-  printf 'ok — %d verdict cases passed\n' "$pass"
+  printf 'ok: %d verdict cases passed\n' "$pass"
   exit 0
 fi
 printf '%d passed, %d failed\n' "$pass" "$fail"

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# test-resolve.sh — URL-normalization fixtures for resolve-pr-remotes.sh.
+# test-resolve.sh: URL-normalization fixtures for resolve-pr-remotes.sh.
 #
 # The normalizer is the part that silently returns a wrong answer when it is
 # wrong: an unmatched form falls through to "no remote hosts the base repo",
@@ -55,7 +55,7 @@ check "GHE scp-style"              'git@ghe.corp.example:acme/widgets.git' \
 check "local path with a space"    '/Users/x/My Repos/widgets'  '/users/x/my repos/widgets'
 
 if [ "$fail" -eq 0 ]; then
-  printf 'ok — %d normalization cases passed\n' "$pass"
+  printf 'ok: %d normalization cases passed\n' "$pass"
   exit 0
 fi
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

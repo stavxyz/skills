@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# wait-for-pr-checks.sh — poll a PR's checks until every check has settled
+# wait-for-pr-checks.sh: poll a PR's checks until every check has settled
 # (none `pending`), exit non-zero if any check failed or was cancelled.
 #
 # Usage:
@@ -11,10 +11,12 @@
 # result to hold for 90s before believing it (see --settle below).
 #
 # Exit codes:
-#   0  — all checks settled and none failed (or the PR has no checks at all)
-#   1  — at least one check is in the `fail` or `cancel` bucket
-#   2  — timed out before all checks settled
-#   3  — usage error / `gh` missing / `gh` invocation failed
+#   0  all checks settled and none failed, or the PR has no checks and an empty
+#      result held for the settle window (see --settle)
+#   1  at least one check is in the `fail` or `cancel` bucket
+#   2  timed out before all checks settled, including checks that never
+#      registered at all
+#   3  usage error, `gh` missing, or a `gh` invocation failure
 #
 # Output: a one-line status snapshot to stderr each poll; on exit, the final
 # "<check name>\t<bucket>" rows to stdout so the caller can grep/parse them.
@@ -94,7 +96,7 @@ while :; do
   fi
   err="$(cat "$errfile")"
 
-  # No rows came back — the PR genuinely has no checks, the head was pushed so
+  # No rows came back. The PR genuinely has no checks, the head was pushed so
   # recently that none are registered yet, or gh actually failed. The first two
   # are indistinguishable in a single reading, so an empty result only counts as
   # "no CI" once it has held for --settle seconds.
@@ -106,7 +108,7 @@ while :; do
       fi
       held=$(( now - empty_since ))
       if [[ $held -ge $settle ]]; then
-        echo "=== no checks on this PR after ${held}s — nothing to wait for (green) ===" >&2
+        echo "=== no checks on this PR after ${held}s, nothing to wait for (green) ===" >&2
         exit 0
       fi
       if [[ $now -ge $deadline ]]; then
@@ -124,7 +126,7 @@ while :; do
   # repo without CI. Forget them: a later empty reading starts its own window.
   empty_since=""
 
-  # Rows present — decide from the bucket column regardless of gh's exit code.
+  # Rows present, so decide from the bucket column regardless of gh's exit code.
   failed="$(awk -F'\t' '$2 == "fail" || $2 == "cancel"' <<<"$rows" || true)"
   if [[ -n "$failed" ]]; then
     echo "=== CI FAILED ===" >&2

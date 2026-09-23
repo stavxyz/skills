@@ -8,8 +8,8 @@
 #   resolve-pr-remotes.sh --normalize <git-url>      # normalizer self-test hook
 #
 # Output (stdout), one KEY=value per line, safe to `eval`:
-#   BASE_REPO=parconditio/grocerbot
-#   HEAD_REPO=stavxyz/grocerbot
+#   BASE_REPO=acme/widgets
+#   HEAD_REPO=contributor/widgets
 #   BASE_BRANCH=main
 #   BASE_REMOTE=upstream
 #   HEAD_REMOTE=origin

@@ -61,6 +61,13 @@ this replaces. Add `--repo <owner>/<repo>` when the repo has several remotes and
 repos, so a plausible-looking result can still be the wrong repo; pass `--repo`
 whenever you are not certain.
 
+Both bundled scripts read the PR over GitHub's REST API when `gh`'s GraphQL
+calls are refused, which is how Claude Code's cloud sessions answer every
+`gh pr view --json` and `gh pr checks --json` (a 403 from the GitHub proxy,
+whatever the token). The switch is announced once on stderr and nothing else
+changes, so run the scripts there exactly as written rather than replacing them
+with hand-rolled `git` and `gh api` polling.
+
 **Why a script and not inline shell:** exactly the reason given below for
 `wait-for-pr-checks.sh`. `git remote -v` is human-formatted output, not a
 stable contract — it applies `insteadOf` rewrites (so a remote configured as

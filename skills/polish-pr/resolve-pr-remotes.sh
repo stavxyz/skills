@@ -21,6 +21,14 @@
 #   2  — ambiguous: more than one remote hosts the same repo
 #   3  — usage error / `gh` missing / `gh` invocation failed / not a git repo
 #
+# `gh pr view --json` is answered over GitHub's GraphQL API, which some
+# sandboxed sessions' proxies refuse while REST goes through (Claude Code's
+# cloud sessions answer every GraphQL call with a 403, whatever the token).
+# When it fails, the same four facts are read from the REST pull-request
+# endpoint instead, and the switch is said once on stderr. A failure of both
+# is exit 3 with both messages. RESOLVE_PR_REMOTES_GH names the gh binary, so
+# the tests can drive this with a stub; nothing else should set it.
+#
 # Why this exists, and why it is a script rather than inline shell:
 #
 # polish-pr's base-currency gate must compare HEAD against the base branch of
@@ -91,22 +99,46 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-command -v gh >/dev/null 2>&1 || die "gh not found on PATH"
+GH_BIN="${RESOLVE_PR_REMOTES_GH:-gh}"
+command -v "$GH_BIN" >/dev/null 2>&1 || die "gh not found on PATH"
+[ "$GH_BIN" = "gh" ] || printf '[resolve-pr-remotes] using gh binary: %s\n' "$GH_BIN" >&2
 command -v git >/dev/null 2>&1 || die "git not found on PATH"
 git rev-parse --git-dir >/dev/null 2>&1 || die "not inside a git repository"
 
-# One API call for everything we need.
-META=$(gh pr view "$PR" "${REPO_ARG[@]+"${REPO_ARG[@]}"}" \
-        --json url,baseRefName,headRepository,headRepositoryOwner,isCrossRepository \
-        --template '{{.url}}
+# One API call for everything we need: GraphQL through `gh pr view`, and when
+# that is refused, the REST pull-request endpoint, which carries the same four
+# facts. `{owner}/{repo}` resolve as `gh pr view` does without --repo (GH_REPO,
+# else the current directory's repository), and --repo is passed through as
+# GH_REPO so both paths read the same repository.
+GRAPHQL_TEMPLATE='{{.url}}
 {{.baseRefName}}
 {{.headRepositoryOwner.login}}/{{.headRepository.name}}
-{{.isCrossRepository}}' 2>&1) || die "gh pr view $PR failed:
-$META
-
-If gh resolved the wrong repository, pass --repo <owner>/<repo> (this repo has
+{{.isCrossRepository}}'
+WRONG_REPO_HINT="If gh resolved the wrong repository, pass --repo <owner>/<repo> (this repo has
 more than one remote, and gh may pick either). Note a same-numbered PR can
 exist in both, so a result that looks plausible may still be the wrong repo."
+
+if META=$("$GH_BIN" pr view "$PR" "${REPO_ARG[@]+"${REPO_ARG[@]}"}" \
+        --json url,baseRefName,headRepository,headRepositoryOwner,isCrossRepository \
+        --template "$GRAPHQL_TEMPLATE" 2>&1); then
+  :
+else
+  GRAPHQL_ERR=$META
+  REST_ENV=()
+  [ ${#REPO_ARG[@]} -eq 0 ] || REST_ENV=("GH_REPO=${REPO_ARG[1]}")
+  META=$(env "${REST_ENV[@]+"${REST_ENV[@]}"}" "$GH_BIN" api "repos/{owner}/{repo}/pulls/$PR" \
+        --jq '.html_url, .base.ref, (.head.repo.full_name // ""),
+              (((.head.repo.full_name // "") | ascii_downcase) != (.base.repo.full_name | ascii_downcase))' 2>&1) \
+    || die "gh pr view $PR failed:
+$GRAPHQL_ERR
+
+and reading the pull request over the REST API failed too:
+$META
+
+$WRONG_REPO_HINT"
+  printf '[resolve-pr-remotes] gh pr view failed (%s); read the pull request over the REST API instead\n' \
+    "$(printf '%s\n' "$GRAPHQL_ERR" | sed -n 1p)" >&2
+fi
 
 PR_URL=$(printf '%s\n' "$META" | sed -n 1p)
 BASE_BRANCH=$(printf '%s\n' "$META" | sed -n 2p)
@@ -120,6 +152,7 @@ BASE_REPO=$(printf '%s\n' "$PR_URL" | sed -E 's#^[A-Za-z][A-Za-z0-9+.-]*://[^/]+
 [ -n "$PR_HOST" ] && [ "$PR_HOST" != "$PR_URL" ] || die "could not parse host from PR url: $PR_URL"
 [ -n "$BASE_REPO" ] && [ "$BASE_REPO" != "$PR_URL" ] || die "could not parse repo from PR url: $PR_URL"
 [ -n "$BASE_BRANCH" ] || die "gh returned an empty base branch for PR $PR"
+[ -n "$HEAD_REPO" ] && [ "$HEAD_REPO" != "/" ] || die "PR $PR has no head repository any more (the fork was deleted); nothing to resolve"
 
 BASE_TARGET=$(printf '%s/%s\n' "$PR_HOST" "$BASE_REPO" | tr '[:upper:]' '[:lower:]')
 HEAD_TARGET=$(printf '%s/%s\n' "$PR_HOST" "$HEAD_REPO" | tr '[:upper:]' '[:lower:]')

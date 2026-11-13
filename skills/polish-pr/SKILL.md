@@ -1,6 +1,6 @@
 ---
 name: polish-pr
-description: "Polish a pull request: rebase, run parallel reviews, address all findings, update docs, push, and land it when the run ends blessed"
+description: "Polish a feature pull request: rebase, run parallel reviews, address all findings, update docs, push, and land it when the run ends blessed"
 disable-model-invocation: false
 ---
 
@@ -39,7 +39,9 @@ The user's standing rule: polish-pr is non-optional before merge AND requires BO
 ### Base-currency gate — DO THIS FIRST, with these exact commands
 
 The branch MUST be fully up to date with the branch the PR merges into
-(the PR's BASE branch, usually main) before any reviewer is dispatched.
+(the PR's BASE branch, usually main) before any reviewer is dispatched, or
+behind only in a way that leaves the merge result unchanged (the second case
+below).
 Prose like "make sure the branch is rebased" is not enough — a controller
 once "verified" currency by counting commits AHEAD of the base and checking
 sync with the branch's own upstream, neither of which detects being BEHIND.
@@ -99,34 +101,41 @@ invocation individually (`GH_REPO=<owner>/<repo> gh pr view …`) or run
 to see it.
 
 - `BEHIND` = 0 → proceed to dispatch reviewers.
-- `BEHIND` > 0, and the base holds nothing the head lacks → proceed, and say so
-  in the summary. Check it with:
+- `BEHIND` > 0, and merging would change nothing about this branch → proceed,
+  and say so in the summary. Check it with:
 
   ```bash
-  git diff --quiet "$(git merge-base HEAD <BASE_REMOTE>/<BASE_BRANCH>)" <BASE_REMOTE>/<BASE_BRANCH> && echo "base adds nothing"
+  [ "$(git merge-tree --write-tree <BASE_REMOTE>/<BASE_BRANCH> HEAD 2>/dev/null)" = "$(git rev-parse 'HEAD^{tree}')" ] && echo "merge changes nothing"
   ```
 
-  That prints only when the commits the branch is behind by change no file,
-  so the merge puts exactly this branch's tree on the base and the reviewers
-  are reading what will land. It is the standing state of a promotion PR in a
-  merge-commit flow (`dev` into `main`): every earlier promote left a merge
-  commit on the base that the head never receives. Do not rebase there. The
-  head is a shared branch, and the count comes back after the next promote.
-- `BEHIND` > 0 otherwise → STOP. If the head is a long-lived branch that other
-  PRs merge into (the repo's default branch, or the base of an open PR), do not
-  rebase or force-push it: the base has a change the head lacks, and the way
-  to bring it across is a PR that merges the base into the head. Say so and
-  stop. For an ordinary feature branch, rebase onto `<BASE_REMOTE>/<BASE_BRANCH>` (resolve conflicts;
+  That prints only when the merge result is exactly this branch's tree, so the
+  reviewers are reading what will land. A conflict, an error, or a git too old
+  for `merge-tree --write-tree` (before 2.38) prints nothing, which is the
+  case below. It is the standing state of a promotion PR in a merge-commit
+  flow (`dev` into `main`): every earlier promote left a merge commit on the
+  base that the head never receives. Do not rebase there: the head is a shared
+  branch, and the count comes back after the next promote.
+- `BEHIND` > 0 otherwise → STOP. If the head is a long-lived branch (the repo's default branch, or a branch the repo's docs name as an integration or environment branch (`dev`, `staging`, a release branch). A feature branch that happens to have another PR stacked on it is not one),
+  do not rebase or force-push it: the base has a change the head lacks, and
+  the way to bring it across is a PR that merges the base into the head. Say
+  so and stop. For a feature branch, rebase onto `<BASE_REMOTE>/<BASE_BRANCH>` (resolve conflicts;
   if a conflict resolution is non-mechanical, surface it to the user before
   continuing), re-run the project's test suite and linters on the rebased
   result, `git push --force-with-lease` the feature branch, and only then
   dispatch reviewers — they must review the combination that will actually
   merge.
 
+**A long-lived head is not polished here at all.** If this PR's head is a
+long-lived branch as defined above (a promotion PR), stop before dispatching
+reviewers: this skill's fix loop commits and pushes to the PR's head, and
+review fixes must not be pushed straight onto a shared branch. Report that it
+is a promotion PR and hand it to `land-pr`, whose step 2 says what a promotion
+needs. Verdict: `NOT BLESSED: promotion PR, see land-pr`.
+
 **Re-run the same check before the verdict** (the base can move
-during the polish round itself). If it moved: rebase, re-run the suite,
-force-push, wait for CI again. Never give a BLESSED verdict, which is the
-ready-to-merge signal, on a branch that is behind its base.
+during the polish round itself). If the re-run lands in the STOP case, handle
+it as above, re-run the suite, and wait for CI again. Never give a BLESSED
+verdict, which is the ready-to-merge signal, on a branch in the STOP case.
 
 `git rev-list --count HEAD..<BASE_REMOTE>/<BASE_BRANCH>` (commits BEHIND) is the
 load-bearing direction. `<BASE_REMOTE>/<BASE_BRANCH>..HEAD` (commits ahead) and
@@ -280,7 +289,7 @@ Re-run the Step 2 grep to confirm zero attributions. Then:
 git push --force-with-lease <HEAD_REMOTE> <branch-name>
 ```
 
-Force-push to the **feature branch** is acceptable and required here. Force-push to `main`/`master` is forbidden by CLAUDE.md and would never apply at this stage anyway.
+Force-push to the **feature branch** is acceptable and required here. Force-push to `main`/`master`, or to any long-lived head as defined in the base-currency gate, is forbidden: this skill stops before reaching this step on such a PR, and if attributed commits are found on a shared branch anyway, report them and do not rewrite it.
 
 Push to `<HEAD_REMOTE>`, not `<BASE_REMOTE>`. On a fork PR they differ, and
 pushing the head branch at the base repo succeeds silently: it lands a stray
@@ -337,7 +346,8 @@ of them from the others.
 2. Every commit made after the reviewers ran is a fix for a named finding, a
    documentation update, or a rebase. Anything else added after the review is
    unreviewed, and needs the reviewers run again.
-3. The base-currency check reads `BEHIND` = 0, re-run after the final push.
+3. The base-currency check, re-run after the final push, reads `BEHIND` = 0,
+   or `BEHIND` > 0 with "merge changes nothing" printed.
 4. `wait-for-pr-checks.sh` exited 0 on the final push.
 5. The attribution sweep (Step 2) is empty.
 6. Every automatable open-PR item in the test plan was executed, passed, and is

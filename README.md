@@ -5,7 +5,7 @@ A small [Claude Code](https://claude.com/claude-code) plugin marketplace with fo
 | Skill | Command | What it does |
 | --- | --- | --- |
 | **validate** | `/stavxyz:validate <path-to-spec-or-plan.md>` | Checks a spec's `file.py:NN` citations deterministically, then runs two reviewers in parallel against your codebase — a **fact-check** pass (are the spec's claims about existing code true?) and a **SOLID / hygiene** pass (is the design direction sound?) — and addresses the findings in-spec, with gates for deferrals, Critical corrections, and net-negative design. |
-| **polish-pr** | `/stavxyz:polish-pr <PR#>` | Rebases a PR, runs two independent code reviews in parallel, addresses **every** finding at every severity in-PR, updates docs, runs a test plan, pushes, and hands a blessed PR to `land-pr` to merge (`--no-land` stops before the merge). |
+| **polish-pr** | `/stavxyz:polish-pr <PR#>` | Rebases a feature PR (it never rewrites a shared branch such as `dev`), runs two independent code reviews in parallel, addresses **every** finding at every severity in-PR, updates docs, runs a test plan, pushes, and hands a blessed PR to `land-pr` to merge (`--no-land` stops before the merge). |
 | **land-pr** | `/stavxyz:land-pr <PR#> [<PR#> ...]` | Takes one or more PRs from open to verified: runs polish-pr on each, merges on the exact commit that was blessed, checks the change where it runs, tells the other Claude Code sessions on the project, and starts the next piece of work. |
 | **reboot-ready** | `/stavxyz:reboot-ready` | Pre-reboot sweep: censuses running Claude Code sessions, dirty worktrees, and unpushed branches, parks dirty checkouts as zero-touch rescue refs, and writes a resume manifest to `~/.claude/reboot-manifest.md` + `.json`. |
 
@@ -62,7 +62,7 @@ On a **clean bless** — blessed with zero caveats (e.g. no deferrals, no net-ne
 /stavxyz:polish-pr 142
 ```
 
-The last-mile pass before a PR merges. It rebases onto the latest upstream, runs **two** code reviews in parallel (from `pr-review-toolkit` and `superpowers`), and fixes every finding in-PR rather than deferring. It also updates all docs, builds a test plan into the PR description, sweeps the branch for stray AI-attribution lines, and pushes. A run that ends blessed then lands the PR (see the verdict paragraph below).
+The last-mile pass before a PR merges. It rebases a feature branch onto the latest upstream (a promotion PR, whose head is a shared branch, is handed to `land-pr` instead), runs **two** code reviews in parallel (from `pr-review-toolkit` and `superpowers`), and fixes every finding in-PR rather than deferring. It also updates all docs, builds a test plan into the PR description, sweeps the branch for stray AI-attribution lines, and pushes. A run that ends blessed then lands the PR (see the verdict paragraph below).
 
 **`/stavxyz:polish-pr` has prerequisites.** It hard-requires both review systems to be installed and refuses to run in degraded (single-reviewer) mode:
 
@@ -79,7 +79,7 @@ Both are available from Anthropic's official plugin marketplace:
 
 If either is missing, `/stavxyz:polish-pr` stops and tells you what to install.
 
-Every run ends with one verdict line, `polish-pr verdict: BLESSED <head sha>` or `polish-pr verdict: NOT BLESSED: <reasons>`. A bless is for that commit on that base: a later commit or a moved base ends it, except for a conflict-free rebase that passes `land-pr`'s carry-over conditions. **A blessed PR is landed**: polish-pr continues straight into `land-pr` (below) with no further prompt. That merges the PR, verifies it, tells the project's other sessions, fixes leftovers in a follow-up PR, and starts the next piece of work. It applies when you typed the polish request yourself; a polish that another session or skill started stops at the bless. A repository whose own rules require someone's word before a merge still gets asked. When the checkout has more than one GitHub remote, name the repository: `/stavxyz:polish-pr 142 --repo <owner>/<repo>`. To stop at the bless and merge by hand, pass `--no-land` after the PR number (`/stavxyz:polish-pr 142 --no-land`): it then opens the PR in your browser and prints the `/stavxyz:land-pr` command.
+Every run ends with one verdict line, `polish-pr verdict: BLESSED <head sha>` or `polish-pr verdict: NOT BLESSED: <reasons>`. A bless is for that commit on that base: a later commit or a moved base ends it, except for a conflict-free rebase that passes `land-pr`'s carry-over conditions, or a base that moved without changing the merge result. **A blessed PR is landed**: polish-pr continues straight into `land-pr` (below) with no further prompt. That merges the PR, verifies it, tells the project's other sessions, fixes leftovers in a follow-up PR, and starts the next piece of work. It applies when you typed the polish request yourself; a polish that another session or skill started stops at the bless. A repository whose own rules require someone's word before a merge still gets asked. When the checkout has more than one GitHub remote, name the repository: `/stavxyz:polish-pr 142 --repo <owner>/<repo>`. To stop at the bless and merge by hand, pass `--no-land` after the PR number (`/stavxyz:polish-pr 142 --no-land`): it then opens the PR in your browser and prints the `/stavxyz:land-pr` command.
 
 ### `/stavxyz:land-pr`
 
@@ -92,8 +92,8 @@ What "merge this once it is green and polished, check it afterwards, tell the ot
 
 For each PR, one at a time, because every merge moves the base under the PRs that remain:
 
-1. **Polish** with `/stavxyz:polish-pr <PR#>`, the skill itself and never reviewers dispatched by hand. Only a `BLESSED` verdict goes further.
-2. **Gate**, immediately before merging: CI green on the blessed commit, then `merge-gate.sh`, which passes only when the PR is open, is not a draft, still has the blessed commit as its head, is not behind its base (or is behind only by commits that change no file, the standing state of a merge-commit promotion such as `dev` into `main`), and is mergeable and not blocked. An unreadable or not-yet-computed answer from GitHub is "unknown" and is never treated as a pass.
+1. **Polish** with `/stavxyz:polish-pr <PR#>`, the skill itself and never reviewers dispatched by hand. Only a `BLESSED` verdict goes further. The one exception is a promotion PR (head `dev`, base `main`): it is checked against the repo's own promotion rule, and its head is never rebased.
+2. **Gate**, immediately before merging: CI green on the blessed commit, then `merge-gate.sh`, which passes only when the PR is open, is not a draft, still has the blessed commit as its head, is not behind its base (or is behind only in a way that leaves the merge result equal to the head's tree, the standing state of a merge-commit promotion such as `dev` into `main`), and is mergeable and not blocked. An unreadable or not-yet-computed answer from GitHub is "unknown" and is never treated as a pass.
 3. **Merge** with `gh pr merge --match-head-commit <blessed sha>`, using the repo's documented or customary merge method, and read the result from the PR's state, not from the exit code.
 4. **Verify**: the whole diff reached the base, the base branch's own runs for the merge commit (the deploy, where there is one) succeeded, what is running is the merge, and the change does what it was meant to do where it runs. Evidence goes into the PR's test plan. "Merged", "deployed", and "verified" are reported as three different states.
 

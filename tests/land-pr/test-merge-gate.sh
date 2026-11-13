@@ -8,6 +8,9 @@
 # malformed reading.
 #
 # gh is replaced by a stub, so the gate runs with no network and no live PR.
+# When the head is behind, the gate also reads GitHub's test merge of the PR
+# (a second `gh pr view`, the base's tip, and two commits); the stub answers
+# those from GH_STUB_MERGE and GH_STUB_TEST_MERGE.
 # The stub does not hand the script ready-made fields. It builds the JSON that
 # GitHub would return and runs the script's own --jq program over it with a
 # real jq, so the field names, their order, and the null handling are under
@@ -42,8 +45,25 @@ for a in "$@"; do
   prev=$a
 done
 [ -n "$jq_prog" ] || { echo "stub: call carried no --jq program: $*" >&2; exit 9; }
+# Names used by the test-merge answers below.
+TREE_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+TREE_OTHER=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+BASE_TIP=cccccccccccccccccccccccccccccccccccccccc
+TEST_MERGE=dddddddddddddddddddddddddddddddddddddddd
 case "$sub" in
   pr)
+    # The test-merge lookup is its own call and consumes no scripted reading.
+    for a in "$@"; do
+      if [ "$a" = "potentialMergeCommit" ]; then
+        echo "pr-view-test-merge" >> "$GH_STUB_API_LOG"
+        case "${GH_STUB_TEST_MERGE-present}" in
+          ERROR) echo "view failed" >&2; exit 1 ;;
+          none)  echo '{"potentialMergeCommit":null}' | jq -r "$jq_prog" ;;
+          *)     jq -n --arg o "$TEST_MERGE" '{potentialMergeCommit:{oid:$o}}' | jq -r "$jq_prog" ;;
+        esac
+        exit 0
+      fi
+    done
     n=$(cat "$GH_STUB_STATE" 2>/dev/null || echo 0)
     n=$((n + 1))
     echo "$n" > "$GH_STUB_STATE"
@@ -60,6 +80,7 @@ case "$sub" in
       printf '%s\n' "$line"
       exit 0
     fi
+    echo "$head" > "$GH_STUB_STATE.head"
     if [ "$merge_commit" = "-" ]; then mc=null; else mc="{\"oid\":\"$merge_commit\"}"; fi
     # Like gh, return only the fields named in --json: a field the script
     # forgot to request is then absent, as it would be against GitHub.
@@ -82,18 +103,28 @@ case "$sub" in
       ERROR) echo "HTTP 404: Not Found" >&2; exit 1 ;;
       EMPTY) exit 0 ;;
     esac
-    # compare/<base>...<head> is the behind count. compare/<head>...<base> is
-    # what the base changed since the two diverged: GH_STUB_BASE_FILES files
-    # (default 3, a real change on the base).
+    # GH_STUB_MERGE says what merging would do: "same" (the result is the
+    # head's tree, the default is "differs"), "stale" (the test merge is of an
+    # older base), "garbage", or "error".
     case "$2" in
-      */compare/main...*|*/compare/release/1.x...*)
+      */compare/*)
         jq -n --argjson behind "$GH_STUB_BEHIND" '{status:"diverged", ahead_by:7, behind_by:$behind}' | jq -r "$jq_prog" ;;
-      *)
-        case "${GH_STUB_BASE_FILES-3}" in
-          ERROR) echo "HTTP 500" >&2; exit 1 ;;
-          EMPTY) exit 0 ;;
+      */git/ref/heads/*)
+        [ "${GH_STUB_MERGE-differs}" = "error" ] && { echo "HTTP 500" >&2; exit 1; }
+        jq -n --arg s "$BASE_TIP" '{object:{sha:$s}}' | jq -r "$jq_prog" ;;
+      */git/commits/"$TEST_MERGE")
+        head=$(cat "$GH_STUB_STATE.head")
+        case "${GH_STUB_MERGE-differs}" in
+          same)    tree=$TREE_HEAD;  first=$BASE_TIP ;;
+          stale)   tree=$TREE_HEAD;  first=$TREE_OTHER ;;
+          garbage) echo "not json at all"; exit 0 ;;
+          badtree) echo "not-a-sha|$BASE_TIP,$head"; exit 0 ;;
+          *)       tree=$TREE_OTHER; first=$BASE_TIP ;;
         esac
-        jq -n --argjson n "${GH_STUB_BASE_FILES-3}" '{status:"diverged", ahead_by:0, behind_by:7, files: [range(0; $n) | {filename: ("f" + tostring)}]}' | jq -r "$jq_prog" ;;
+        jq -n --arg t "$tree" --arg a "$first" --arg b "$head" '{tree:{sha:$t}, parents:[{sha:$a},{sha:$b}]}' | jq -r "$jq_prog" ;;
+      */git/commits/*)
+        jq -n --arg t "$TREE_HEAD" '{tree:{sha:$t}, parents:[]}' | jq -r "$jq_prog" ;;
+      *) echo "stub: unexpected api path: $2" >&2; exit 9 ;;
     esac
     ;;
   *) echo "stub: unexpected gh subcommand: $1" >&2; exit 9 ;;
@@ -122,7 +153,7 @@ gate() {
   : > "$tmp/api.log"
   out=$(GH_STUB_STATE="$tmp/state" GH_STUB_VIEWS="$tmp/views.txt" \
         GH_STUB_BEHIND="$behind" GH_STUB_API_LOG="$tmp/api.log" \
-        GH_STUB_BASE_FILES="${GH_STUB_BASE_FILES-3}" \
+        GH_STUB_MERGE="${GH_STUB_MERGE-differs}" GH_STUB_TEST_MERGE="${GH_STUB_TEST_MERGE-present}" \
         MERGE_GATE_GH="$tmp/gh" "$GATE" "$@" 2>&1)
   got=$?
 }
@@ -197,36 +228,49 @@ check "several reasons: behind also listed" 1 "2 commit(s) behind"
 gate 0 "$ready" -- 7 --interval 0
 check "no --sha can never be READY, even on a clean PR" 1 "no blessed sha given"
 
-# --- behind, but the base holds nothing the head lacks -------------------------
+# --- behind, but merging changes nothing about the head -----------------------
 # A merge-commit promotion flow: the head is behind by the earlier promotes'
-# merge commits, which change no file.
-GH_STUB_BASE_FILES=0 gate 10 "$ready" -- 7 --sha "$SHA" --interval 0
-check "behind only by commits that change no file is READY" 0 "behind 10 by commits that change nothing"
-if grep -qF "compare/$SHA...main" "$tmp/api.log"; then
-  pass=$((pass + 1))
-else
-  fail=$((fail + 1)); printf 'FAIL: the second compare should be head...base, got: %s\n' "$(cat "$tmp/api.log")"
-fi
+# merge commits, and GitHub's test merge has the head's own tree.
+GH_STUB_MERGE=same gate 10 "$ready" -- 7 --sha "$SHA" --interval 0
+check "behind, with a test merge whose tree is the head's tree, is READY" 0 "behind 10 by commits that change nothing"
 
-GH_STUB_BASE_FILES=2 gate 10 "$ready" -- 7 --sha "$SHA" --interval 0
-check "behind by commits that change files (a hotfix on the base) is NOT READY" 1 "change 2 file(s) the head does not have"
+GH_STUB_MERGE=differs gate 10 "$ready" -- 7 --sha "$SHA" --interval 0
+check "behind, with a test merge that changes the head's tree (a hotfix on the base), is NOT READY" 1 "merging would change the head's tree"
 
-GH_STUB_BASE_FILES=ERROR gate 10 "$ready" -- 7 --sha "$SHA" --interval 0
-check "gh failing on the second compare exits 3, never READY" 3 "gh api compare failed"
+GH_STUB_MERGE=stale gate 10 "$ready" -- 7 --sha "$SHA" --interval 0
+check "a test merge made for an older base is UNKNOWN, even with a matching tree" 2 "is not of main's tip and this head yet"
 
-GH_STUB_BASE_FILES=EMPTY gate 10 "$ready" -- 7 --sha "$SHA" --interval 0
-check "an unreadable file count is UNKNOWN, never READY" 2 "unreadable count of files"
+GH_STUB_MERGE=garbage gate 10 "$ready" -- 7 --sha "$SHA" --interval 0
+check "an unreadable test merge is UNKNOWN, never READY" 2 "unreadable test merge"
 
-GH_STUB_BASE_FILES=0 gate 0 "$ready" -- 7 --sha "$SHA" --interval 0
+GH_STUB_MERGE=badtree gate 10 "$ready" -- 7 --sha "$SHA" --interval 0
+check "a test merge whose tree is not a sha is UNKNOWN, never READY" 2 "unreadable test merge"
+
+GH_STUB_MERGE=error gate 10 "$ready" -- 7 --sha "$SHA" --interval 0
+check "gh failing while reading the base tip exits 3, never READY" 3 "failed"
+
+GH_STUB_MERGE=same GH_STUB_TEST_MERGE=none gate 10 "$ready" -- 7 --sha "$SHA" --interval 0
+check "behind with no test merge to compare is UNKNOWN, never READY" 2 "no test merge to compare"
+
+GH_STUB_MERGE=same GH_STUB_TEST_MERGE=ERROR gate 10 "$ready" -- 7 --sha "$SHA" --interval 0
+check "gh failing on the test-merge lookup exits 3" 3 "gh pr view failed"
+
+GH_STUB_MERGE=same gate 0 "$ready" -- 7 --sha "$SHA" --interval 0
 check "not behind at all still says behind 0" 0 "behind 0 mergeable"
-if grep -qF "compare/$SHA...main" "$tmp/api.log"; then
-  fail=$((fail + 1)); printf 'FAIL: the second compare is only needed when behind\n'
+if grep -q "test-merge\|git/" "$tmp/api.log"; then
+  fail=$((fail + 1)); printf 'FAIL: the test merge is only read when behind, log:\n%s\n' "$(cat "$tmp/api.log")"
 else
   pass=$((pass + 1))
 fi
 
-GH_STUB_BASE_FILES=0 gate 10 "OPEN|false|$SHA|MERGEABLE|BEHIND|main|-" -- 7 --sha "$SHA" --interval 0
+GH_STUB_MERGE=same gate 10 "OPEN|false|$SHA|MERGEABLE|BEHIND|main|-" -- 7 --sha "$SHA" --interval 0
 check "GitHub's own BEHIND (required up-to-date branches) still blocks" 1 "GitHub reports the head is out of date"
+
+GH_STUB_MERGE=same gate 10 "OPEN|false|$SHA|CONFLICTING|DIRTY|main|-" -- 7 --sha "$SHA" --interval 0
+check "behind and conflicting reports both, without asking for a test merge" 1 "behind: head is 10 commit(s) behind main"
+
+GH_STUB_MERGE=same gate 10 "OPEN|false|$OTHER|MERGEABLE|CLEAN|main|-" -- 7 --sha "$SHA" --interval 0
+check "a benign behind does not excuse a moved head" 1 "head moved"
 
 # --- terminal states are decided before mergeability -------------------------
 gate 0 "MERGED|false|$SHA|UNKNOWN|UNKNOWN|main|$MERGE" -- 7 --sha "$SHA" --interval 0 --retries 3

@@ -1,11 +1,12 @@
 # stavxyz/skills
 
-A small [Claude Code](https://claude.com/claude-code) plugin marketplace with three skills:
+A small [Claude Code](https://claude.com/claude-code) plugin marketplace with four skills:
 
 | Skill | Command | What it does |
 | --- | --- | --- |
 | **validate** | `/stavxyz:validate <path-to-spec-or-plan.md>` | Checks a spec's `file.py:NN` citations deterministically, then runs two reviewers in parallel against your codebase — a **fact-check** pass (are the spec's claims about existing code true?) and a **SOLID / hygiene** pass (is the design direction sound?) — and addresses the findings in-spec, with gates for deferrals, Critical corrections, and net-negative design. |
 | **polish-pr** | `/stavxyz:polish-pr <PR#>` | Rebases a PR, runs two independent code reviews in parallel, addresses **every** finding at every severity in-PR, updates docs, runs a test plan, and pushes. |
+| **land-pr** | `/stavxyz:land-pr <PR#> [<PR#> ...]` | Takes one or more PRs from open to verified: runs polish-pr on each, merges on the exact commit that was blessed, checks the change where it runs, tells the other Claude Code sessions on the project, and starts the next piece of work. |
 | **reboot-ready** | `/stavxyz:reboot-ready` | Pre-reboot sweep: censuses running Claude Code sessions, dirty worktrees, and unpushed branches, parks dirty checkouts as zero-touch rescue refs, and writes a resume manifest to `~/.claude/reboot-manifest.md` + `.json`. |
 
 ## Install
@@ -15,7 +16,7 @@ A small [Claude Code](https://claude.com/claude-code) plugin marketplace with th
 /plugin install stavxyz@skills
 ```
 
-The first command registers this repo as a marketplace named `skills`; the second installs the `stavxyz` plugin from it. Plugin skills are namespaced by the plugin name, so after installing they're invoked as `/stavxyz:validate`, `/stavxyz:polish-pr`, and `/stavxyz:reboot-ready`.
+The first command registers this repo as a marketplace named `skills`; the second installs the `stavxyz` plugin from it. Plugin skills are namespaced by the plugin name, so after installing they're invoked as `/stavxyz:validate`, `/stavxyz:polish-pr`, `/stavxyz:land-pr`, and `/stavxyz:reboot-ready`.
 
 To update later:
 
@@ -78,6 +79,28 @@ Both are available from Anthropic's official plugin marketplace:
 
 If either is missing, `/stavxyz:polish-pr` stops and tells you what to install.
 
+Every run ends with one verdict line, `polish-pr verdict: BLESSED <head sha>` or `polish-pr verdict: NOT BLESSED: <reasons>`. A bless is for that commit on that base: a later commit or a moved base ends it. Blessed, it opens the PR in your browser and prints the `/stavxyz:land-pr` command that merges it. Pass `--land` after the PR number (`/stavxyz:polish-pr 142 --land`) to have it continue straight into `land-pr` on a bless instead of stopping at the browser.
+
+### `/stavxyz:land-pr`
+
+```text
+/stavxyz:land-pr 142
+/stavxyz:land-pr 142 143 150
+```
+
+What "merge this once it is green and polished, check it afterwards, tell the other sessions, and keep going" means, written down once. Typing the command is the instruction to merge the PRs it names, each into its own base branch, whether or not the current session wrote them. Nothing else is covered: no `--admin`, no bypassing branch protection, and no merging the follow-up PRs the run itself opens. The repository's own rules (`CLAUDE.md` or `AGENTS.md`) win wherever they are stricter.
+
+For each PR, one at a time, because every merge moves the base under the PRs that remain:
+
+1. **Polish** with `/stavxyz:polish-pr <PR#> --land`, the skill itself and never reviewers dispatched by hand. Only a `BLESSED` verdict goes further.
+2. **Gate**, immediately before merging: CI green on the blessed commit, then `merge-gate.sh`, which passes only when the PR is open, is not a draft, still has the blessed commit as its head, is zero commits behind its base, and is mergeable and not blocked. An unreadable or not-yet-computed answer from GitHub is "unknown" and is never treated as a pass.
+3. **Merge** with `gh pr merge --match-head-commit <blessed sha>`, using the repo's documented or customary merge method, and read the result from the PR's state, not from the exit code.
+4. **Verify**: the whole diff reached the base, the base branch's own runs for the merge commit (the deploy, where there is one) succeeded, what is running is the merge, and the change does what it was meant to do where it runs. Evidence goes into the PR's test plan. "Merged", "deployed", and "verified" are reported as three different states.
+
+Then, once for the run: leftovers are fixed in a follow-up PR or folded into an existing issue, and a new issue is filed only for something that needs your decision, waits on something that has not happened, or needs its own spec. The other Claude Code sessions working on the same project get one message each with the merge commit, what is verified, and what touches their files (this uses `ListAgents` and `SendMessage`; without them, or with no peer session, that step is skipped and reported). The run then picks the next piece of work that collides with nobody's files and starts it, and the closing report gives issues opened and closed as two counts.
+
+`land-pr` requires `polish-pr`, and so inherits its two prerequisites.
+
 ## Compatibility
 
 These skills target **Claude Code**. Two layers are worth distinguishing:
@@ -97,9 +120,10 @@ git clone https://github.com/stavxyz/skills.git
 # its skills/ subdirectory — hence the intentional skills/skills/ below.
 ln -s "$PWD/skills/skills/validate"  ~/.claude/skills/validate
 ln -s "$PWD/skills/skills/polish-pr" ~/.claude/skills/polish-pr
+ln -s "$PWD/skills/skills/land-pr"   ~/.claude/skills/land-pr
 ```
 
-Installed this way they are **user skills**, which are not namespaced — so you invoke them by bare name (`/validate`, `/polish-pr`) rather than the `/stavxyz:` prefix used for the plugin install. `validate` resolves its reviewer templates relative to the installed skill directory, so it works under either install method.
+Installed this way they are **user skills**, which are not namespaced — so you invoke them by bare name (`/validate`, `/polish-pr`, `/land-pr`) rather than the `/stavxyz:` prefix used for the plugin install. `validate` resolves its reviewer templates relative to the installed skill directory, so it works under either install method.
 
 > **Recommended for development.** The symlinks point at your live working tree, so editing a skill and running `/reload-plugins` (or starting a new session) picks the change up instantly — no version bump, no `/plugin marketplace update`. Reserve the versioned plugin/marketplace flow (see [RELEASING.md](RELEASING.md)) for distributing to others.
 
@@ -123,6 +147,9 @@ Installed this way they are **user skills**, which are not namespaced — so you
 │   │   ├── SKILL.md
 │   │   ├── resolve-pr-remotes.sh
 │   │   └── wait-for-pr-checks.sh
+│   ├── land-pr/
+│   │   ├── SKILL.md
+│   │   └── merge-gate.sh
 │   └── reboot-ready/
 │       ├── SKILL.md
 │       └── census.sh
@@ -130,6 +157,7 @@ Installed this way they are **user skills**, which are not namespaced — so you
     ├── validate/          # automated tests for check-citations.py
     ├── validate-fixtures/ # sample specs for exercising validate by hand
     ├── polish-pr/         # automated tests for resolve-pr-remotes.sh and wait-for-pr-checks.sh
+    ├── land-pr/           # automated tests for merge-gate.sh
     └── reboot-ready/      # automated tests for census.sh
 ```
 

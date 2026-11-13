@@ -6,14 +6,14 @@
     "email": "smlstvnh@gmail.com"
   },
   "metadata": {
-    "description": "stavxyz's Claude Code skills: spec/plan validation, PR polishing, and pre-reboot sweeps",
-    "version": "0.2.9"
+    "description": "stavxyz's Claude Code skills: spec/plan validation, PR polishing and landing, and pre-reboot sweeps",
+    "version": "0.3.0"
   },
   "plugins": [
     {
       "name": "stavxyz",
       "source": "./",
-      "description": "Multi-reviewer and ops skills: /stavxyz:validate (fact-check + SOLID review of specs and plans), /stavxyz:polish-pr (parallel review + fix sweep on a pull request), and /stavxyz:reboot-ready (pre-reboot session census, rescue-ref parking, resume manifest)"
+      "description": "Multi-reviewer and ops skills: /stavxyz:validate (fact-check + SOLID review of specs and plans), /stavxyz:polish-pr (parallel review + fix sweep on a pull request), /stavxyz:land-pr (polish, merge on the blessed commit, post-merge verification, peer notification, next work), and /stavxyz:reboot-ready (pre-reboot session census, rescue-ref parking, resume manifest)"
     }
   ]
 }

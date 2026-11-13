@@ -34,8 +34,38 @@ trap 'rm -rf "$tmp"' EXIT
 #
 # EMPTY_RC0 keeps the rc=0 arm covered as well, since the script accepts both
 # and a future gh may change which one it uses.
+#
+# Only `gh pr checks` consumes a scripted reading. Before it believes green the
+# watcher also asks for the PR's head (`gh pr view`) and for that commit's
+# workflow runs (`gh run list`). The stub answers those from GH_STUB_HEAD and
+# from GH_STUB_RUNS, a file with one line per call (the last repeats) holding
+# comma-separated run statuses; it builds the JSON gh would return and runs the
+# watcher's own --jq program over it, so the program is under test too.
+# Defaults: a valid head, and one completed run. Requires jq.
+command -v jq >/dev/null 2>&1 || { echo "test-wait-for-checks.sh needs jq on PATH" >&2; exit 1; }
+
 cat > "$tmp/gh" <<'STUB'
 #!/usr/bin/env bash
+jq_prog=""; prev=""
+for a in "$@"; do [ "$prev" = "--jq" ] && jq_prog=$a; prev=$a; done
+if [ "$1 $2" = "pr view" ]; then
+  [ "${GH_STUB_HEAD:-}" = "ERROR" ] && { echo "view failed" >&2; exit 1; }
+  jq -n --arg h "${GH_STUB_HEAD-1111111111111111111111111111111111111111}" '{headRefOid:$h}' | jq -r "$jq_prog"
+  exit 0
+fi
+if [ "$1 $2" = "run list" ]; then
+  line="completed"
+  if [ -n "${GH_STUB_RUNS:-}" ]; then
+    k=$(cat "$GH_STUB_RUNS.n" 2>/dev/null || echo 0); k=$((k + 1)); echo "$k" > "$GH_STUB_RUNS.n"
+    line=$(sed -n "${k}p" "$GH_STUB_RUNS"); [ -z "$line" ] && line=$(tail -n 1 "$GH_STUB_RUNS")
+  fi
+  case "$line" in
+    ERROR) echo "run list failed" >&2; exit 1 ;;
+    NONE)  echo '[]' | jq -r "$jq_prog" ;;
+    *)     jq -n --arg s "$line" '$s | split(",") | map({status: .})' | jq -r "$jq_prog" ;;
+  esac
+  exit 0
+fi
 state="$GH_STUB_STATE"
 script="$GH_STUB_SCRIPT"
 n=$(cat "$state" 2>/dev/null || echo 0)
@@ -203,7 +233,7 @@ run_settle "rc=0 empty form settles the same way" 0 1 30 "EMPTY_RC0"
 # Exit 0 alone cannot distinguish "waited, then saw them pass" from "reported
 # green before any check existed", so this one asserts on the output too.
 run_settle_output "empty, then checks appear, must wait rather than shortcut" \
-  0 "CI GREEN (all checks settled)" 5 30 \
+  0 "CI GREEN (1 check(s) settled" 5 30 \
   "EMPTY" "EMPTY" "$W" "$P"
 
 run_settle_refute "empty, then checks appear, must not claim there is no CI" \
@@ -291,6 +321,99 @@ run_missing_gh() {
   fi
 }
 run_missing_gh
+
+# --- green needs more than "nothing pending" ----------------------------------
+# with_env <desc> <want-exit> <want-substring> <settle> <timeout> <env...> -- <readings...>
+with_env() {
+  local desc=$1 want=$2 want_out=$3 settle=$4 timeout=$5; shift 5
+  local envs=()
+  while [ "$1" != "--" ]; do envs+=("$1"); shift; done
+  shift
+  printf '%s\n' "$@" > "$tmp/script.txt"
+  : > "$tmp/state"
+  rm -f "$tmp/runs.txt.n"
+  local out got
+  out=$(env GH_STUB_STATE="$tmp/state" GH_STUB_SCRIPT="$tmp/script.txt" \
+        WAIT_FOR_PR_CHECKS_GH="$tmp/gh" ${envs[@]+"${envs[@]}"} \
+        "$WATCHER" 1 --interval 0 --settle "$settle" --timeout "$timeout" 2>&1)
+  got=$?
+  if [ "$got" = "$want" ] && grep -qF -- "$want_out" <<<"$out"; then
+    pass=$((pass + 1))
+  else
+    fail=$((fail + 1))
+    printf 'FAIL: %s\n  want exit %s and output containing: %s\n  got exit %s, output:\n%s\n' \
+      "$desc" "$want" "$want_out" "$got" "$out" | tail -n 12
+  fi
+}
+
+ONE=$'fast-workflow\tpass'
+TEN=$'fast-workflow\tpass|slow-workflow\tpending'
+TENF=$'fast-workflow\tpass|slow-workflow\tfail'
+
+# One fast check passes before the slow workflow has registered: the old
+# watcher exited green on the first reading.
+with_env "a lone early pass is not green while the registration window is open" \
+  1 "VERDICT: failed" 2 30 -- "$ONE" "$ONE" "$TEN" "$TENF"
+with_env "a lone early pass, then the rest register and pass, is green after the window" \
+  0 "VERDICT: green" 1 30 -- "$ONE" "$TEN" "$P"
+
+# A run that exists but has no jobs yet is invisible to the check list.
+printf '%s\n' "completed,queued" "completed,in_progress" "completed,completed" > "$tmp/runs.txt"
+with_env "an unfinished workflow run for the head holds green back until it completes" \
+  0 "workflow run(s) for the head commit not completed" 0 30 GH_STUB_RUNS="$tmp/runs.txt" -- "$P"
+printf '%s\n' "completed,queued" > "$tmp/runs.txt"
+with_env "a workflow run that never completes is a timeout, not green" \
+  2 "VERDICT: timeout" 0 1 GH_STUB_RUNS="$tmp/runs.txt" -- "$P"
+printf '%s\n' "NONE" > "$tmp/runs.txt"
+with_env "checks from outside Actions, with no workflow runs at all, can be green" \
+  0 "VERDICT: green" 0 30 GH_STUB_RUNS="$tmp/runs.txt" -- "$P"
+printf '%s\n' "ERROR" > "$tmp/runs.txt"
+with_env "gh failing on the run list is an error, never green" \
+  3 "VERDICT: error" 0 30 GH_STUB_RUNS="$tmp/runs.txt" -- "$P"
+with_env "gh failing on the head lookup is an error, never green" \
+  3 "VERDICT: error" 0 30 GH_STUB_HEAD=ERROR -- "$P"
+with_env "an unreadable head sha is an error, never green" \
+  3 "unreadable head sha" 0 30 GH_STUB_HEAD= -- "$P"
+
+# A push cancels the superseded run; the list can briefly still show it.
+with_env "a cancel inside the settle window is re-polled, and green follows" \
+  0 "cancelled check(s) inside the settle window" 3 30 -- "$C" "$P"
+with_env "a cancel that outlasts the settle window is a failure" \
+  1 "VERDICT: failed" 1 30 -- "$C"
+with_env "a fail is final even inside the settle window" \
+  1 "VERDICT: failed" 30 30 -- "$F"
+
+# refute_env <desc> <forbidden-substring> <settle> <timeout> <readings...>
+refute_env() {
+  local desc=$1 forbidden=$2 settle=$3 timeout=$4; shift 4
+  printf '%s\n' "$@" > "$tmp/script.txt"
+  : > "$tmp/state"
+  local out
+  out=$(GH_STUB_STATE="$tmp/state" GH_STUB_SCRIPT="$tmp/script.txt" WAIT_FOR_PR_CHECKS_GH="$tmp/gh" \
+        "$WATCHER" 1 --interval 0 --settle "$settle" --timeout "$timeout" 2>&1)
+  if grep -qF -- "$forbidden" <<<"$out"; then
+    fail=$((fail + 1)); printf 'FAIL: %s\n  output must NOT contain: %s\n' "$desc" "$forbidden"
+  else
+    pass=$((pass + 1))
+  fi
+}
+# Exit codes cannot tell "failed at once" from "re-polled until the deadline,
+# then failed", so these two read the output.
+refute_env "a fail is never re-polled as if it were a cancel" \
+  "inside the settle window" 3 3 "$F"
+refute_env "a cancel is not re-polled once the settle window has passed" \
+  "(1s of 1s)" 1 3 "$C"
+
+# The last stdout line names the verdict for a caller that lost the exit code.
+with_env "a gh failure says VERDICT: error" 3 "VERDICT: error" 0 30 -- "ERROR"
+with_env "the green line counts the checks it settled on" 0 "1 check(s) settled" 0 30 -- "$P"
+piped=$(GH_STUB_STATE="$tmp/state" GH_STUB_SCRIPT="$tmp/script.txt" WAIT_FOR_PR_CHECKS_GH="$tmp/gh" \
+        bash -c 'printf "ERROR\n" > "$GH_STUB_SCRIPT"; : > "$GH_STUB_STATE"; "$0" 1 --interval 0 --settle 0 2>/dev/null | tail -n 1' "$WATCHER")
+if [ "$piped" = "VERDICT: error" ]; then
+  pass=$((pass + 1))
+else
+  fail=$((fail + 1)); printf 'FAIL: piped through tail, the last line should be the verdict, got: %s\n' "$piped"
+fi
 
 if [ "$fail" -eq 0 ]; then
   printf 'ok: %d verdict cases passed\n' "$pass"

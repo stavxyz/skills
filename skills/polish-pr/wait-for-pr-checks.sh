@@ -13,15 +13,22 @@
 # to the next interval: 100s at the default 20s interval.
 #
 # Exit codes:
-#   0  all checks settled and none failed, or the PR has no checks and an empty
-#      result held for the settle window (see --settle)
+#   0  all checks settled, none failed, the settle window has passed, and every
+#      workflow run for the head commit is completed; or the PR has no checks
+#      and an empty result held for the settle window (see --settle)
 #   1  at least one check is in the `fail` or `cancel` bucket
 #   2  timed out before all checks settled, including checks that never
 #      registered at all
 #   3  usage error, `gh` missing, or a `gh` invocation failure
 #
 # Output: a one-line status snapshot to stderr each poll; on exit, the final
-# "<check name>\t<bucket>" rows to stdout so the caller can grep/parse them.
+# "<check name>\t<bucket>" rows to stdout so the caller can grep/parse them,
+# then one last stdout line, "VERDICT: green|failed|timeout|error".
+#
+# Do not pipe this script (`... | tail`). A pipeline's status is its last
+# command's, so the exit code is lost and a failure reads as 0. That is how a
+# network error was once reported as "exit 0". Run it bare, or redirect to a
+# file. The VERDICT line exists for a caller that has lost the exit code anyway.
 #
 # Why this exists / why --json: the natural inline form
 # (`gh pr checks N | awk '{print $2}' | grep pending`) parses gh's
@@ -43,6 +50,20 @@
 # while the workflows were still being queued, and this script exited green at
 # second 0. An empty reading must therefore persist for --settle seconds before
 # it is believed. A repo that genuinely has no CI pays that wait once.
+#
+# Why green is checked three ways: a check list that is non-empty and has
+# nothing pending is not the same as CI having finished. After a push GitHub
+# registers workflows one at a time, so a fast workflow can register and pass
+# while a slower one is not in the list yet (measured: one row, `pass`, with
+# nine workflows still to appear; and a run held in its concurrency group for
+# 80 seconds with no jobs). An expected number of checks cannot fix that,
+# because path-filtered workflows make the number depend on what the PR
+# touched. So before green is believed: (1) the settle window must have passed
+# since this script started, which covers registration lag; (2) every workflow
+# run GitHub lists for the PR's head commit must be completed, which catches a
+# run that exists but has no jobs yet; and (3) a `cancel` seen inside the settle
+# window is re-polled rather than called a failure, because a push cancels the
+# superseded run and the list can briefly still describe it.
 
 set -euo pipefail
 
@@ -84,12 +105,29 @@ done
 # another binary, so say which one is answering.
 [[ "$GH_BIN" != "gh" ]] && echo "[wait-for-pr-checks] using gh binary: $GH_BIN" >&2
 
-deadline=$(( $(date +%s) + timeout ))
+started=$(date +%s)
+deadline=$(( started + timeout ))
 errfile="$(mktemp)"
 trap 'rm -f "$errfile"' EXIT
 
 # Emit the final name<TAB>bucket rows for the caller.
 print_rows() { printf '%s\n' "$rows"; }
+
+# finish <exit-code> <word>: the last stdout line names the verdict, for a
+# caller whose pipeline swallowed the exit code.
+finish() { echo "VERDICT: $2"; exit "$1"; }
+
+# Workflow runs for the PR's current head that have not completed. Prints a
+# count; returns non-zero if either gh call fails or answers with a non-number.
+incomplete_runs() {
+  local head n
+  head="$("$GH_BIN" pr view "$pr" --json headRefOid --jq '.headRefOid' 2>"$errfile")" || return 1
+  [[ "$head" =~ ^[0-9a-f]{40}$ ]] || { echo "unreadable head sha: '$head'" >"$errfile"; return 1; }
+  n="$("$GH_BIN" run list --commit "$head" --limit 100 --json status \
+        --jq '[.[] | select(.status != "completed")] | length' 2>"$errfile")" || return 1
+  [[ "$n" =~ ^[0-9]+$ ]] || { echo "unreadable run count: '$n'" >"$errfile"; return 1; }
+  echo "$n"
+}
 
 while :; do
   # One structured call per poll. With --json, gh exits 0 whenever it
@@ -123,7 +161,7 @@ while :; do
       # to resolve or to reach the deadline as a timeout.
       if [[ -z "${checks_seen:-}" && $held -ge $settle ]]; then
         echo "=== no checks on this PR after ${held}s, nothing to wait for (green) ===" >&2
-        exit 0
+        finish 0 green
       fi
       if [[ $now -ge $deadline ]]; then
         if [[ -n "${checks_seen:-}" ]]; then
@@ -131,7 +169,7 @@ while :; do
         else
           echo "=== TIMEOUT after ${timeout}s (no checks ever registered) ===" >&2
         fi
-        exit 2
+        finish 2 timeout
       fi
       if [[ -n "${checks_seen:-}" ]]; then
         echo "[wait-for-pr-checks] check list went empty after checks were seen, re-polling in ${interval}s" >&2
@@ -142,7 +180,7 @@ while :; do
       continue
     fi
     echo "gh pr checks failed (rc=$rc): ${err:-unknown error}" >&2
-    exit 3
+    finish 3 error
   fi
   # Checks appeared, so any earlier empty readings were the registration lag and
   # not a repo without CI. This latch is what carries that knowledge: every use
@@ -153,12 +191,22 @@ while :; do
   checks_seen=1
 
   # Rows present, so decide from the bucket column regardless of gh's exit code.
+  now=$(date +%s)
+  watched=$(( now - started ))
   failed="$(awk -F'\t' '$2 == "fail" || $2 == "cancel"' <<<"$rows" || true)"
   if [[ -n "$failed" ]]; then
+    hard_failed="$(awk -F'\t' '$2 == "fail"' <<<"$rows" || true)"
+    # Only cancels, and still inside the settle window: this may be the run the
+    # push superseded. A cancel that is still there after the window is real.
+    if [[ -z "$hard_failed" && $watched -lt $settle && $now -lt $deadline ]]; then
+      echo "[wait-for-pr-checks] cancelled check(s) inside the settle window (${watched}s of ${settle}s), re-polling in ${interval}s" >&2
+      sleep "$interval"
+      continue
+    fi
     echo "=== CI FAILED ===" >&2
     echo "$failed" >&2
     print_rows
-    exit 1
+    finish 1 failed
   fi
 
   pending_count="$(awk -F'\t' '$2 == "pending" { c++ } END { print c + 0 }' <<<"$rows")"
@@ -166,14 +214,33 @@ while :; do
     if [[ $(date +%s) -ge $deadline ]]; then
       echo "=== TIMEOUT after ${timeout}s ($pending_count still pending) ===" >&2
       print_rows
-      exit 2
+      finish 2 timeout
     fi
     echo "[wait-for-pr-checks] $pending_count check(s) still pending, sleeping ${interval}s" >&2
     sleep "$interval"
     continue
   fi
 
-  echo "=== CI GREEN (all checks settled) ===" >&2
-  print_rows
-  exit 0
+  # Nothing pending and nothing failed. That is green only if the list is
+  # complete: see "Why green is checked three ways" in the header.
+  if [[ $watched -lt $settle ]]; then
+    not_yet="registration window open (${watched}s of ${settle}s)"
+  elif ! unfinished="$(incomplete_runs)"; then
+    echo "gh failed while confirming workflow runs: $(cat "$errfile")" >&2
+    finish 3 error
+  elif [[ "$unfinished" -gt 0 ]]; then
+    not_yet="$unfinished workflow run(s) for the head commit not completed"
+  else
+    count="$(awk 'END { print NR }' <<<"$rows")"
+    echo "=== CI GREEN ($count check(s) settled, every workflow run for the head completed) ===" >&2
+    print_rows
+    finish 0 green
+  fi
+  if [[ $now -ge $deadline ]]; then
+    echo "=== TIMEOUT after ${timeout}s (checks pass, but $not_yet) ===" >&2
+    print_rows
+    finish 2 timeout
+  fi
+  echo "[wait-for-pr-checks] checks pass, but $not_yet, re-polling in ${interval}s" >&2
+  sleep "$interval"
 done

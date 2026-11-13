@@ -79,7 +79,7 @@ Both are available from Anthropic's official plugin marketplace:
 
 If either is missing, `/stavxyz:polish-pr` stops and tells you what to install.
 
-Every run ends with one verdict line, `polish-pr verdict: BLESSED <head sha>` or `polish-pr verdict: NOT BLESSED: <reasons>`. A bless is for that commit on that base: a later commit or a moved base ends it, except for a conflict-free rebase that passes `land-pr`'s carry-over conditions. **A blessed PR is landed**: polish-pr continues straight into `land-pr` (below) with no further prompt. That merges the PR, verifies it, tells the project's other sessions, fixes leftovers in a follow-up PR, and starts the next piece of work. It applies when you typed the polish request yourself; a polish that another session or skill started stops at the bless. A repository whose own rules require someone's word before a merge still gets asked. To stop at the bless and merge by hand, pass `--no-land` after the PR number (`/stavxyz:polish-pr 142 --no-land`): it then opens the PR in your browser and prints the `/stavxyz:land-pr` command.
+Every run ends with one verdict line, `polish-pr verdict: BLESSED <head sha>` or `polish-pr verdict: NOT BLESSED: <reasons>`. A bless is for that commit on that base: a later commit or a moved base ends it, except for a conflict-free rebase that passes `land-pr`'s carry-over conditions. **A blessed PR is landed**: polish-pr continues straight into `land-pr` (below) with no further prompt. That merges the PR, verifies it, tells the project's other sessions, fixes leftovers in a follow-up PR, and starts the next piece of work. It applies when you typed the polish request yourself; a polish that another session or skill started stops at the bless. A repository whose own rules require someone's word before a merge still gets asked. When the checkout has more than one GitHub remote, name the repository: `/stavxyz:polish-pr 142 --repo <owner>/<repo>`. To stop at the bless and merge by hand, pass `--no-land` after the PR number (`/stavxyz:polish-pr 142 --no-land`): it then opens the PR in your browser and prints the `/stavxyz:land-pr` command.
 
 ### `/stavxyz:land-pr`
 
@@ -158,6 +158,7 @@ Installed this way they are **user skills**, which are not namespaced — so you
     ├── validate-fixtures/ # sample specs for exercising validate by hand
     ├── polish-pr/         # automated tests for resolve-pr-remotes.sh and wait-for-pr-checks.sh
     ├── land-pr/           # automated tests for merge-gate.sh
+    ├── skill-bodies/      # no skill body may hold a positional token that argument substitution would replace
     └── reboot-ready/      # automated tests for census.sh
 ```
 

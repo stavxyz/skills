@@ -6,6 +6,11 @@ disable-model-invocation: false
 
 Polish PR #$ARGUMENTS.
 
+`$ARGUMENTS` is the PR number, optionally followed by `--land`. `--land` means
+the user asked for this PR to be merged once it is blessed; it changes only what
+happens after the verdict (see "Verdict and what happens next"). The `land-pr`
+skill passes it when it runs this skill.
+
 ## Preconditions — verify before doing anything else
 
 This skill REQUIRES both review systems to be installed and available. Before rebasing, before dispatching reviews, before any other work, **verify both**:
@@ -287,4 +292,52 @@ When CI is fully green (every required check has succeeded) AND every automatabl
 
 (Attribution rule lives in its own section — see "Mandatory attribution sweep" below. Do not skip that section.)
 
-Provide a concise summary of work completed when finished.
+## Verdict and what happens next
+
+End every run with exactly one verdict line, so that a caller (the user, or the
+`land-pr` skill) has one thing to act on:
+
+```text
+polish-pr verdict: BLESSED <full 40-character head sha>
+polish-pr verdict: NOT BLESSED: <each unmet condition, by number>
+```
+
+The verdict is BLESSED only when all six hold. Check each one; do not infer any
+of them from the others.
+
+1. Both reviewers ran to completion, and every finding is fixed in the PR. A
+   deferral the user approved (with its TODO and issue) counts as handled. A
+   deferral or a question still waiting on the user does not.
+2. Every commit made after the reviewers ran is a fix for a named finding, a
+   documentation update, or a rebase. Anything else added after the review is
+   unreviewed, and needs the reviewers run again.
+3. The base-currency check reads `BEHIND` = 0, re-run after the final push.
+4. `wait-for-pr-checks.sh` exited 0 on the final push.
+5. The attribution sweep (Step 2) is empty.
+6. Every automatable open-PR item in the test plan was executed, passed, and is
+   recorded in the PR description.
+
+The sha in the verdict is the PR's head at that moment: `git rev-parse HEAD`,
+which must equal `GH_REPO=<owner>/<repo> gh pr view <PR_NUMBER> --json headRefOid --jq .headRefOid`.
+If they differ, the push did not land where the PR reads from: NOT BLESSED.
+
+The bless is for that commit on that base. Any later commit, and any movement
+of the base, ends it.
+
+Then, by case:
+
+- **BLESSED, without `--land`:** open the PR in the browser (the gate above),
+  and end the summary with the command that merges and finishes it:
+  `/stavxyz:land-pr <PR_NUMBER>` (`/land-pr <PR_NUMBER>` under a symlink
+  install).
+- **BLESSED, with `--land`:** do not open the browser; the verdict takes the
+  place of that signal. Say so in one line ("Blessed at <sha>, continuing to
+  land") and continue without asking: return to the `land-pr` skill at its
+  step 3 if it started this run, otherwise invoke `land-pr` with the PR number
+  through the Skill tool. If `land-pr` is not available to invoke, fall back to
+  the case above and say why.
+- **NOT BLESSED:** do not open the browser and do not merge. List what remains,
+  and who it is waiting on.
+
+Provide a concise summary of work completed when finished, with the verdict line
+last.

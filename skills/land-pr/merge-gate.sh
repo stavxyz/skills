@@ -10,8 +10,9 @@
 # Set GH_REPO=<owner>/<repo> when the checkout has more than one GitHub remote.
 #
 # Exit codes, one per action the caller takes:
-#   0  READY: open, not a draft, head is still the blessed sha, zero commits
-#      behind the base, GitHub reports it mergeable and not blocked. Checks are
+#   0  READY: open, not a draft, head is still the blessed sha, not behind the
+#      base (or behind only by commits that change no file, as after a
+#      merge-commit promotion), GitHub reports it mergeable and not blocked. Checks are
 #      not read: run the CI watcher first.
 #   1  NOT READY: one line per reason on stdout; the bless is void or the PR
 #      needs work before it can merge
@@ -164,7 +165,32 @@ if [[ ! "$behind" =~ ^[0-9]+$ ]]; then
   echo "UNKNOWN: unreadable behind count from gh: '$behind'"
   exit 2
 fi
-[[ "$behind" -gt 0 ]] && reasons+=("behind: head is $behind commit(s) behind $base")
+# Behind is not always stale. What "behind" protects is that the merged result
+# is the tree that was reviewed and tested, and that holds whenever the base
+# has nothing the head lacks. The standing case is a promotion flow that uses
+# merge commits (dev into main): each promote leaves a merge commit on the base
+# that the head never gets, so the head is "behind" by one more commit forever,
+# and rebasing a shared branch to clear it is not an option. The three-dot
+# compare from the head's side lists what the base changed since the two
+# diverged. No files means those commits add nothing, and the merge puts
+# exactly the head's tree on the base. A hotfix made on the base and never
+# brought back shows up as files, and stops the merge as before.
+behind_note="behind 0"
+if [[ "$behind" -gt 0 ]]; then
+  if ! base_files="$("$GH_BIN" api "repos/{owner}/{repo}/compare/${head}...${base}" --jq '.files | length' 2>"$errfile")"; then
+    echo "gh api compare failed: $(cat "$errfile")" >&2
+    exit 3
+  fi
+  if [[ ! "$base_files" =~ ^[0-9]+$ ]]; then
+    echo "UNKNOWN: unreadable count of files the base changed, from gh: '$base_files'"
+    exit 2
+  fi
+  if [[ "$base_files" -gt 0 ]]; then
+    reasons+=("behind: head is $behind commit(s) behind $base, and those commits change $base_files file(s) the head does not have")
+  else
+    behind_note="behind $behind by commits that change nothing (the base holds nothing the head lacks)"
+  fi
+fi
 
 if [[ ${#reasons[@]} -gt 0 ]]; then
   echo "NOT READY: PR #$pr"
@@ -173,5 +199,5 @@ if [[ ${#reasons[@]} -gt 0 ]]; then
 fi
 
 # READY says nothing about checks: the CI watcher rules on those, before this.
-echo "READY: PR #$pr head $head base $base behind 0 mergeable $mergeable ($merge_state); checks not read here"
+echo "READY: PR #$pr head $head base $base $behind_note mergeable $mergeable ($merge_state); checks not read here"
 exit 0

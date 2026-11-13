@@ -82,7 +82,19 @@ case "$sub" in
       ERROR) echo "HTTP 404: Not Found" >&2; exit 1 ;;
       EMPTY) exit 0 ;;
     esac
-    jq -n --argjson behind "$GH_STUB_BEHIND" '{status:"diverged", ahead_by:7, behind_by:$behind}' | jq -r "$jq_prog"
+    # compare/<base>...<head> is the behind count. compare/<head>...<base> is
+    # what the base changed since the two diverged: GH_STUB_BASE_FILES files
+    # (default 3, a real change on the base).
+    case "$2" in
+      */compare/main...*|*/compare/release/1.x...*)
+        jq -n --argjson behind "$GH_STUB_BEHIND" '{status:"diverged", ahead_by:7, behind_by:$behind}' | jq -r "$jq_prog" ;;
+      *)
+        case "${GH_STUB_BASE_FILES-3}" in
+          ERROR) echo "HTTP 500" >&2; exit 1 ;;
+          EMPTY) exit 0 ;;
+        esac
+        jq -n --argjson n "${GH_STUB_BASE_FILES-3}" '{status:"diverged", ahead_by:0, behind_by:7, files: [range(0; $n) | {filename: ("f" + tostring)}]}' | jq -r "$jq_prog" ;;
+    esac
     ;;
   *) echo "stub: unexpected gh subcommand: $1" >&2; exit 9 ;;
 esac
@@ -110,6 +122,7 @@ gate() {
   : > "$tmp/api.log"
   out=$(GH_STUB_STATE="$tmp/state" GH_STUB_VIEWS="$tmp/views.txt" \
         GH_STUB_BEHIND="$behind" GH_STUB_API_LOG="$tmp/api.log" \
+        GH_STUB_BASE_FILES="${GH_STUB_BASE_FILES-3}" \
         MERGE_GATE_GH="$tmp/gh" "$GATE" "$@" 2>&1)
   got=$?
 }
@@ -183,6 +196,37 @@ check "several reasons: behind also listed" 1 "2 commit(s) behind"
 
 gate 0 "$ready" -- 7 --interval 0
 check "no --sha can never be READY, even on a clean PR" 1 "no blessed sha given"
+
+# --- behind, but the base holds nothing the head lacks -------------------------
+# A merge-commit promotion flow: the head is behind by the earlier promotes'
+# merge commits, which change no file.
+GH_STUB_BASE_FILES=0 gate 10 "$ready" -- 7 --sha "$SHA" --interval 0
+check "behind only by commits that change no file is READY" 0 "behind 10 by commits that change nothing"
+if grep -qF "compare/$SHA...main" "$tmp/api.log"; then
+  pass=$((pass + 1))
+else
+  fail=$((fail + 1)); printf 'FAIL: the second compare should be head...base, got: %s\n' "$(cat "$tmp/api.log")"
+fi
+
+GH_STUB_BASE_FILES=2 gate 10 "$ready" -- 7 --sha "$SHA" --interval 0
+check "behind by commits that change files (a hotfix on the base) is NOT READY" 1 "change 2 file(s) the head does not have"
+
+GH_STUB_BASE_FILES=ERROR gate 10 "$ready" -- 7 --sha "$SHA" --interval 0
+check "gh failing on the second compare exits 3, never READY" 3 "gh api compare failed"
+
+GH_STUB_BASE_FILES=EMPTY gate 10 "$ready" -- 7 --sha "$SHA" --interval 0
+check "an unreadable file count is UNKNOWN, never READY" 2 "unreadable count of files"
+
+GH_STUB_BASE_FILES=0 gate 0 "$ready" -- 7 --sha "$SHA" --interval 0
+check "not behind at all still says behind 0" 0 "behind 0 mergeable"
+if grep -qF "compare/$SHA...main" "$tmp/api.log"; then
+  fail=$((fail + 1)); printf 'FAIL: the second compare is only needed when behind\n'
+else
+  pass=$((pass + 1))
+fi
+
+GH_STUB_BASE_FILES=0 gate 10 "OPEN|false|$SHA|MERGEABLE|BEHIND|main|-" -- 7 --sha "$SHA" --interval 0
+check "GitHub's own BEHIND (required up-to-date branches) still blocks" 1 "GitHub reports the head is out of date"
 
 # --- terminal states are decided before mergeability -------------------------
 gate 0 "MERGED|false|$SHA|UNKNOWN|UNKNOWN|main|$MERGE" -- 7 --sha "$SHA" --interval 0 --retries 3

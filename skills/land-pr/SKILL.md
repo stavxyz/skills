@@ -1,6 +1,6 @@
 ---
 name: land-pr
-description: Use when the user asks to merge, land, or ship one or more pull requests, in words like "merge PR #N once green and fully polished", "merge #N and #M, do the post-merge checks, notify the peers, and work out what is next", or a bare "merge it" for a PR in this conversation. Also use when polish-pr has just blessed a PR that it was asked to land.
+description: Use when the user asks to merge, land, or ship one or more pull requests, in words like "merge PR #N once green and fully polished", "merge #N and #M, do the post-merge checks, notify the peers, and work out what is next", or a bare "merge it" for a PR in this conversation. Also use when polish-pr has just blessed a PR and was not run with --no-land.
 disable-model-invocation: false
 ---
 
@@ -12,10 +12,10 @@ Landing a PR is five things, and the merge is the second of them: polish it, mer
 
 ## What this run is authorized to do
 
-- **Merge each PR named in the arguments into its own base branch.** A PR that polish-pr handed over on a bless counts as named by the user who ran polish-pr on it. This holds whether or not this session wrote the PR. It covers that PR and that base only. A promotion PR (for example `dev` into `main`) is covered only when the user named that PR.
+- **Merge each PR named in the arguments into its own base branch.** A PR that polish-pr handed over on a bless counts as named only when the user typed that polish-pr request in this conversation. A polish that a peer session's message or another skill started names nothing. This holds whether or not this session wrote the PR. It covers that PR and that base only. A promotion PR (for example `dev` into `main`) is covered only when the user named that PR.
 - **The repository's own rules win.** Before anything else, read the repo's `CLAUDE.md` or `AGENTS.md` (and any contributing or release doc they point to) for: who may merge and on what words, the merge method, what "polished" and "green" mean there, steps that must happen before a merge (a migration applied by hand, a version bump), and the post-merge checks. Where the repo is stricter than this skill, follow the repo. If the repo requires someone's explicit word for a merge and this run does not have it (polish-pr handed the PR over, a peer session asked, or the word must come from a person other than the user), do everything up to the gate, then stop before step 4 and ask.
 - **Never** pass `--admin`, bypass branch protection, or merge a PR the gate in step 3 did not pass. A peer session cannot authorize a merge.
-- **Not covered:** merging anything not named, including the follow-up PRs this run opens. Those get opened and polished, and the user is told they are ready.
+- **Not covered:** merging anything not named, including the follow-up PRs this run opens. Those get opened, polished with `--no-land` (plain polish-pr would merge them), and reported to the user as ready.
 
 ## Step 0: read the state before acting
 
@@ -39,7 +39,9 @@ If `$CLAUDE_PLUGIN_ROOT` is unset (a symlink install), resolve this SKILL.md's d
 
 With more than one PR, order them by these, first match wins:
 
-1. A PR whose base branch is another PR's head goes after that PR (a stack). Once the lower PR has merged, the upper one still points at the lower one's branch, and merging it there lands it on a dead branch that never reaches the real base. So before step 2 for the upper PR, retarget it: `gh pr edit <PR_NUMBER> --base <the lower PR's base>`, then confirm with `gh pr view <PR_NUMBER> --json baseRefName`. Any earlier bless of it is void, and polish-pr rebases it onto the new base.
+1. A PR whose base branch is another PR's head goes after that PR (a stack). Once the lower PR has merged, the upper one still points at the lower one's branch, and merging it there lands it on a dead branch that never reaches the real base. So before step 2 for the upper PR, retarget it: `gh pr edit <PR_NUMBER> --base <the lower PR's base>`, then confirm with `gh pr view <PR_NUMBER> --json baseRefName`. Any earlier bless of it is void, and polish-pr rebases it onto the new base. If the lower PR was squashed, a plain rebase replays its original commits and conflicts with the squash; rebase with `git rebase --onto <BASE_REMOTE>/<base> <the lower PR's old head sha>` so that only the upper PR's own commits move.
+
+   If the lower PR is open and is not one of the PRs in this run (the usual case when polish-pr hands over the upper PR alone), do not merge the upper one: do everything up to the gate, then stop before step 4 and ask the user whether to land the lower PR first. Merging into another PR's branch is not landing.
 2. A PR that others depend on (a migration, a shared type, a lock file) goes first.
 3. Among PRs that touch the same files, the smaller diff goes first.
 4. Otherwise, lowest risk first.
@@ -50,32 +52,34 @@ State the order, the reason, and each PR's base branch in one line. A base that 
 
 First, anything the repo says must precede a merge. A step that changes the branch (a version bump, a changelog line) is committed to the PR now, before polish-pr runs, so that it is reviewed and is part of the blessed commit. A step that does not change the branch (a migration applied by hand, a flag set in a dashboard) is run after the bless and before step 3, on evidence, not on assumption.
 
-If polish-pr already returned a BLESSED verdict for this PR earlier in this conversation (for example, it handed the PR over to this skill), and the gate has not since printed `head moved`, `behind`, or `conflicts` for that sha, do not run it again: take that sha and go to step 3.
+If polish-pr already returned a BLESSED verdict for this PR earlier in this conversation (for example, it handed the PR over to this skill), and the gate has not since printed a reason against that sha, do not run it again: take that sha, record `<blessed-base>` as described in the BLESSED bullet below if you have not, and go to step 3. If the gate printed `behind` or `conflicts`, go straight to the rebase procedure further down this step, not to polish-pr. If it printed `head moved`, continue below and run polish-pr.
 
 A bless from another conversation, or one you were told about, is not a bless: run polish-pr.
 
 If another session owns this PR's branch or worktree, tell it before polish-pr rebases and force-pushes the branch, and work in a worktree of your own, never in its checkout.
 
-Otherwise, invoke the `polish-pr` skill through the Skill tool (`stavxyz:polish-pr` under the plugin install, `polish-pr` under a symlink install) with argument `<PR_NUMBER>`. It returns a verdict line and, when the verdict is BLESSED, sends you back here to continue at step 3:
+Otherwise, invoke the `polish-pr` skill through the Skill tool (`stavxyz:polish-pr` under the plugin install, `polish-pr` under a symlink install) with arguments `<PR_NUMBER>`, plus `--repo <owner>/<repo>` if this run was given one. It returns a verdict line and, when the verdict is BLESSED, sends you back here to continue at step 3:
 
 ```text
 polish-pr verdict: BLESSED <40-char head sha>
 polish-pr verdict: NOT BLESSED: <reasons>
 ```
 
-- **BLESSED:** write down the sha, and write down the base it was blessed on, `git merge-base <BLESSED_SHA> <BASE_REMOTE>/<base>` run now, as `<blessed-base>`. That commit has no name once the base moves. Everything after this step is bound to the sha, so nothing more is pushed to this PR: a leftover noticed after the bless goes in the follow-up PR of step 6.
+- **BLESSED:** write down the sha, and write down the base it was blessed on, `git merge-base <BLESSED_SHA> <BASE_REMOTE>/<base>` run now, as `<blessed-base>`. No branch points at that commit once the base moves, so record it now (the same `git merge-base` command still finds it later). Everything after this step is bound to the sha, so nothing more is pushed to this PR: a leftover noticed after the bless goes in the follow-up PR of step 6.
 - **NOT BLESSED:** this PR does not merge in this run. Do the work the reasons name if it is yours to do, then run polish-pr again. A second NOT BLESSED for the same condition ends it: leave this PR and report what keeps failing. If a reason needs the user (an open question, a deferral to approve), leave this PR, continue with the PRs that do not depend on it, and put the question in the report.
 - **polish-pr cannot run** (its preconditions fail, or the skill is not installed): stop for this PR and say what is missing. Reviewers dispatched by hand, a single review, or "CI is green" are not a polish, however thorough.
 
 **A bless belongs to one commit on one base.** The base has moved for every PR after the first one merged, and the gate in step 3 reports that as `behind` (or `conflicts`). A blessed PR in that state is handled here, and nowhere else:
 
-1. `git fetch <BASE_REMOTE>`, write down the new tip as `<new-base>` (`git rev-parse <BASE_REMOTE>/<base>`), and rebase the PR's branch onto it, in a worktree of your own.
+1. In a worktree of your own, start from the blessed commit itself, not from whatever the branch now points at: `git switch --detach <BLESSED_SHA>`. Then `git fetch <BASE_REMOTE>`, write down the new tip as `<new-base>` (`git rev-parse <BASE_REMOTE>/<base>`), and `git rebase <new-base>`.
 2. If the rebase stops on a conflict, abort it (`git rebase --abort`). The bless is void: run polish-pr again, which does its own rebase.
 3. Otherwise the bless carries over to the rebased head only if all three hold:
    - `git range-diff <blessed-base>..<BLESSED_SHA> <new-base>..HEAD` marks every commit `=` (the patches are unchanged).
    - No file in this PR's diff was changed by what landed on the base: `git diff --name-only <blessed-base> <new-base>` and `gh pr diff <PR_NUMBER> --name-only` share no path.
    - The project's test suite passes locally on the rebased head.
-4. If all three hold, `git push --force-with-lease <HEAD_REMOTE> <branch>`. The new head sha is now the blessed sha and `<new-base>` is its `<blessed-base>`; go to step 3, which waits for CI on the new head. If any of the three fails, do not push: the bless is void, run polish-pr again.
+4. If all three hold, `git push --force-with-lease=<branch>:<BLESSED_SHA> <HEAD_REMOTE> HEAD:<branch>`. Name the expected sha in the lease: a bare `--force-with-lease` after a fetch would accept, and overwrite, a commit someone pushed to the PR in the meantime. If the push is refused, the head moved: run polish-pr again. The new head sha is now the blessed sha and `<new-base>` is its `<blessed-base>`; go to step 3, which waits for CI on the new head. If any of the three fails, do not push: the bless is void, run polish-pr again.
+
+This procedure runs once per PR per run. If the gate prints `behind` again after it, or after a re-polish, the base is moving faster than CI: leave this PR and report that.
 
 A gate reason of `head moved` means someone pushed to the PR after the bless. Those commits are unreviewed and there is nothing to carry over: run polish-pr again.
 
@@ -83,7 +87,7 @@ A gate reason of `head moved` means someone pushed to the PR after the bless. Th
 
 ## Step 3: the gate, immediately before merging
 
-Run these two in order. Nothing happens between a READY gate and the merge.
+First run the gate script once, with the blessed sha, before waiting on anything: a stale base or a moved head is a reason to stop now, not after a CI wait. Then run these two in order. Nothing happens between a READY gate and the merge.
 
 1. **Green, on this sha.** Wait for checks with polish-pr's watcher, in the background:
 
@@ -146,7 +150,7 @@ A merged PR is merged. It is not deployed and it is not verified until the check
 6. **Close what the merge resolved.** `gh pr view <PR_NUMBER> --json closingIssuesReferences`; any issue the change resolves that did not close by itself gets closed with the evidence.
 7. **Post-merge tasks the repo documents**: a release tag, a version announcement, an update instruction for users. Then clean up what this run created: worktrees, scratch databases, and review workspaces.
 
-**If a check shows the change is broken where it runs:** say so at once, with the evidence. Fix forward through a new PR, or open a revert PR if users are being harmed now. Either one goes through this skill's gates; merging it needs the user's word unless the repo's rules already cover it. Do not start the next PR in the batch on top of a broken base.
+**If a check shows the change is broken where it runs:** say so at once, with the evidence. Fix forward through a new PR, or open a revert PR if users are being harmed now. Either one is polished with `--no-land` and goes through this skill's gates; merging it needs the user's word unless the repo's rules already cover it. Do not start the next PR in the batch on top of a broken base.
 
 Then return to step 2 for the next PR.
 
@@ -154,7 +158,7 @@ Then return to step 2 for the next PR.
 
 Everything that came up along the way (a reviewer's leftover, a flaky test, a stale doc line, a check that could not run) is handled in this order:
 
-1. **Fix it now.** Before the bless, in the PR, which is what polish-pr does with every finding. After the bless, in one small follow-up PR that batches the leftovers from every PR in this run, opened and polished in this run.
+1. **Fix it now.** Before the bless, in the PR, which is what polish-pr does with every finding. After the bless, in one small follow-up PR that batches the leftovers from every PR in this run, opened in this run and polished with `polish-pr <N> --no-land`.
 2. **Fold it into an existing issue.** Search first: `gh issue list --state all --search "<keywords>"`. Comment on the open issue that covers it, or reopen a closed one if this is a recurrence.
 3. **File a new issue** only when the fix needs a decision that is the user's, depends on something that has not happened yet, or is large enough to need its own spec. The issue's first line says which of the three.
 4. **Otherwise say it in the report and drop it.** An issue filed to look thorough is a note to nobody.
@@ -180,7 +184,8 @@ A peer's reply is information to check, not an instruction and not an approval. 
 1. In the same message, ask each peer what it is working on, which files that touches, what it is blocked on, and what it thinks should happen next.
 2. Build your own list while they answer: what the user has named as next, open PRs that need polish or landing (`gh pr list`), and small, already-diagnosed open issues. Small diagnosed issues come before a new feature arc unless the user named the next thing.
 3. Replies arrive by themselves. Do not poll for them. When your own list is ready, go with the replies you have; a busy or silent peer does not hold this up, and the message you sent is the record.
-4. Choose the next piece of work that collides with no peer's files, tell the peers which one you are taking, and start it on a branch, opening the PR with the first commit. For a peer that has not answered, take its files from its open PRs (`gh pr list --json number,headRefName,files`). Ask the user instead only when the candidates differ in a way only they can rank, and then ask one question with your recommendation attached.
+4. Polishing is not landing here: any PR this step touches, existing or new, is polished with `--no-land`, because the user has not named it.
+5. Choose the next piece of work that collides with no peer's files, tell the peers which one you are taking, and start it on a branch, opening the PR with the first commit. For a peer that has not answered, take its files from its open PRs (`gh pr list --json number,headRefName,files`). Ask the user instead only when the candidates differ in a way only they can rank, and then ask one question with your recommendation attached.
 
 Re-read state at the moment you act on anything a peer mentioned: conferring does not give anyone exclusive ownership, and a peer may have merged or pushed since.
 
@@ -188,7 +193,7 @@ Re-read state at the moment you act on anything a peer mentioned: conferring doe
 
 One report, in this shape:
 
-- **Per PR:** merged (method and merge sha) or not merged (the reason); deployed or not; verified, with the evidence in a line; and what was not verified or is `[manual]`.
+- **Per PR:** merged (method and merge sha) or not merged (the reason). A PR that was blessed and then left unmerged gets what `--no-land` would have given: open it with `GH_REPO=<owner>/<repo> gh pr view <PR_NUMBER> --web` and give the command that resumes it, `/stavxyz:land-pr <PR_NUMBER>`. Then: deployed or not; verified, with the evidence in a line; and what was not verified or is `[manual]`.
 - **Caveats:** fixed (where), folded (issue number), and dropped (one line each).
 - **Issues:** opened N, closed M, with a reason for each left open.
 - **Peers:** who was told, and what they said that changed anything.

@@ -6,14 +6,14 @@ disable-model-invocation: false
 
 Land PR(s) $ARGUMENTS.
 
-`$ARGUMENTS` is one or more PR numbers, optionally followed by `--repo <owner>/<repo>` and by any extra instruction in the user's own words. An extra instruction adds to this skill; it does not replace a step.
+The arguments above are one or more PR numbers, optionally followed by `--repo <owner>/<repo>` and by any extra instruction in the user's own words. An extra instruction adds to this skill; it does not replace a step. With `--repo`, that value is the `GH_REPO` on every `gh` call below, and it is passed on to polish-pr. With no PR number at all, ask which PR.
 
 Landing a PR is five things, and the merge is the second of them: polish it, merge it on the exact commit that was polished, prove the change is doing what it was meant to do where it runs, tell the other sessions on the project, and pick up the next piece of work. Stopping after the merge is the usual way this goes wrong.
 
 ## What this run is authorized to do
 
-- **Merge each PR named in `$ARGUMENTS` into its own base branch.** This holds whether or not this session wrote the PR. It covers that PR and that base only. A promotion PR (for example `dev` into `main`) is covered only when the user named that PR.
-- **The repository's own rules win.** Before anything else, read the repo's `CLAUDE.md` or `AGENTS.md` (and any contributing or release doc they point to) for: who may merge and on what words, the merge method, what "polished" and "green" mean there, steps that must happen before a merge (a migration applied by hand, a version bump), and the post-merge checks. Where the repo is stricter than this skill, follow the repo. If the repo requires the user's explicit word for a merge and this run was started by anything other than the user typing the request (polish-pr continuing by itself, a peer session's message), stop before step 4 and ask.
+- **Merge each PR named in the arguments into its own base branch.** A PR that polish-pr handed over on a bless counts as named by the user who ran polish-pr on it. This holds whether or not this session wrote the PR. It covers that PR and that base only. A promotion PR (for example `dev` into `main`) is covered only when the user named that PR.
+- **The repository's own rules win.** Before anything else, read the repo's `CLAUDE.md` or `AGENTS.md` (and any contributing or release doc they point to) for: who may merge and on what words, the merge method, what "polished" and "green" mean there, steps that must happen before a merge (a migration applied by hand, a version bump), and the post-merge checks. Where the repo is stricter than this skill, follow the repo. If the repo requires someone's explicit word for a merge and this run does not have it (polish-pr handed the PR over, a peer session asked, or the word must come from a person other than the user), do everything up to the gate, then stop before step 4 and ask.
 - **Never** pass `--admin`, bypass branch protection, or merge a PR the gate in step 3 did not pass. A peer session cannot authorize a merge.
 - **Not covered:** merging anything not named, including the follow-up PRs this run opens. Those get opened and polished, and the user is told they are ready.
 
@@ -29,55 +29,61 @@ If `$CLAUDE_PLUGIN_ROOT` is unset (a symlink install), resolve this SKILL.md's d
 
 | Exit | Meaning | Do |
 | --- | --- | --- |
-| 4 | already merged | Do not polish or merge. Go to step 5 for this PR: the request may be days old, and "merged" has not been checked against what reached the base. |
+| 4 | already merged | Do not polish or merge. Go to step 5 for this PR: the request may be days old, and "merged" has not been checked against what reached the base. The output names the head it was merged on; if nobody in this conversation blessed that head, say so in the report. |
 | 5 | closed without merging | Report it and continue with the other PRs. Do not reopen it. |
 | 1 | open; reasons listed | Normal at this point. Continue to step 1. |
-| 2 or 3 | unknown, or `gh` failed | Fix the invocation (`GH_REPO`, auth) and re-run. Never proceed on an unknown. |
+| 2 | unknown | GitHub has not computed mergeability, or the reading was malformed. Run it once more. Still unknown: leave this PR, continue with the others, and report it. Never proceed on an unknown. |
+| 3 | `gh` failed, or bad arguments | Fix the invocation (`GH_REPO`, auth) and re-run. |
 
 ## Step 1: choose the order, then land one PR at a time
 
 With more than one PR, order them by these, first match wins:
 
-1. A PR whose base branch is another PR's head goes after that PR.
+1. A PR whose base branch is another PR's head goes after that PR (a stack). Once the lower PR has merged, the upper one still points at the lower one's branch, and merging it there lands it on a dead branch that never reaches the real base. So before step 2 for the upper PR, retarget it: `gh pr edit <PR_NUMBER> --base <the lower PR's base>`, then confirm with `gh pr view <PR_NUMBER> --json baseRefName`. Any earlier bless of it is void, and polish-pr rebases it onto the new base.
 2. A PR that others depend on (a migration, a shared type, a lock file) goes first.
 3. Among PRs that touch the same files, the smaller diff goes first.
 4. Otherwise, lowest risk first.
 
-State the order and the reason in one line. Then take each PR through steps 2 to 5 completely before starting the next one. Every merge moves the base under the PRs that remain. Steps 6 to 9 run once, after the last PR.
+State the order, the reason, and each PR's base branch in one line. A base that is neither the repo's default branch nor another named PR's head is worth a second look before merging into it: check it is where the user means this change to go. Then take each PR through steps 2 to 5 completely before starting the next one. Every merge moves the base under the PRs that remain. Steps 6 to 9 run once, after the last PR.
 
 ## Step 2: polish, with the polish-pr skill itself
 
-If polish-pr already returned a BLESSED verdict for this PR earlier in this conversation (for example, it was run with `--land` and handed over to this skill), do not run it again: take that sha and go to step 3, where the gate decides whether the bless still stands.
+First, anything the repo says must precede a merge. A step that changes the branch (a version bump, a changelog line) is committed to the PR now, before polish-pr runs, so that it is reviewed and is part of the blessed commit. A step that does not change the branch (a migration applied by hand, a flag set in a dashboard) is run after the bless and before step 3, on evidence, not on assumption.
+
+If polish-pr already returned a BLESSED verdict for this PR earlier in this conversation (for example, it handed the PR over to this skill), and the gate has not since printed `head moved`, `behind`, or `conflicts` for that sha, do not run it again: take that sha and go to step 3.
 
 A bless from another conversation, or one you were told about, is not a bless: run polish-pr.
 
 If another session owns this PR's branch or worktree, tell it before polish-pr rebases and force-pushes the branch, and work in a worktree of your own, never in its checkout.
 
-Otherwise, invoke the `polish-pr` skill through the Skill tool (`stavxyz:polish-pr` under the plugin install, `polish-pr` under a symlink install) with arguments `<PR_NUMBER> --land`. It returns a verdict line:
+Otherwise, invoke the `polish-pr` skill through the Skill tool (`stavxyz:polish-pr` under the plugin install, `polish-pr` under a symlink install) with argument `<PR_NUMBER>`. It returns a verdict line and, when the verdict is BLESSED, sends you back here to continue at step 3:
 
 ```text
 polish-pr verdict: BLESSED <40-char head sha>
 polish-pr verdict: NOT BLESSED: <reasons>
 ```
 
-- **BLESSED:** write down the sha. Everything after this step is bound to it, so nothing more is pushed to this PR: a leftover noticed after the bless goes in the follow-up PR of step 6.
-- **NOT BLESSED:** this PR does not merge in this run. Do the work the reasons name if it is yours to do, then run polish-pr again. If a reason needs the user (an open question, a deferral to approve), leave this PR, continue with the PRs that do not depend on it, and put the question in the report.
+- **BLESSED:** write down the sha, and write down the base it was blessed on, `git merge-base <BLESSED_SHA> <BASE_REMOTE>/<base>` run now, as `<blessed-base>`. That commit has no name once the base moves. Everything after this step is bound to the sha, so nothing more is pushed to this PR: a leftover noticed after the bless goes in the follow-up PR of step 6.
+- **NOT BLESSED:** this PR does not merge in this run. Do the work the reasons name if it is yours to do, then run polish-pr again. A second NOT BLESSED for the same condition ends it: leave this PR and report what keeps failing. If a reason needs the user (an open question, a deferral to approve), leave this PR, continue with the PRs that do not depend on it, and put the question in the report.
 - **polish-pr cannot run** (its preconditions fail, or the skill is not installed): stop for this PR and say what is missing. Reviewers dispatched by hand, a single review, or "CI is green" are not a polish, however thorough.
 
-**A bless belongs to one commit on one base.** When the base has moved (which it has for every PR after the first one merged), the bless carries over to the rebased head only if all four hold:
+**A bless belongs to one commit on one base.** The base has moved for every PR after the first one merged, and the gate in step 3 reports that as `behind` (or `conflicts`). A blessed PR in that state is handled here, and nowhere else:
 
-1. The rebase onto the new base had no conflicts.
-2. `git range-diff <old-base>..<blessed-sha> <new-base>..<new-head>` marks every commit `=` (the patches are unchanged).
-3. No file in this PR's diff was changed by the commits that just landed on the base: the output of `git diff --name-only <old-base> <new-base>` and `gh pr diff <PR_NUMBER> --name-only` share no path.
-4. The project's test suite passes locally on the rebased head, and CI goes green on it after `git push --force-with-lease <HEAD_REMOTE> <branch>`.
+1. `git fetch <BASE_REMOTE>`, write down the new tip as `<new-base>` (`git rev-parse <BASE_REMOTE>/<base>`), and rebase the PR's branch onto it, in a worktree of your own.
+2. If the rebase stops on a conflict, abort it (`git rebase --abort`). The bless is void: run polish-pr again, which does its own rebase.
+3. Otherwise the bless carries over to the rebased head only if all three hold:
+   - `git range-diff <blessed-base>..<BLESSED_SHA> <new-base>..HEAD` marks every commit `=` (the patches are unchanged).
+   - No file in this PR's diff was changed by what landed on the base: `git diff --name-only <blessed-base> <new-base>` and `gh pr diff <PR_NUMBER> --name-only` share no path.
+   - The project's test suite passes locally on the rebased head.
+4. If all three hold, `git push --force-with-lease <HEAD_REMOTE> <branch>`. The new head sha is now the blessed sha and `<new-base>` is its `<blessed-base>`; go to step 3, which waits for CI on the new head. If any of the three fails, do not push: the bless is void, run polish-pr again.
 
-If any of the four fails, the earlier bless is void: run polish-pr again. When all four hold, the new head sha is the blessed sha.
+A gate reason of `head moved` means someone pushed to the PR after the bless. Those commits are unreviewed and there is nothing to carry over: run polish-pr again.
 
 `<BASE_REMOTE>` and `<HEAD_REMOTE>` here and below are the local remotes for the PR's base and head repositories, as polish-pr's `resolve-pr-remotes.sh` reports them. They differ on a fork PR.
 
 ## Step 3: the gate, immediately before merging
 
-Run these three in order, with nothing else in between.
+Run these two in order. Nothing happens between a READY gate and the merge.
 
 1. **Green, on this sha.** Wait for checks with polish-pr's watcher, in the background:
 
@@ -85,7 +91,7 @@ Run these three in order, with nothing else in between.
    GH_REPO=<owner>/<repo> bash "$CLAUDE_PLUGIN_ROOT/skills/polish-pr/wait-for-pr-checks.sh" <PR_NUMBER>
    ```
 
-   Exit 0 is green. On exit 1, read the failed job's log before anything else (`gh run view <run-id> --log-failed`). If the failing test's file, or the code that test exercises, is in this PR's diff, it is a bug in the PR: fix it, and the bless is void. Re-running without a fix is allowed once, and only when both are true: neither the test nor the code it exercises is in this PR's diff, and the same test has failed on a recent run of the base branch (`gh run list --branch <base> --workflow <workflow> --limit 10`, then compare by job and test name, not by the run's overall conclusion, since a base can be red for an unrelated job). The re-run is `gh run rerun <run-id> --failed`, followed by the watcher again. A pass on that one re-run is green, and the flaky test goes in the report by name. Anything else is not green.
+   Exit 0 is green. Exit 2 is a timeout: run the watcher once more, and if it times out again, leave this PR and report the checks that never settled, by name. Exit 3 is a `gh` or usage failure: fix the invocation and re-run. On exit 1, read the failed job's log before anything else (`gh run view <run-id> --log-failed`). If the failing test's file, or the code that test exercises, is in this PR's diff, it is a bug in the PR: fix it, and the bless is void. Re-running without a fix is allowed once, and only when both are true: neither the test nor the code it exercises is in this PR's diff, and the same test has failed on a recent run of the base branch (`gh run list --branch <base> --workflow <workflow> --limit 10`, then compare by job and test name, not by the run's overall conclusion, since a base can be red for an unrelated job). The re-run is `gh run rerun <run-id> --failed`, followed by the watcher again. A pass on that one re-run is green, and the flaky test goes in the report by name. Anything else is not green.
 
 2. **The gate script, with the blessed sha:**
 
@@ -95,25 +101,25 @@ Run these three in order, with nothing else in between.
 
    | Exit | Do |
    | --- | --- |
-   | 0 READY | Merge now (step 4). |
-   | 1 NOT READY | Act on each printed reason. `head moved`, `behind`, and `conflicts` send you back to step 2. `draft`: run `gh pr ready <PR_NUMBER>` if the PR is blessed, then re-run the gate. `blocked`: a required review or check is missing; report it and leave this PR. |
+   | 0 READY | Merge now (step 4). READY does not read checks, which is why the watcher runs first. |
+   | 1 NOT READY | Act on each printed reason. `behind` and `conflicts`: the rebase procedure in step 2. `head moved`: polish-pr again (step 2). `draft`: run `gh pr ready <PR_NUMBER>` if the PR is blessed, then re-run the gate. `blocked`: a required review or check is missing; report it and leave this PR. |
    | 2 UNKNOWN | The script has already retried for about a minute. Run it once more. Still unknown: leave this PR and report it. |
    | 3 | `gh` failed or the arguments are wrong. Fix the invocation and re-run. |
-   | 4 ALREADY MERGED | Someone else merged it while you worked. Go to step 5. |
+   | 4 ALREADY MERGED | Someone else merged it while you worked. The output says whether the merged head is the blessed sha; if it differs, unreviewed commits landed, and the report says so. Go to step 5. |
    | 5 CLOSED | Report it. |
-
-3. **Any step the repo says must precede the merge** (found in the authorization read above). Run it now, on evidence, not on assumption.
 
 ## Step 4: merge
 
-Merge method, first match wins: the method the repo's docs name; the only method the repo allows (`gh repo view --json mergeCommitAllowed,squashMergeAllowed,rebaseMergeAllowed`); the method the base branch's recent history shows (`git log -15 --format='%h %p %s' <BASE_REMOTE>/<base>`: two parents is a merge commit, one parent with a `(#N)` subject is a squash).
+Merge method, first match wins: the method the repo's docs name; the only method the repo allows (`gh repo view --json mergeCommitAllowed,squashMergeAllowed,rebaseMergeAllowed`); the method the base branch's recent history shows (`git log -15 --format='%h %p %s' <BASE_REMOTE>/<base>`: two parents is a merge commit, one parent with a `(#N)` subject is a squash, and runs of one-parent commits with neither are rebase merges); and, if the history is mixed or too short to tell, a merge commit, named as a default in the report.
+
+Before merging, write down the base's tip as `<pre-merge-base>`: `git fetch <BASE_REMOTE> && git rev-parse <BASE_REMOTE>/<base>`. Step 5 compares against it.
 
 ```bash
 GH_REPO=<owner>/<repo> gh pr merge <PR_NUMBER> --<merge|squash|rebase> --match-head-commit <BLESSED_SHA>
 ```
 
 - Do not pass `--delete-branch`. In a worktree it tries to check out the base branch locally, fails after the merge has already happened, and prints what reads like a failed merge. If the repo's convention is to delete merged branches, and no other open PR uses this branch as its base (`gh pr list --base <branch>`), delete the remote branch as a separate step: `git push <HEAD_REMOTE> --delete <branch>`.
-- Do not pass `--auto`. If the base uses a merge queue, `gh` queues the PR instead of merging it; wait for the queue in the background and treat the PR as unmerged until the next command says otherwise.
+- Do not pass `--auto`. If the base uses a merge queue, `gh` queues the PR instead of merging it. Wait for the queue in the background (`until [ "$(GH_REPO=<owner>/<repo> gh pr view <PR_NUMBER> --json state --jq .state)" != OPEN ]; do sleep 30; done` with `run_in_background: true`) and treat the PR as unmerged until the next command says otherwise.
 - **Read the result from the PR, not from the exit code:**
 
   ```bash
@@ -126,7 +132,7 @@ GH_REPO=<owner>/<repo> gh pr merge <PR_NUMBER> --<merge|squash|rebase> --match-h
 
 A merged PR is merged. It is not deployed and it is not verified until the checks below say so, and the report uses those three words for three different things.
 
-1. **The change is on the base.** `git fetch <BASE_REMOTE>`, then compare what landed with what the PR contained: `git diff --stat <merge-sha>^1 <merge-sha>` against `gh pr diff <PR_NUMBER> --name-only`. A squash or a bad conflict resolution can land a fraction of a PR. For every later check that reads a file, read the base's copy (`git show <BASE_REMOTE>/<base>:<path>`), not the working tree.
+1. **The change is on the base.** `git fetch <BASE_REMOTE>`, then compare what landed with what the PR contained: every path in `gh pr diff <PR_NUMBER> --name-only` must appear in `git diff --name-only <pre-merge-base> <merge-sha>`. (Comparing against the merge commit's parent is wrong for a rebase merge, which lands several commits.) For a PR that was already merged when this run began, use the merge commit's first parent for a merge commit or a squash, and say so if the method was a rebase. A squash or a bad conflict resolution can land a fraction of a PR; for any path that is missing, or that matters most to the change, read the base's copy and confirm the change is in it. For every later check that reads a file, read the base's copy (`git show <BASE_REMOTE>/<base>:<path>`), not the working tree.
 2. **The base branch's own runs for the merge sha.** PR checks ran on a different commit and are not the deploy.
 
    ```bash
@@ -157,7 +163,7 @@ Count issues opened and issues closed in this run. Opened greater than closed ne
 
 ## Step 7: tell the other sessions on this project
 
-Use `ListAgents`. The peers are the sessions working in this repository or on this project (matched by name or working directory), not every session on the machine. If the tool is not available or no session matches, write "no peer sessions found" in the report and go to step 8 with the user as the only one to confer with.
+Use `ListAgents` (if it and `SendMessage` are listed as deferred tools, load both first). The peers are the sessions working in this repository or on this project (matched by name or working directory), not every session on the machine. If the tool is not available or no session matches, write "no peer sessions found" in the report and go to step 8 with the user as the only one to confer with.
 
 Send each peer one message with `SendMessage`, covering every PR this run landed. Its first line stands alone, and the body has, in this order:
 

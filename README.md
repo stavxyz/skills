@@ -79,7 +79,7 @@ Both are available from Anthropic's official plugin marketplace:
 
 If either is missing, `/stavxyz:polish-pr` stops and tells you what to install.
 
-Every run ends with one verdict line, `polish-pr verdict: BLESSED <head sha>` or `polish-pr verdict: NOT BLESSED: <reasons>`. A bless is for that commit on that base: a later commit or a moved base ends it, except for a conflict-free rebase that passes `land-pr`'s carry-over conditions. **A blessed PR is landed**: polish-pr continues straight into `land-pr` (below), which merges it, verifies it, and announces it, with no further prompt. A repository whose own rules require someone's word before a merge still gets asked. To stop at the bless and merge by hand, pass `--no-land` after the PR number (`/stavxyz:polish-pr 142 --no-land`): it then opens the PR in your browser and prints the `/stavxyz:land-pr` command.
+Every run ends with one verdict line, `polish-pr verdict: BLESSED <head sha>` or `polish-pr verdict: NOT BLESSED: <reasons>`. A bless is for that commit on that base: a later commit or a moved base ends it, except for a conflict-free rebase that passes `land-pr`'s carry-over conditions. **A blessed PR is landed**: polish-pr continues straight into `land-pr` (below) with no further prompt. That merges the PR, verifies it, tells the project's other sessions, fixes leftovers in a follow-up PR, and starts the next piece of work. It applies when you typed the polish request yourself; a polish that another session or skill started stops at the bless. A repository whose own rules require someone's word before a merge still gets asked. To stop at the bless and merge by hand, pass `--no-land` after the PR number (`/stavxyz:polish-pr 142 --no-land`): it then opens the PR in your browser and prints the `/stavxyz:land-pr` command.
 
 ### `/stavxyz:land-pr`
 
@@ -88,7 +88,7 @@ Every run ends with one verdict line, `polish-pr verdict: BLESSED <head sha>` or
 /stavxyz:land-pr 142 143 150
 ```
 
-What "merge this once it is green and polished, check it afterwards, tell the other sessions, and keep going" means, written down once. It runs by itself after a `/stavxyz:polish-pr` bless, and can be called directly with one or more PRs. Either way it is the instruction to merge the PRs it names, each into its own base branch, whether or not the current session wrote them. Nothing else is covered: no `--admin`, no bypassing branch protection, and no merging the follow-up PRs the run itself opens. The repository's own rules (`CLAUDE.md` or `AGENTS.md`) win wherever they are stricter.
+What "merge this once it is green and polished, check it afterwards, tell the other sessions, and keep going" means, written down once. It runs by itself after a `/stavxyz:polish-pr` bless, and can be called directly with one or more PRs. Either way it is the instruction to merge the PRs it names, each into its own base branch, whether or not the current session wrote them. Nothing else is covered: no `--admin`, no bypassing branch protection, and no merging the follow-up PRs the run itself opens (those are polished with `--no-land`). The repository's own rules (`CLAUDE.md` or `AGENTS.md`) win wherever they are stricter.
 
 For each PR, one at a time, because every merge moves the base under the PRs that remain:
 

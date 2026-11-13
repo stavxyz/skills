@@ -13,7 +13,7 @@
     {
       "name": "stavxyz",
       "source": "./",
-      "description": "Multi-reviewer and ops skills: /stavxyz:validate (fact-check + SOLID review of specs and plans), /stavxyz:polish-pr (parallel review + fix sweep on a pull request), /stavxyz:land-pr (polish, merge on the blessed commit, post-merge verification, peer notification, next work), and /stavxyz:reboot-ready (pre-reboot session census, rescue-ref parking, resume manifest)"
+      "description": "Multi-reviewer and ops skills: /stavxyz:validate (fact-check + SOLID review of specs and plans), /stavxyz:polish-pr (parallel review + fix sweep on a pull request, then lands it on a bless; --no-land to stop there), /stavxyz:land-pr (polish, merge on the blessed commit, post-merge verification, peer notification, next work), and /stavxyz:reboot-ready (pre-reboot session census, rescue-ref parking, resume manifest)"
     }
   ]
 }

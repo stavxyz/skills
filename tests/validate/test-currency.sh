@@ -124,6 +124,146 @@ other_pushes feature src/code.py "code from a teammate"
 check "a pushed feature branch behind its own upstream is STALE" \
   1 "behind origin/feature" "$CHECK" "$W/docs/plan.md"
 
+# A fork setup: the branch tracks the fork, the document's history is on origin.
+fresh
+git init -q --bare -b main "$TMP/fork.git"
+git -C "$W" remote add fork "$TMP/fork.git"
+git -C "$W" push -q fork main
+git -C "$W" checkout -q -b feature
+echo "f" > "$W/src/f.py"; git -C "$W" add -A; git -C "$W" commit -q -m f
+git -C "$W" push -q -u fork feature
+check "a branch tracking a fork, level with origin, is current" 0 "CURRENT" "$CHECK" "$W/docs/plan.md"
+other_pushes main docs/plan.md "plan v2"
+check "a branch tracking a fork is STALE when origin's default branch changed the document" \
+  1 "the document changed on origin/main after this branch left it" "$CHECK" "$W/docs/plan.md"
+rm -rf "$TMP/fork.git"
+
+# A remote whose name contains a slash.
+fresh
+git -C "$W" remote rename origin team/up
+other_pushes main src/code.py "code v2"
+check "a remote named with a slash is still fetched and compared" \
+  1 "behind team/up/main" "$CHECK" "$W/docs/plan.md"
+
+# A branch tracking a LOCAL branch has no remote upstream; origin still counts.
+fresh
+git -C "$W" checkout -q -b local-child --track main
+other_pushes main docs/plan.md "plan v2"
+check "a branch tracking a local branch is still compared with origin's default" \
+  1 "the document changed on origin/main" "$CHECK" "$W/docs/plan.md"
+
+# Being behind a LOCAL upstream says nothing about the remote.
+fresh
+git -C "$W" checkout -q -b local-child --track main
+git -C "$W" checkout -q main
+echo "m" > "$W/src/m.py"; git -C "$W" add -A; git -C "$W" commit -q -m "local main moves"
+git -C "$W" checkout -q local-child
+check "a branch behind its local upstream, level with the remote, is current" \
+  0 "CURRENT" "$CHECK" "$W/docs/plan.md"
+
+# The document was renamed on this branch; the default branch edited the old name.
+fresh
+git -C "$W" checkout -q -b feature
+git -C "$W" mv docs/plan.md docs/plan2.md; git -C "$W" commit -q -m rename
+other_pushes main docs/plan.md "plan v2"
+check "a document renamed on this branch is matched with edits to its old path" \
+  1 "the document changed on origin/main" "$CHECK" "$W/docs/plan2.md"
+
+# A path with a space and glob characters is one literal file, not a pattern.
+fresh
+mkdir -p "$O/docs/my plans"; echo "p" > "$O/docs/my plans/a[1]*.md"; echo "q" > "$O/docs/my plans/a1x.md"
+git -C "$O" add -A; git -C "$O" commit -q -m docs; git -C "$O" push -q origin main
+git -C "$W" pull -q --ff-only origin main
+git -C "$W" checkout -q -b feature
+other_pushes main "docs/my plans/a1x.md" "q2"
+check "a sibling file matching the document's name as a glob is not the document" \
+  0 "the document is unchanged there" "$CHECK" "$W/docs/my plans/a[1]*.md"
+other_pushes main "docs/my plans/a[1]*.md" "p2"
+check "a document with spaces and glob characters in its path is found" \
+  1 "the document changed on origin/main" "$CHECK" "$W/docs/my plans/a[1]*.md"
+
+# Detached HEAD has no upstream; origin's default branch still decides.
+fresh
+git -C "$W" checkout -q --detach
+other_pushes main docs/plan.md "plan v2"
+check "a detached HEAD behind origin's default branch is STALE" \
+  1 "the document changed on origin/main" "$CHECK" "$W/docs/plan.md"
+
+# The branch edited its own document; the default branch moved only in code.
+# (Two dots in place of three would call this a change on the default branch.)
+fresh
+git -C "$W" checkout -q -b feature
+echo "plan v1, edited here" > "$W/docs/plan.md"; git -C "$W" add -A; git -C "$W" commit -q -m edit
+other_pushes main src/code.py "code v2"
+check "a branch that edited its own document, with only code moved on the default, is current" \
+  0 "behind_default=1" "$CHECK" "$W/docs/plan.md"
+
+# A feature branch created FROM origin/main has origin/main as its upstream.
+fresh
+git -C "$W" checkout -q -b feature origin/main
+other_pushes main src/code.py "code v2"
+check "a feature branch tracking the default branch is not stopped for code-only drift" \
+  0 "the document is unchanged there" "$CHECK" "$W/docs/plan.md"
+other_pushes main docs/plan.md "plan v2"
+check "a feature branch tracking the default branch is STALE when the document changed there" \
+  1 "the document changed on origin/main" "$CHECK" "$W/docs/plan.md"
+
+# origin/HEAD unset: the main/master fallback finds the default branch.
+fresh
+git -C "$W" checkout -q -b feature
+git -C "$W" config remote.origin.followRemoteHEAD never
+git -C "$W" remote set-head origin --delete
+other_pushes main docs/plan.md "plan v2"
+check "with origin/HEAD unset, origin/main is still used as the default branch" \
+  1 "the document changed on origin/main" "$CHECK" "$W/docs/plan.md"
+
+# A single remote that is not named origin.
+fresh
+git -C "$W" remote rename origin upstream
+git -C "$W" checkout -q -b feature
+other_pushes main docs/plan.md "plan v2"
+check "a single remote not named origin is used" \
+  1 "the document changed on upstream/main" "$CHECK" "$W/docs/plan.md"
+
+# No upstream and no default branch this clone can name.
+fresh
+git -C "$O" checkout -q -b trunk; git -C "$O" push -q origin trunk
+git -C "$W" config remote.origin.followRemoteHEAD never
+git -C "$W" fetch -q origin
+git -C "$W" checkout -q -b feature origin/trunk --no-track
+git -C "$W" remote set-head origin --delete
+git -C "$W" update-ref -d refs/remotes/origin/main
+git -C "$W" config remote.origin.fetch '+refs/heads/trunk:refs/remotes/origin/trunk'
+check "no upstream and no known default branch is UNVERIFIED" \
+  2 "no remote default branch is known" "$CHECK" "$W/docs/plan.md"
+
+# A document that is itself a symlink to a tracked file.
+fresh
+ln -s plan.md "$O/docs/current.md"; git -C "$O" add -A; git -C "$O" commit -q -m link; git -C "$O" push -q origin main
+git -C "$W" pull -q --ff-only origin main
+git -C "$W" checkout -q -b feature
+other_pushes main docs/plan.md "plan v2"
+check "a symlinked document is checked as the file it points at" \
+  1 "docs/plan.md" "$CHECK" "$W/docs/current.md"
+
+# A path typed in a different case from the tracked name, where the volume
+# allows it.
+fresh
+git -C "$W" checkout -q -b feature
+other_pushes main docs/plan.md "plan v2"
+if [ -f "$W/docs/PLAN.md" ]; then
+  git -C "$W" config core.ignorecase true
+  check "a path typed in another case still finds the tracked document" \
+    1 "the document changed on origin/main" "$CHECK" "$W/docs/PLAN.md"
+else
+  echo "skip: case-insensitive path fixture (this volume is case-sensitive)"
+fi
+
+# Flags may come before the document.
+fresh
+check "--since before the document path is accepted" \
+  0 "CURRENT" "$CHECK" --since "$(git -C "$W" rev-parse HEAD)" "$W/docs/plan.md"
+
 # --- --since ------------------------------------------------------------------
 fresh
 start=$(git -C "$W" rev-parse HEAD)
@@ -143,6 +283,14 @@ check "the remote moving during the run is caught by the re-check" \
 fresh
 git -C "$W" remote remove origin
 check "no remote at all is UNVERIFIED" 2 "no upstream and no remote to compare against" "$CHECK" "$W/docs/plan.md"
+out=$("$CHECK" "$W/docs/plan.md" --since "$(git -C "$W" rev-parse HEAD~0)" 2>&1)
+git -C "$W" commit -q --allow-empty -m moved
+out=$("$CHECK" "$W/docs/plan.md" --since "$(git -C "$W" rev-parse HEAD~1)" 2>&1); got=$?
+if [ "$got" = "1" ] && ! grep -q "UNVERIFIED" <<<"$out"; then
+  pass=$((pass + 1))
+else
+  fail=$((fail + 1)); printf 'FAIL: STALE output must not also say UNVERIFIED, got exit %s:\n%s\n' "$got" "$out"
+fi
 
 fresh
 git -C "$W" remote set-url origin "$TMP/gone.git"
@@ -153,6 +301,21 @@ git -C "$W" remote set-url origin "$TMP/gone.git"
 start=$(git -C "$W" rev-parse HEAD)
 echo "x" > "$W/src/x.py"; git -C "$W" add -A; git -C "$W" commit -q -m x
 check "a failed fetch does not hide that HEAD moved" \
+  1 "HEAD moved during the run" "$CHECK" "$W/docs/plan.md" --since "$start"
+
+# The upstream branch was deleted on the remote and pruned: the count fails.
+# HEAD having moved must still come back as STALE, which stops the run, and not
+# as UNVERIFIED, which the caller may continue past.
+fresh
+git -C "$W" checkout -q -b feature
+echo "f" > "$W/src/f.py"; git -C "$W" add -A; git -C "$W" commit -q -m f
+git -C "$W" push -q -u origin feature
+start=$(git -C "$W" rev-parse HEAD)
+git -C "$O" push -q origin --delete feature
+git -C "$W" config fetch.prune true
+check "a pruned upstream alone is UNVERIFIED" 2 "could not count commits behind origin/feature" "$CHECK" "$W/docs/plan.md"
+echo "x" > "$W/src/x.py"; git -C "$W" add -A; git -C "$W" commit -q -m x
+check "a pruned upstream does not hide that HEAD moved" \
   1 "HEAD moved during the run" "$CHECK" "$W/docs/plan.md" --since "$start"
 
 # --- usage --------------------------------------------------------------------

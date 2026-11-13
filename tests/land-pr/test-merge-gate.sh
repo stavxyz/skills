@@ -7,9 +7,17 @@
 # moved after the bless, a stale base GitHub does not flag, and an empty or
 # malformed reading.
 #
-# gh is replaced by a stub. `gh pr view` returns one scripted reading per call
-# (the last repeats), and `gh api .../compare/...` returns the scripted behind
-# count, so the gate runs with no network and no live PR.
+# gh is replaced by a stub, so the gate runs with no network and no live PR.
+# The stub does not hand the script ready-made fields. It builds the JSON that
+# GitHub would return and runs the script's own --jq program over it with a
+# real jq, so the field names, their order, and the null handling are under
+# test too. A stub that printed the joined line itself left `.behind_by`
+# swapped for `.ahead_by` green, which is the look-alike the script exists to
+# rule out. `gh pr view` takes one scripted reading per call (the last
+# repeats); `gh api .../compare/...` takes the scripted behind count, and
+# always reports 7 commits AHEAD so that reading the wrong field is visible.
+#
+# Requires jq.
 #
 # Usage: tests/land-pr/test-merge-gate.sh
 # Exit:  0 all passed, 1 otherwise.
@@ -22,9 +30,19 @@ GATE="$SCRIPT_DIR/merge-gate.sh"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
+command -v jq >/dev/null 2>&1 || { echo "test-merge-gate.sh needs jq on PATH" >&2; exit 1; }
+
 cat > "$tmp/gh" <<'STUB'
 #!/usr/bin/env bash
-case "$1" in
+sub=$1
+jq_prog=""
+prev=""
+for a in "$@"; do
+  [ "$prev" = "--jq" ] && jq_prog=$a
+  prev=$a
+done
+[ -n "$jq_prog" ] || { echo "stub: call carried no --jq program: $*" >&2; exit 9; }
+case "$sub" in
   pr)
     n=$(cat "$GH_STUB_STATE" 2>/dev/null || echo 0)
     n=$((n + 1))
@@ -34,16 +52,27 @@ case "$1" in
     case "$line" in
       ERROR) echo "could not resolve to a PullRequest" >&2; exit 1 ;;
       EMPTY) exit 0 ;;
-      *)     printf '%s\n' "$line" ;;
     esac
+    # A reading with exactly seven fields is a PR: turn it into the JSON gh
+    # would fetch. Any other shape is a malformed response, passed through raw.
+    IFS='|' read -r state draft head mergeable merge_state base merge_commit extra <<<"$line|END"
+    if [ "$extra" != "END" ]; then
+      printf '%s\n' "$line"
+      exit 0
+    fi
+    if [ "$merge_commit" = "-" ]; then mc=null; else mc="{\"oid\":\"$merge_commit\"}"; fi
+    jq -r -n --arg state "$state" --argjson draft "$draft" --arg head "$head" \
+      --arg mergeable "$mergeable" --arg ms "$merge_state" --arg base "$base" --argjson mc "$mc" \
+      '{state:$state, isDraft:$draft, headRefOid:$head, mergeable:$mergeable,
+        mergeStateStatus:$ms, baseRefName:$base, mergeCommit:$mc}' | jq -r "$jq_prog"
     ;;
   api)
     echo "$2" >> "$GH_STUB_API_LOG"
     case "$GH_STUB_BEHIND" in
       ERROR) echo "HTTP 404: Not Found" >&2; exit 1 ;;
       EMPTY) exit 0 ;;
-      *)     printf '%s\n' "$GH_STUB_BEHIND" ;;
     esac
+    jq -n --argjson behind "$GH_STUB_BEHIND" '{status:"diverged", ahead_by:7, behind_by:$behind}' | jq -r "$jq_prog"
     ;;
   *) echo "stub: unexpected gh subcommand: $1" >&2; exit 9 ;;
 esac
@@ -145,6 +174,13 @@ check "no --sha can never be READY, even on a clean PR" 1 "no blessed sha given"
 # --- terminal states are decided before mergeability -------------------------
 gate 0 "MERGED|false|$SHA|UNKNOWN|UNKNOWN|main|$MERGE" -- 7 --sha "$SHA" --interval 0 --retries 3
 check "a merged PR is ALREADY MERGED, not retried as UNKNOWN" 4 "merge commit $MERGE"
+check "a PR merged on the blessed head says so" 4 "merged head $SHA is the blessed sha"
+
+gate 0 "MERGED|false|$OTHER|UNKNOWN|UNKNOWN|main|$MERGE" -- 7 --sha "$SHA" --interval 0
+check "a PR merged on a different head than the blessed one is flagged" 4 "differs from the blessed sha $SHA"
+
+gate 0 "MERGED|false|$SHA|UNKNOWN|UNKNOWN|main|$MERGE" -- 7 --interval 0
+check "a merged PR probed without --sha reports its merged head" 4 "merged head $SHA"
 if [ "$(cat "$tmp/state")" = "1" ]; then
   pass=$((pass + 1))
 else

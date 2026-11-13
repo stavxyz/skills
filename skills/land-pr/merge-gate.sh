@@ -11,13 +11,15 @@
 #
 # Exit codes, one per action the caller takes:
 #   0  READY: open, not a draft, head is still the blessed sha, zero commits
-#      behind the base, GitHub reports it mergeable and not blocked
+#      behind the base, GitHub reports it mergeable and not blocked. Checks are
+#      not read: run the CI watcher first.
 #   1  NOT READY: one line per reason on stdout; the bless is void or the PR
 #      needs work before it can merge
 #   2  UNKNOWN: GitHub had not computed mergeability after every retry, or a
 #      reading came back empty or malformed. Unknown is never a pass.
 #   3  usage error, gh missing, or a gh invocation failure
-#   4  ALREADY MERGED: stdout carries the merge commit; skip to post-merge work
+#   4  ALREADY MERGED: stdout carries the merge commit and the merged head, and
+#      says whether that head is the blessed sha; skip to post-merge work
 #   5  CLOSED without merging
 #
 # Why a script: these readings each have a look-alike that passes wrongly.
@@ -98,7 +100,16 @@ while :; do
   # Terminal states first. mergeable is UNKNOWN on a merged or closed PR, so
   # testing it before the state would retry on a PR that will never change.
   case "$state" in
-    MERGED) echo "ALREADY MERGED: PR #$pr merge commit $merge_commit"; exit 4 ;;
+    MERGED)
+      # Someone else may have merged it, on a head that was never blessed.
+      if [[ -z "$sha" ]]; then
+        echo "ALREADY MERGED: PR #$pr merge commit $merge_commit, merged head $head"
+      elif [[ "$head" == "$sha" ]]; then
+        echo "ALREADY MERGED: PR #$pr merge commit $merge_commit, merged head $head is the blessed sha"
+      else
+        echo "ALREADY MERGED: PR #$pr merge commit $merge_commit, merged head $head differs from the blessed sha $sha"
+      fi
+      exit 4 ;;
     CLOSED) echo "CLOSED: PR #$pr was closed without merging"; exit 5 ;;
     OPEN)   ;;
     *)      echo "UNKNOWN: unrecognized PR state '$state'"; exit 2 ;;
@@ -161,5 +172,6 @@ if [[ ${#reasons[@]} -gt 0 ]]; then
   exit 1
 fi
 
-echo "READY: PR #$pr head $head base $base behind 0 mergeable $mergeable ($merge_state)"
+# READY says nothing about checks: the CI watcher rules on those, before this.
+echo "READY: PR #$pr head $head base $base behind 0 mergeable $mergeable ($merge_state); checks not read here"
 exit 0

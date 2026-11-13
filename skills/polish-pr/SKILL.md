@@ -191,10 +191,14 @@ GH_REPO=<owner>/<repo> "$CLAUDE_PLUGIN_ROOT/skills/polish-pr/wait-for-pr-checks.
 If `$CLAUDE_PLUGIN_ROOT` is unset (some skill installations), resolve the skill's directory by reading the path of this SKILL.md file at invocation time and use the sibling `wait-for-pr-checks.sh`.
 
 The script polls every 20s by default (override with `--interval N`), times out at 1800s (override with `--timeout N`), and exits:
-- `0`: all checks settled, none failed (green), **or** the PR has no checks at all and an empty result held for the settle window (nothing to wait for, so proceed)
+- `0`: all checks settled, none failed, the settle window has passed since the script started, and every workflow run GitHub lists for the head commit is completed (green), **or** the PR has no checks at all and an empty result held for the settle window (nothing to wait for, so proceed)
 - `1`: at least one check is in the `fail` or `cancel` bucket
 - `2`: timed out before all checks settled, including checks that never registered at all
-- `3`: usage error, `gh` missing, or a real `gh` invocation failure (auth, bad PR)
+- `3`: usage error, `gh` missing, or a real `gh` invocation failure (auth, bad PR, network)
+
+**Do not pipe it** (`... | tail -20`). A pipeline's exit status is its last command's, so the script's exit code is lost and a failure reads as 0; a network error was once reported as green that way. Run it bare, and read its output file afterwards. Its last stdout line is always `VERDICT: green`, `VERDICT: failed`, `VERDICT: timeout`, or `VERDICT: error`, so a caller that has lost the exit code can still tell.
+
+**Why "nothing pending" is not believed immediately either.** After a push GitHub registers workflows one at a time, so one fast check can be listed and passing while the others are not in the list yet (observed: a single passing row with nine workflows still to appear, and a run held in its concurrency group for 80 seconds with no jobs). No expected number of checks fixes that, because path-filtered workflows make the number depend on what the PR touched. So the script calls green only after the settle window has passed since it started, and only when every workflow run for the head commit is completed. A `cancel` seen inside the settle window is re-polled, since a push cancels the superseded run; a `fail` is final at once. The cost is that every run takes at least the settle window.
 
 **Why an empty result is not believed immediately.** `gh pr checks` reports "no
 checks reported" both for a repo without CI and for a head pushed seconds ago

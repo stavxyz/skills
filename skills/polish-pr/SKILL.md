@@ -192,13 +192,13 @@ If `$CLAUDE_PLUGIN_ROOT` is unset (some skill installations), resolve the skill'
 
 The script polls every 20s by default (override with `--interval N`), times out at 1800s (override with `--timeout N`), and exits:
 - `0`: all checks settled, none failed, the settle window has passed since the script started, and every workflow run GitHub lists for the head commit is completed (green), **or** the PR has no checks at all and an empty result held for the settle window (nothing to wait for, so proceed)
-- `1`: at least one check is in the `fail` or `cancel` bucket
-- `2`: timed out before all checks settled, including checks that never registered at all
+- `1`: at least one check is in the `fail` or `cancel` bucket, or a workflow run for the head commit ended in failure or awaiting approval without producing any check row (a workflow file error, a fork PR's unapproved run)
+- `2`: timed out before all checks settled, including checks that never registered at all, and checks that pass while a workflow run for the head commit never completes (a run waiting on an approval, for example; the message names the runs)
 - `3`: usage error, `gh` missing, or a real `gh` invocation failure (auth, bad PR, network)
 
 **Do not pipe it** (`... | tail -20`). A pipeline's exit status is its last command's, so the script's exit code is lost and a failure reads as 0; a network error was once reported as green that way. Run it bare, and read its output file afterwards. Its last stdout line is always `VERDICT: green`, `VERDICT: failed`, `VERDICT: timeout`, or `VERDICT: error`, so a caller that has lost the exit code can still tell.
 
-**Why "nothing pending" is not believed immediately either.** After a push GitHub registers workflows one at a time, so one fast check can be listed and passing while the others are not in the list yet (observed: a single passing row with nine workflows still to appear, and a run held in its concurrency group for 80 seconds with no jobs). No expected number of checks fixes that, because path-filtered workflows make the number depend on what the PR touched. So the script calls green only after the settle window has passed since it started, and only when every workflow run for the head commit is completed. A `cancel` seen inside the settle window is re-polled, since a push cancels the superseded run; a `fail` is final at once. The cost is that every run takes at least the settle window.
+**Why "nothing pending" is not believed immediately either.** After a push GitHub registers workflows one at a time, so one fast check can be listed and passing while the others are not in the list yet (observed: a single passing row with nine workflows still to appear, and a run held in its concurrency group for 80 seconds with no jobs). No expected number of checks fixes that, because path-filtered workflows make the number depend on what the PR touched. So the script calls green only after the settle window has passed since it started, and only when every workflow run for the head commit is completed. A `cancel` seen inside the settle window is re-polled, since a push cancels the superseded run; a `fail` is final at once. If the PR's head moves while the script is watching, it starts the settle window over for the new head. The cost is that every run takes at least the settle window.
 
 **Why an empty result is not believed immediately.** `gh pr checks` reports "no
 checks reported" both for a repo without CI and for a head pushed seconds ago
@@ -208,7 +208,7 @@ second case is the likely one, and treating it as green opens the
 ready-to-merge gate before a single check has started. Measured 2026-09-22 on a
 repo with five checks: the empty reading lasted 62 seconds. An empty result must
 therefore hold for `--settle N` seconds (default 90) before it counts as "no
-CI"; pass `--settle 0` to restore the old immediate behavior. The window is
+CI"; pass `--settle 0` to remove the wait, which also removes the minimum wait before green and the grace period for a cancelled check described above. The window is
 evaluated at poll boundaries, so the real wait rounds up to the next interval:
 about 100s at the default 20s interval. A repo that genuinely has no CI pays
 that wait on every run, this one included, since it has no CI of its own.

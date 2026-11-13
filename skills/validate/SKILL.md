@@ -43,10 +43,23 @@ Verify in order, exiting on the first failure:
    - **Plugin install:** if the `$CLAUDE_PLUGIN_ROOT` environment variable is set, `SKILL_DIR="$CLAUDE_PLUGIN_ROOT/skills/validate"`.
    - **Manual install:** otherwise `SKILL_DIR` is the directory containing this `SKILL.md` (e.g. `~/.claude/skills/validate` when symlinked into the user skills folder).
 
-   Then run `ls "$SKILL_DIR/fact-check-reviewer.md" "$SKILL_DIR/solid-hygiene-reviewer.md" "$SKILL_DIR/check-citations.py"` via Bash. If any is missing, report `⛔ validate: <filename> missing from skill folder. Reinstall the skill or restore from version control.` and exit.
+   Then run `ls "$SKILL_DIR/fact-check-reviewer.md" "$SKILL_DIR/solid-hygiene-reviewer.md" "$SKILL_DIR/check-citations.py" "$SKILL_DIR/check-currency.sh"` via Bash. If any is missing, report `⛔ validate: <filename> missing from skill folder. Reinstall the skill or restore from version control.` and exit.
 
    `check-citations.py` is hard-stopped alongside the templates on purpose. A missing deterministic check that merely warns would be skipped silently, and a citation check that runs on some invocations and not others is worse than none — the frontmatter bless would then mean two different things depending on what happened to be installed.
 5. Capture `REPO_ROOT` via `git -C "$(dirname "$ARGUMENTS")" rev-parse --show-toplevel`.
+6. **Base currency.** The reviewers read this working copy, and the edits below are applied to it. If it is behind its remote, the reviewers verify claims against code that is no longer current, and the edits revert whatever landed on the remote in the meantime. Run:
+
+   ```bash
+   bash "$SKILL_DIR/check-currency.sh" "$ARGUMENTS"
+   ```
+
+   - Exit `0` (`CURRENT`): continue. A `note:` line (a feature branch behind the default branch, with the document unchanged there) goes in the final report.
+   - Exit `1` (`STALE`): report `⛔ validate: this checkout is out of date.` followed by the script's reasons, tell the operator to pull or rebase and re-run, and exit. Do not dispatch reviewers.
+   - Exit `2` (`UNVERIFIED`): there is no remote to compare against, or the fetch failed. Continue, set `CURRENCY_UNVERIFIED=1`, and say so in the final report. It is a caveat on the bless (see "Define clean bless"), never a pass.
+   - Exit `3`, or any other exit code: report the script's message and exit.
+   - The Bash call timing out (a fetch waiting on a network or an approval nobody answered): treat as exit `2`.
+
+   Commits BEHIND is what the script measures. Commits ahead of the remote, a clean `git status -sb`, and the mtime check below all look like currency checks and detect none of this: a file that is stale because nobody pulled has not been touched.
 
 ## Detect kind
 
@@ -386,6 +399,21 @@ If `CURRENT_MTIME != INITIAL_MTIME`, abort with:
 ⛔ validate: spec was modified externally during validation. Re-run validate after the changes settle.
 ```
 
+The mtime check sees a local write. It cannot see the remote moving while the reviewers ran, which is the same staleness as precondition 6 arriving late. So before the first Edit, also re-run the currency check against the commit captured in the preconditions:
+
+```bash
+bash "$SKILL_DIR/check-currency.sh" "$ARGUMENTS" --since "$HEAD_SHA"
+```
+
+On exit `1`, abort without applying any edit:
+
+```
+⛔ validate: the base moved during validation. <the script's reasons>
+Pull or rebase, then re-run validate: the findings were made against a copy that is no longer current.
+```
+
+Exit `2`, or the Bash call timing out, sets `CURRENCY_UNVERIFIED=1` as in the preconditions and continues. Any other result, including exit `3`, aborts without applying any edit and reports the output: only `0`, `2`, and a timeout may reach the edits.
+
 After the first Edit call begins, validate's own writes will advance mtime — no further re-stats are meaningful.
 
 Apply findings in this order: **`source: citations` first**, then the reviewers'. Order matters because the supersession rule below drops whichever finding of a pair is reached second, and "a `citations` finding always wins its pair" would otherwise be reversed for every pair that dedupe does not cover (dedupe fires only at similarity ≥ `DEDUPE_SIMILARITY`; the band below it lands here instead).
@@ -481,6 +509,18 @@ If all checks pass, the spec is BLESSED. Proceed to the report. If any block fir
 
 ## Report
 
+### Check the base one last time
+
+A bless says the document was checked against a commit and that the commit was current. Before printing anything, run the currency check one last time:
+
+```bash
+bash "$SKILL_DIR/check-currency.sh" "$ARGUMENTS" --since "$HEAD_SHA"
+```
+
+On exit `1`, the run is not a bless, whatever the findings were. Report `⛔ validate: the base moved before the bless could be recorded.` with the script's reasons in place of the banner this run would otherwise print (blessed or blocked), do not write the `validated:` block, skip "Persist the spec file" (do not stage or commit anything), and skip "Auto-continue on clean bless". The edits already applied stay uncommitted in the working copy for the operator to carry across a pull. Exit `2`, or the Bash call timing out, sets `CURRENCY_UNVERIFIED=1`: a timeout is "could not tell", the same at all three calls, and never "the base moved". Any other result, including exit `3`, is handled as exit `1` with the script's own message. Only `0`, `2`, and a timeout may reach the banner and the block, and only `0` may write `base_current: true`.
+
+On exit `0`, keep the number from the script's `behind_default=<n>` line as `BEHIND_DEFAULT`. On every other path `BEHIND_DEFAULT` is unset, and nothing below prints or records a number for it.
+
 ### Print the structured banner
 
 If verification passed (spec is blessed), print:
@@ -514,7 +554,12 @@ Findings:
   Net-negative: <X> raised (<Z> accepted, <Y> addressed; re-review:
                 cleared | BLOCKED | not run) — any non-zero raised count is a
                 clean-bless caveat
+  Base:        current, <BEHIND_DEFAULT> commit(s) behind the default branch |
+               UNVERIFIED (<the script's reasons>) — a clean-bless caveat |
+               STALE (<the script's reasons>) — not a bless
 ```
+
+Take the `Base:` line from `check-currency.sh`: `UNVERIFIED` if `CURRENCY_UNVERIFIED` was set at any of its three calls, with the reason it printed. If any call printed a `note:` line, print it under the table. A non-zero count means the document is unchanged on the default branch, but the reviewers verified its claims against code that many commits behind it; the script does not check whether the files the document cites changed there. It is recorded, and it is not a caveat.
 
 Take the `Citations:` numbers from the `<!-- citations: … -->` comment on the first line of `CITATION_RAW`. Print the line even when all four numbers are zero: a run that found no citations and a run where the check never happened produce the same empty findings list, and only this line distinguishes them.
 
@@ -542,6 +587,8 @@ validated:
   sha: <HEAD_SHA>
   date: <ISO 8601 timestamp from `date -u +"%Y-%m-%dT%H:%M:%SZ"`>
   reviewers: [fact-check, solid-hygiene]
+  base_current: <true, or `unverified` when CURRENCY_UNVERIFIED is set>
+  behind_default: <BEHIND_DEFAULT: commits this checkout was behind the remote default branch; 0 when level, omitted when base_current is unverified>
   findings:
     critical: <count>
     important: <count>
@@ -596,11 +643,12 @@ A bless is **clean** only when the spec/plan is blessed AND every one of these c
 - Reviewer contradictions that reached the contradiction gate ("Detect contradictions") = 0 — ANY operator resolution counts as a caveat, including picking a side (`Apply fact-check finding (skip SOLID)` / `Apply SOLID finding (skip fact-check)`), not only `Skip both — manual triage`. A triggered contradiction gate means the reviewers disagreed about an underlying premise and human judgment was required — that is less than maximal confidence regardless of how it was resolved.
 - `KIND` was determined by frontmatter, path, or content shape — NOT by the tie-break AskUserQuestion ("Detect kind" step 4). A tie-broken kind means the artifact's identity was itself ambiguous; do not auto-continue (especially into implementation) off a guess.
 - Both reviewers ran to completion — NOT degraded/single-reviewer mode (the dispatch-failure fallback was not taken)
+- Base currency was established — `CURRENCY_UNVERIFIED` is not set. A clean bless auto-continues into planning or implementation with no operator checkpoint, so a bless against a checkout that could not be compared with its remote is not one to act on unattended.
 
 If the bless is **not** clean (any caveat above is present), do NOT auto-continue. After the normal report, print one line recommending the next step and stop:
 
 ```
-🟡 validate: blessed with caveats — recommend running the next stage manually after reviewing the deferred/accepted/skipped items above.
+🟡 validate: blessed with caveats — recommend running the next stage manually after reviewing the deferred/accepted/skipped items and the Base line above.
   Next stage: <superpowers:writing-plans if KIND==spec, else superpowers:subagent-driven-development>
 ```
 

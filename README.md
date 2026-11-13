@@ -38,7 +38,7 @@ for the why and the contributor workflow.
 /stavxyz:validate docs/specs/2026-05-31-my-feature-design.md
 ```
 
-Validates a **spec or plan** markdown file against the current `HEAD` of its git repo, from three sources:
+Validates a **spec or plan** markdown file against the current `HEAD` of its git repo. It first checks that the checkout is not behind its remote (`check-currency.sh`): reviewers reading a stale copy verify claims against code that has moved, and the edits validate applies would revert whatever landed in the meantime. A checkout that is behind stops the run, the check is repeated before the edits and again before the result is reported or anything is committed, and a checkout with no remote to compare against can bless but not auto-continue. On a feature branch, being behind the default branch in code alone does not stop the run; the count is recorded in the bless as `behind_default`. Findings then come from three sources:
 
 - **citations** — a deterministic pass, run before the reviewers. Reads every `path/to/file.py:NN` citation in the document, resolves the path, and checks the line. Where the citation names what it expects to find —
 
@@ -141,6 +141,7 @@ Installed this way they are **user skills**, which are not namespaced — so you
 │   ├── validate/
 │   │   ├── SKILL.md
 │   │   ├── check-citations.py
+│   │   ├── check-currency.sh
 │   │   ├── fact-check-reviewer.md
 │   │   └── solid-hygiene-reviewer.md
 │   ├── polish-pr/
@@ -154,7 +155,7 @@ Installed this way they are **user skills**, which are not namespaced — so you
 │       ├── SKILL.md
 │       └── census.sh
 └── tests/                 # dev-only, not part of the installed plugin
-    ├── validate/          # automated tests for check-citations.py
+    ├── validate/          # automated tests for check-citations.py and check-currency.sh
     ├── validate-fixtures/ # sample specs for exercising validate by hand
     ├── polish-pr/         # automated tests for resolve-pr-remotes.sh and wait-for-pr-checks.sh
     ├── land-pr/           # automated tests for merge-gate.sh

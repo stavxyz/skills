@@ -180,7 +180,7 @@ Any GitHub issues closed by this PR should be referred to in the PR description 
 
 ### How to monitor CI checks
 
-Do NOT write an inline `awk` / `grep` watcher over the default `gh pr checks` output. That output is human-formatted text (not a stable contract), and a naive `awk '{print $2}'` splits any check name containing a space ("E2E (Playwright)", "Code Quality - Python", etc.) on whitespace, reading the status column wrong — a row that's really "pending" gets read as "pass", and the watcher exits "green" while multi-word checks are still running, triggering a premature browser-open before CI has settled. This has bitten polish-pr runs more than once. The bundled script avoids the problem entirely by reading `gh pr checks --json bucket` (a documented, stable enum) instead of parsing columns.
+Do NOT write an inline `awk` / `grep` watcher over the default `gh pr checks` output. That output is human-formatted text (not a stable contract), and a naive `awk` that prints the second whitespace-separated field splits any check name containing a space ("E2E (Playwright)", "Code Quality - Python", etc.) on whitespace, reading the status column wrong — a row that's really "pending" gets read as "pass", and the watcher exits "green" while multi-word checks are still running, triggering a premature browser-open before CI has settled. This has bitten polish-pr runs more than once. The bundled script avoids the problem entirely by reading `gh pr checks --json bucket` (a documented, stable enum) instead of parsing columns.
 
 Use the bundled watcher script. From a Bash tool call inside this skill, run:
 

@@ -630,7 +630,7 @@ No confirmation prompt — announce, then immediately invoke the next skill. But
    🟢 validate: clean bless, maximum confidence — auto-continuing to <next stage>.
    ```
 
-4. **Invoke the next skill via the Skill tool.** For the skill's input, provide the blessed file's **resolved absolute path** — the same absolute path computed for `{spec_path}` during "Dispatch reviewers in parallel" (via `realpath` or `cd $(dirname) && pwd`), NOT the raw `$ARGUMENTS`, which may be relative — together with a one-line instruction telling the downstream skill to operate on that file (skills take free-form input text, not a path argument):
+4. **Invoke the next skill via the Skill tool.** For the skill's input, provide the blessed file's **resolved absolute path** — the same absolute path computed for `{spec_path}` during "Dispatch reviewers in parallel" (via `realpath` or `cd $(dirname) && pwd`), NOT the argument as it was typed, which may be relative — together with a one-line instruction telling the downstream skill to operate on that file (skills take free-form input text, not a path argument):
 
    - `KIND == spec` → invoke `superpowers:writing-plans` with input: the absolute spec path plus "build the implementation plan from this spec." The plan it produces can itself be re-validated by re-running this skill on the plan.
    - `KIND == plan` → invoke `superpowers:subagent-driven-development` with input: the absolute plan path plus "execute this plan, and when implementation is complete and green, ALWAYS finish by pushing the branch and opening a pull request — never merge, and never leave the work only on a local branch. Opening a PR is a hard requirement for any validate-driven auto-execution."

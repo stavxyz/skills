@@ -61,10 +61,20 @@ case "$sub" in
       exit 0
     fi
     if [ "$merge_commit" = "-" ]; then mc=null; else mc="{\"oid\":\"$merge_commit\"}"; fi
-    jq -r -n --arg state "$state" --argjson draft "$draft" --arg head "$head" \
+    # Like gh, return only the fields named in --json: a field the script
+    # forgot to request is then absent, as it would be against GitHub.
+    fields=""
+    prev=""
+    for a in "$@"; do
+      [ "$prev" = "--json" ] && fields=$a
+      prev=$a
+    done
+    jq -n --arg state "$state" --argjson draft "$draft" --arg head "$head" \
       --arg mergeable "$mergeable" --arg ms "$merge_state" --arg base "$base" --argjson mc "$mc" \
+      --arg fields "$fields" \
       '{state:$state, isDraft:$draft, headRefOid:$head, mergeable:$mergeable,
-        mergeStateStatus:$ms, baseRefName:$base, mergeCommit:$mc}' | jq -r "$jq_prog"
+        mergeStateStatus:$ms, baseRefName:$base, mergeCommit:$mc}
+       | with_entries(select(.key as $k | ($fields | split(",") | index($k))))' | jq -r "$jq_prog"
     ;;
   api)
     echo "$2" >> "$GH_STUB_API_LOG"
@@ -138,6 +148,9 @@ fi
 gate 0 "OPEN|false|$OTHER|MERGEABLE|CLEAN|main|-" -- 7 --sha "$SHA" --interval 0
 check "a head that moved after the bless is NOT READY" 1 "head moved"
 
+gate 1 "$ready" -- 7 --sha "$SHA" --interval 0
+check "a single commit behind is NOT READY" 1 "1 commit(s) behind main"
+
 gate 3 "$ready" -- 7 --sha "$SHA" --interval 0
 check "behind the base while GitHub says CLEAN is NOT READY" 1 "3 commit(s) behind main"
 
@@ -181,6 +194,11 @@ check "a PR merged on a different head than the blessed one is flagged" 4 "diffe
 
 gate 0 "MERGED|false|$SHA|UNKNOWN|UNKNOWN|main|$MERGE" -- 7 --interval 0
 check "a merged PR probed without --sha reports its merged head" 4 "merged head $SHA"
+if grep -q "blessed" <<<"$out"; then
+  fail=$((fail + 1)); printf 'FAIL: a probe without --sha must not speak of a blessed sha:\n%s\n' "$out"
+else
+  pass=$((pass + 1))
+fi
 if [ "$(cat "$tmp/state")" = "1" ]; then
   pass=$((pass + 1))
 else

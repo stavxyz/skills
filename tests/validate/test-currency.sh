@@ -234,8 +234,155 @@ git -C "$W" checkout -q -b feature origin/trunk --no-track
 git -C "$W" remote set-head origin --delete
 git -C "$W" update-ref -d refs/remotes/origin/main
 git -C "$W" config remote.origin.fetch '+refs/heads/trunk:refs/remotes/origin/trunk'
-check "no upstream and no known default branch is UNVERIFIED" \
-  2 "no remote default branch is known" "$CHECK" "$W/docs/plan.md"
+check "a default branch this clone does not have is learned from the remote and fetched" \
+  0 "the document is unchanged on origin/main" "$CHECK" "$W/docs/plan.md"
+git -C "$W" update-ref -d refs/remotes/origin/main
+other_pushes main docs/plan.md "plan v2"
+check "and a document change on that learned default branch is STALE" \
+  1 "the document changed on origin/main" "$CHECK" "$W/docs/plan.md"
+git -C "$W" update-ref -d refs/remotes/origin/main
+git -C "$TMP/origin.git" symbolic-ref HEAD refs/heads/gone
+check "a remote whose default branch cannot be found is UNVERIFIED, not current" \
+  2 "no remote default branch could be found" "$CHECK" "$W/docs/plan.md"
+
+# A clone that tracks one branch only (git clone --single-branch) and has an
+# upstream: the default branch must still be consulted.
+fresh
+git -C "$W" checkout -q -b feature
+echo "f" > "$W/src/f.py"; git -C "$W" add -A; git -C "$W" commit -q -m f
+git -C "$W" push -q -u origin feature
+rm -rf "$TMP/single"
+git clone -q --single-branch --branch feature "$TMP/origin.git" "$TMP/single"
+other_pushes main docs/plan.md "plan v2"
+check "a single-branch clone still compares the document with the default branch" \
+  1 "the document changed on origin/main" "$CHECK" "$TMP/single/docs/plan.md"
+
+# A branch named like the default branch is not a feature branch, whatever it tracks.
+fresh
+git init -q --bare -b main "$TMP/fork.git"
+git -C "$W" remote add fork "$TMP/fork.git"
+git -C "$W" push -q -u fork main
+other_pushes main src/code.py "code v2"
+check "main tracking a fork's main is STALE when origin's main moved, even in code only" \
+  1 "branch main is 1 commit(s) behind origin/main" "$CHECK" "$W/docs/plan.md"
+rm -rf "$TMP/fork.git"
+
+# One of two remotes is unreachable: the other is still compared.
+fresh
+git init -q --bare -b main "$TMP/fork.git"
+git -C "$W" remote add fork "$TMP/fork.git"
+git -C "$W" checkout -q -b feature
+echo "f" > "$W/src/f.py"; git -C "$W" add -A; git -C "$W" commit -q -m f
+git -C "$W" push -q -u fork feature
+rm -rf "$TMP/fork.git"
+check "an unreachable fork alone is UNVERIFIED" 2 "could not fetch fork" "$CHECK" "$W/docs/plan.md"
+other_pushes main docs/plan.md "plan v2"
+check "an unreachable fork does not hide a document change on origin" \
+  1 "the document changed on origin/main" "$CHECK" "$W/docs/plan.md"
+
+# Names git quotes when it prints them: non-ASCII, a double quote, a backslash.
+for name in 'plän.md' 'pl"an.md' 'pl\\an.md'; do
+  fresh
+  echo "p" > "$O/docs/$name"; git -C "$O" add -A; git -C "$O" commit -q -m odd; git -C "$O" push -q origin main
+  git -C "$W" pull -q --ff-only origin main
+  git -C "$W" config core.ignorecase true
+  git -C "$W" checkout -q -b feature
+  other_pushes main "docs/$name" "p2"
+  check "a document named $name is found when it changed on the default branch" \
+    1 "the document changed on origin/main" "$CHECK" "$W/docs/$name"
+done
+
+# Renamed on this branch TO a name git quotes; the default branch edited the old name.
+for name in 'plän.md' 'pl\\an.md'; do
+  fresh
+  git -C "$W" checkout -q -b feature
+  git -C "$W" mv docs/plan.md "docs/$name"; git -C "$W" commit -q -m rename
+  other_pushes main docs/plan.md "plan v2"
+  check "a document renamed to $name is matched with edits to its old path" \
+    1 "the document changed on origin/main" "$CHECK" "$W/docs/$name"
+done
+
+# Two tracked files that differ only in case: the path as typed wins.
+fresh
+blob=$(echo "upper" | git -C "$O" hash-object -w --stdin)
+git -C "$O" update-index --add --cacheinfo 100644,"$blob",docs/PLAN.md
+git -C "$O" commit -q -m "add PLAN.md"; git -C "$O" push -q origin main
+git -C "$O" checkout -q -- . 2>/dev/null
+git -C "$W" fetch -q origin; git -C "$W" reset -q origin/main   # index and HEAD, not the working tree
+git -C "$W" config core.ignorecase true
+git -C "$W" checkout -q -b feature
+git -C "$O" checkout -q main
+echo "plan v2" | git -C "$O" hash-object -w --stdin > "$TMP/blob2"
+git -C "$O" update-index --cacheinfo 100644,"$(cat "$TMP/blob2")",docs/plan.md
+git -C "$O" commit -q -m "edit lowercase"; git -C "$O" push -q origin main
+check "with PLAN.md and plan.md both tracked, the path as typed is the one compared" \
+  1 "the document changed on origin/main after this branch left it (1 commit(s) behind): docs/plan.md" "$CHECK" "$W/docs/plan.md"
+
+# A wrong-case path to a document whose tracked name git would quote.
+fresh
+echo "p" > "$O/docs/plän.md"; git -C "$O" add -A; git -C "$O" commit -q -m odd; git -C "$O" push -q origin main
+git -C "$W" pull -q --ff-only origin main
+git -C "$W" checkout -q -b feature
+other_pushes main "docs/plän.md" "p2"
+if [ -f "$W/docs/Plän.md" ]; then
+  git -C "$W" config core.ignorecase true
+  check "a wrong-case path to a non-ASCII name finds the tracked document" \
+    1 "the document changed on origin/main" "$CHECK" "$W/docs/Plän.md"
+else
+  echo "skip: wrong-case non-ASCII fixture (this volume is case-sensitive)"
+fi
+
+# A symlink with an absolute target, sitting outside the repository.
+fresh
+ln -s "$W/docs/plan.md" "$TMP/abs-link.md"
+git -C "$W" checkout -q -b feature
+other_pushes main docs/plan.md "plan v2"
+check "a symlink with an absolute target resolves to the tracked document" \
+  1 "the document changed on origin/main" "$CHECK" "$TMP/abs-link.md"
+rm -f "$TMP/abs-link.md"
+
+# A symlinked file whose target climbs out with "..", reached through a
+# symlinked directory: resolve physically, not by trimming the text.
+fresh
+mkdir -p "$O/other"; echo "decoy" > "$O/plan.md"
+ln -s ../plan.md "$O/other/link.md"
+git -C "$O" add -A; git -C "$O" commit -q -m link; git -C "$O" push -q origin main
+git -C "$W" pull -q --ff-only origin main
+mkdir -p "$TMP/elsewhere/deep"; ln -s "$W/other" "$TMP/elsewhere/deep/o"
+git -C "$W" checkout -q -b feature
+other_pushes main plan.md "decoy v2"
+check "a relative symlink target is resolved from the link's real directory" \
+  1 "the document changed on origin/main after this branch left it (1 commit(s) behind): plan.md" "$CHECK" "$TMP/elsewhere/deep/o/link.md"
+
+# The default branch was replaced by unrelated history: no merge base.
+fresh
+git -C "$W" checkout -q -b feature
+git -C "$O" checkout -q --orphan fresh-root; echo "new world" > "$O/docs/plan.md"
+git -C "$O" add -A; git -C "$O" commit -q -m "unrelated root"; git -C "$O" push -q -f origin fresh-root:main
+check "a default branch with no common history is UNVERIFIED, never current" \
+  2 "could not tell whether the document changed on origin/main" "$CHECK" "$W/docs/plan.md"
+
+# A repository that reaches its remote through core.sshCommand keeps doing so.
+fresh
+cat > "$TMP/fake-ssh" <<'SSH'
+#!/bin/sh
+# Stands in for ssh: record the call, then run the remote command locally.
+echo "$*" >> "$FAKE_SSH_LOG"
+for last; do :; done
+exec sh -c "$last"
+SSH
+chmod +x "$TMP/fake-ssh"
+git -C "$W" remote set-url origin "ssh://example.invalid$TMP/origin.git"
+git -C "$W" config core.sshCommand "$TMP/fake-ssh"
+: > "$TMP/ssh.log"
+other_pushes main docs/plan.md "plan v2"
+FAKE_SSH_LOG="$TMP/ssh.log" check "a configured core.sshCommand is used for the fetch, not bypassed" \
+  1 "the document changed in those commits" env FAKE_SSH_LOG="$TMP/ssh.log" "$CHECK" "$W/docs/plan.md"
+if grep -q -- "BatchMode=yes" "$TMP/ssh.log" && grep -q -- "ConnectTimeout=15" "$TMP/ssh.log"; then
+  pass=$((pass + 1))
+else
+  fail=$((fail + 1)); printf 'FAIL: the fetch should pass BatchMode and ConnectTimeout to ssh, log:\n%s\n' "$(cat "$TMP/ssh.log")"
+fi
 
 # A document that is itself a symlink to a tracked file.
 fresh
@@ -314,6 +461,11 @@ start=$(git -C "$W" rev-parse HEAD)
 git -C "$O" push -q origin --delete feature
 git -C "$W" config fetch.prune true
 check "a pruned upstream alone is UNVERIFIED" 2 "could not count commits behind origin/feature" "$CHECK" "$W/docs/plan.md"
+other_pushes main docs/plan.md "plan v2"
+check "a pruned upstream does not skip the default-branch document check" \
+  1 "the document changed on origin/main" "$CHECK" "$W/docs/plan.md"
+git -C "$W" merge -q origin/main -m sync 2>/dev/null
+start=$(git -C "$W" rev-parse HEAD)
 echo "x" > "$W/src/x.py"; git -C "$W" add -A; git -C "$W" commit -q -m x
 check "a pruned upstream does not hide that HEAD moved" \
   1 "HEAD moved during the run" "$CHECK" "$W/docs/plan.md" --since "$start"

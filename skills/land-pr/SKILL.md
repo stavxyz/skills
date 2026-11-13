@@ -50,6 +50,14 @@ State the order, the reason, and each PR's base branch in one line. A base that 
 
 ## Step 2: polish, with the polish-pr skill itself
 
+**A promotion PR is the exception to this step.** A promotion PR's head is a long-lived branch that other PRs merge into (`dev` into `main`): its changes were each polished when they merged into the head, and polish-pr cannot push fixes to a shared branch. For one of these:
+
+- If the repo's docs say what a promotion needs (each constituent PR polished, evidence from the lower environment, a named person's go), check each of those on evidence and write them in the report. That takes the place of a polish-pr bless. The sha step 3 is bound to is the PR's head at the moment those checks finished.
+- If the repo's docs do not say, ask the user what a promotion needs before merging, with what you found (the constituent PRs and whether each was polished). Do not invent a standard, and do not run polish-pr's fix loop against a shared branch.
+- Never rebase or force-push the head of a promotion PR. If step 3's gate says it is `behind` or has `conflicts`, the base has a change the head lacks (a hotfix made on the base): report it, and name the fix, a PR that merges the base into the head.
+
+Everything else in this skill applies to a promotion PR unchanged: the gate, the merge on that sha, and the verification after it.
+
 First, anything the repo says must precede a merge. A step that changes the branch (a version bump, a changelog line) is committed to the PR now, before polish-pr runs, so that it is reviewed and is part of the blessed commit. A step that does not change the branch (a migration applied by hand, a flag set in a dashboard) is run after the bless and before step 3, on evidence, not on assumption.
 
 If polish-pr already returned a BLESSED verdict for this PR earlier in this conversation (for example, it handed the PR over to this skill), and the gate has not since printed a reason against that sha, do not run it again: take that sha, record `<blessed-base>` as described in the BLESSED bullet below if you have not, and go to step 3. If the gate printed `behind` or `conflicts`, go straight to the rebase procedure further down this step, not to polish-pr. If it printed `head moved`, continue below and run polish-pr.
@@ -108,7 +116,7 @@ First run the gate script once, with the blessed sha, before waiting on anything
    | Exit | Do |
    | --- | --- |
    | 0 READY | Merge now (step 4). READY does not read checks, which is why the watcher runs first. |
-   | 1 NOT READY | Act on each printed reason. `behind` and `conflicts`: the rebase procedure in step 2. `head moved`: polish-pr again (step 2). `draft`: run `gh pr ready <PR_NUMBER>` if the PR is blessed, then re-run the gate. `blocked`: a required review or check is missing; report it and leave this PR. |
+   | 1 NOT READY | Act on each printed reason. `behind` and `conflicts`: the rebase procedure in step 2, or for a promotion PR, report it (never rebase a shared head). The gate does not call a head `behind` when the commits it lacks change no file, which is the normal state of a merge-commit promotion. `head moved`: polish-pr again (step 2). `draft`: run `gh pr ready <PR_NUMBER>` if the PR is blessed, then re-run the gate. `blocked`: a required review or check is missing; report it and leave this PR. |
    | 2 UNKNOWN | The script has already retried for about a minute. Run it once more. Still unknown: leave this PR and report it. |
    | 3 | `gh` failed or the arguments are wrong. Fix the invocation and re-run. |
    | 4 ALREADY MERGED | Someone else merged it while you worked. The output says whether the merged head is the blessed sha; if it differs, unreviewed commits landed, and the report says so. Go to step 5. |

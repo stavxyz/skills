@@ -99,7 +99,24 @@ invocation individually (`GH_REPO=<owner>/<repo> gh pr view …`) or run
 to see it.
 
 - `BEHIND` = 0 → proceed to dispatch reviewers.
-- `BEHIND` > 0 → STOP. Rebase onto `<BASE_REMOTE>/<BASE_BRANCH>` (resolve conflicts;
+- `BEHIND` > 0, and the base holds nothing the head lacks → proceed, and say so
+  in the summary. Check it with:
+
+  ```bash
+  git diff --quiet "$(git merge-base HEAD <BASE_REMOTE>/<BASE_BRANCH>)" <BASE_REMOTE>/<BASE_BRANCH> && echo "base adds nothing"
+  ```
+
+  That prints only when the commits the branch is behind by change no file,
+  so the merge puts exactly this branch's tree on the base and the reviewers
+  are reading what will land. It is the standing state of a promotion PR in a
+  merge-commit flow (`dev` into `main`): every earlier promote left a merge
+  commit on the base that the head never receives. Do not rebase there. The
+  head is a shared branch, and the count comes back after the next promote.
+- `BEHIND` > 0 otherwise → STOP. If the head is a long-lived branch that other
+  PRs merge into (the repo's default branch, or the base of an open PR), do not
+  rebase or force-push it: the base has a change the head lacks, and the way
+  to bring it across is a PR that merges the base into the head. Say so and
+  stop. For an ordinary feature branch, rebase onto `<BASE_REMOTE>/<BASE_BRANCH>` (resolve conflicts;
   if a conflict resolution is non-mechanical, surface it to the user before
   continuing), re-run the project's test suite and linters on the rebased
   result, `git push --force-with-lease` the feature branch, and only then

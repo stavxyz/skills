@@ -93,7 +93,7 @@ What "merge this once it is green and polished, check it afterwards, tell the ot
 For each PR, one at a time, because every merge moves the base under the PRs that remain:
 
 1. **Polish** with `/stavxyz:polish-pr <PR#>`, the skill itself and never reviewers dispatched by hand. Only a `BLESSED` verdict goes further.
-2. **Gate**, immediately before merging: CI green on the blessed commit, then `merge-gate.sh`, which passes only when the PR is open, is not a draft, still has the blessed commit as its head, is zero commits behind its base, and is mergeable and not blocked. An unreadable or not-yet-computed answer from GitHub is "unknown" and is never treated as a pass.
+2. **Gate**, immediately before merging: CI green on the blessed commit, then `merge-gate.sh`, which passes only when the PR is open, is not a draft, still has the blessed commit as its head, is not behind its base (or is behind only by commits that change no file, the standing state of a merge-commit promotion such as `dev` into `main`), and is mergeable and not blocked. An unreadable or not-yet-computed answer from GitHub is "unknown" and is never treated as a pass.
 3. **Merge** with `gh pr merge --match-head-commit <blessed sha>`, using the repo's documented or customary merge method, and read the result from the PR's state, not from the exit code.
 4. **Verify**: the whole diff reached the base, the base branch's own runs for the merge commit (the deploy, where there is one) succeeded, what is running is the merge, and the change does what it was meant to do where it runs. Evidence goes into the PR's test plan. "Merged", "deployed", and "verified" are reported as three different states.
 

@@ -1,15 +1,15 @@
 ---
 name: polish-pr
-description: Polish a pull request — rebase, run parallel reviews, address all findings, update docs, push
+description: Polish a pull request: rebase, run parallel reviews, address all findings, update docs, push, and land it when the run ends blessed
 disable-model-invocation: false
 ---
 
 Polish PR #$ARGUMENTS.
 
-`$ARGUMENTS` is the PR number, optionally followed by `--land`. `--land` means
-the user asked for this PR to be merged once it is blessed; it changes only what
-happens after the verdict (see "Verdict and what happens next"). The `land-pr`
-skill passes it when it runs this skill.
+The arguments above are the PR number, optionally followed by `--repo <owner>/<repo>` (passed to `resolve-pr-remotes.sh`, and the `GH_REPO` for every `gh` call) and by `--no-land`. A PR that
+this run blesses is landed: merged, verified, and announced by the `land-pr`
+skill, with no further prompt (see "Verdict and what happens next"). `--no-land`
+stops at the bless instead and leaves the merge to the user.
 
 ## Preconditions — verify before doing anything else
 
@@ -264,7 +264,7 @@ commits still on the PR.
 
 ### Step 4 — Browser-open gate
 
-Do NOT call `GH_REPO=<owner>/<repo> gh pr view <N> --web` until Step 2 returns empty AND CI on the post-strip push is green. The browser-open signal tells the user "this is ready to merge"; opening it with attributed commits visible in the PR's commit list breaks the user's trust in the gate.
+Do NOT call `GH_REPO=<owner>/<repo> gh pr view <N> --web` until Step 2 returns empty AND CI on the post-strip push is green, and then only when the verdict is BLESSED and `--no-land` was passed (see "Verdict and what happens next"). Without `--no-land`, a blessed PR is landed, not opened in the browser. The browser-open signal tells the user "this is ready to merge"; opening it with attributed commits visible in the PR's commit list breaks the user's trust in the gate.
 
 ## Test plan — "kicking the tires"
 
@@ -288,7 +288,7 @@ The exact items depend on the project AND the PR's surface area. Tailor accordin
 
 For each automatable item: do it, capture the evidence (curl output, screenshot, log line, test result), and update the PR description's Test plan section with the result inline. Mark items the user must do manually with `- [ ]` checkboxes; mark items you've already executed with `- [x]` plus a one-line evidence summary.
 
-When CI is fully green (every required check has succeeded) AND every automatable test-plan item has been executed and documented AND the attribution sweep below returns empty, open the PR in the user's default browser via `GH_REPO=<owner>/<repo> gh pr view <number> --web` so they can review and merge it. Do this only after every required check has passed AND the test plan is populated AND the sweep is clean; do not open the browser while checks are still pending, any have failed, test-plan items remain undocumented, or attributed commits remain.
+When CI is fully green (every required check has succeeded) AND every automatable test-plan item has been executed and documented AND the attribution sweep below returns empty AND the verdict is BLESSED AND `--no-land` was passed (see "Verdict and what happens next"), open the PR in the user's default browser via `GH_REPO=<owner>/<repo> gh pr view <number> --web` so they can review and merge it. Do this only after every required check has passed AND the test plan is populated AND the sweep is clean; do not open the browser while checks are still pending, any have failed, test-plan items remain undocumented, or attributed commits remain.
 
 (Attribution rule lives in its own section — see "Mandatory attribution sweep" below. Do not skip that section.)
 
@@ -321,21 +321,24 @@ The sha in the verdict is the PR's head at that moment: `git rev-parse HEAD`,
 which must equal `GH_REPO=<owner>/<repo> gh pr view <PR_NUMBER> --json headRefOid --jq .headRefOid`.
 If they differ, the push did not land where the PR reads from: NOT BLESSED.
 
-The bless is for that commit on that base. Any later commit, and any movement
-of the base, ends it.
+The bless is for that commit on that base. Any later commit ends it. A movement
+of the base ends it too, with one exception that belongs to `land-pr`: a
+conflict-free rebase that passes the carry-over conditions in that skill's
+step 2.
 
 Then, by case:
 
-- **BLESSED, without `--land`:** open the PR in the browser (the gate above),
+- **BLESSED:** do not open the browser; the verdict takes the place of that
+  signal. Say so in one line ("Blessed at <sha>, continuing to land") and
+  continue without asking: return to the `land-pr` skill at its step 3 if it
+  started this run, otherwise invoke `land-pr` with the PR number through the
+  Skill tool. `land-pr` reads the repository's own rules before it merges and
+  stops there if they require the user's word. If `land-pr` is not available to
+  invoke, fall back to the next case and say why.
+- **BLESSED, with `--no-land`:** open the PR in the browser (the gate above),
   and end the summary with the command that merges and finishes it:
   `/stavxyz:land-pr <PR_NUMBER>` (`/land-pr <PR_NUMBER>` under a symlink
   install).
-- **BLESSED, with `--land`:** do not open the browser; the verdict takes the
-  place of that signal. Say so in one line ("Blessed at <sha>, continuing to
-  land") and continue without asking: return to the `land-pr` skill at its
-  step 3 if it started this run, otherwise invoke `land-pr` with the PR number
-  through the Skill tool. If `land-pr` is not available to invoke, fall back to
-  the case above and say why.
 - **NOT BLESSED:** do not open the browser and do not merge. List what remains,
   and who it is waiting on.
 

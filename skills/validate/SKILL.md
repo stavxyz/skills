@@ -56,7 +56,8 @@ Verify in order, exiting on the first failure:
    - Exit `0` (`CURRENT`): continue. A `note:` line (a feature branch behind the default branch, with the document unchanged there) goes in the final report.
    - Exit `1` (`STALE`): report `⛔ validate: this checkout is out of date.` followed by the script's reasons, tell the operator to pull or rebase and re-run, and exit. Do not dispatch reviewers.
    - Exit `2` (`UNVERIFIED`): there is no remote to compare against, or the fetch failed. Continue, set `CURRENCY_UNVERIFIED=1`, and say so in the final report. It is a caveat on the bless (see "Define clean bless"), never a pass.
-   - Exit `3`: report the script's message and exit.
+   - Exit `3`, or any other exit code: report the script's message and exit.
+   - The Bash call timing out (a fetch waiting on a network or an approval nobody answered): treat as exit `2`.
 
    Commits BEHIND is what the script measures. Commits ahead of the remote, a clean `git status -sb`, and the mtime check below all look like currency checks and detect none of this: a file that is stale because nobody pulled has not been touched.
 
@@ -411,7 +412,7 @@ On exit `1`, abort without applying any edit:
 Pull or rebase, then re-run validate: the findings were made against a copy that is no longer current.
 ```
 
-Exit `2` sets `CURRENCY_UNVERIFIED=1` as in the preconditions and continues.
+Exit `2` sets `CURRENCY_UNVERIFIED=1` as in the preconditions and continues. Any other result, including exit `3` and the Bash call timing out, aborts without applying any edit and reports the output: only `0` and `2` may reach the edits.
 
 After the first Edit call begins, validate's own writes will advance mtime — no further re-stats are meaningful.
 
@@ -508,6 +509,18 @@ If all checks pass, the spec is BLESSED. Proceed to the report. If any block fir
 
 ## Report
 
+### Check the base one last time
+
+A bless says the document was checked against a commit and that the commit was current. Before printing anything, run the currency check one last time:
+
+```bash
+bash "$SKILL_DIR/check-currency.sh" "$ARGUMENTS" --since "$HEAD_SHA"
+```
+
+On exit `1`, the run is not a bless, whatever the findings were. Report `⛔ validate: the base moved before the bless could be recorded.` with the script's reasons in place of the blessed banner, do not write the `validated:` block, skip "Persist the spec file" (do not stage or commit anything), and skip "Auto-continue on clean bless". The edits already applied stay uncommitted in the working copy for the operator to carry across a pull. Exit `2` sets `CURRENCY_UNVERIFIED=1`. Any other result, including exit `3` and the Bash call timing out, is handled as exit `1`: only `0` and `2` may reach the banner and the block, and only `0` may write `base_current: true`.
+
+On exit `0`, keep the number from the script's `behind_default=<n>` line as `BEHIND_DEFAULT`.
+
 ### Print the structured banner
 
 If verification passed (spec is blessed), print:
@@ -541,7 +554,12 @@ Findings:
   Net-negative: <X> raised (<Z> accepted, <Y> addressed; re-review:
                 cleared | BLOCKED | not run) — any non-zero raised count is a
                 clean-bless caveat
+  Base:        current, <BEHIND_DEFAULT> commit(s) behind the default branch |
+               UNVERIFIED (<the script's reason>) — unverified is a
+               clean-bless caveat
 ```
+
+Take the `Base:` line from `check-currency.sh`: `UNVERIFIED` if `CURRENCY_UNVERIFIED` was set at any of its three calls, with the reason it printed. If any call printed a `note:` line, print it under the table. A non-zero count means the document is unchanged on the default branch, but the reviewers verified its claims against code that many commits behind it; the script does not check whether the files the document cites changed there. It is recorded, and it is not a caveat.
 
 Take the `Citations:` numbers from the `<!-- citations: … -->` comment on the first line of `CITATION_RAW`. Print the line even when all four numbers are zero: a run that found no citations and a run where the check never happened produce the same empty findings list, and only this line distinguishes them.
 
@@ -558,14 +576,6 @@ If any findings were superseded (in `SUPERSEDED_FINDINGS`), list each with the f
 
 ### Update the spec's frontmatter (only on bless)
 
-The `sha:` this block records is a claim that the document was checked against that commit and that the commit was current. Immediately before writing it, run the currency check one last time:
-
-```bash
-bash "$SKILL_DIR/check-currency.sh" "$ARGUMENTS" --since "$HEAD_SHA"
-```
-
-On exit `1`, do not write the block and do not bless: report `⛔ validate: the base moved before the bless could be recorded.` with the script's reasons. The edits already applied stay in the working copy for the operator to carry across a pull; the run is not a bless. Exit `2` sets `CURRENCY_UNVERIFIED=1`.
-
 If the spec is blessed, update the spec's frontmatter to add a `validated:` block. Use the Edit tool with:
 
 - `file_path` = absolute path to spec
@@ -578,6 +588,7 @@ validated:
   date: <ISO 8601 timestamp from `date -u +"%Y-%m-%dT%H:%M:%SZ"`>
   reviewers: [fact-check, solid-hygiene]
   base_current: <true, or `unverified` when CURRENCY_UNVERIFIED is set>
+  behind_default: <BEHIND_DEFAULT: commits this checkout was behind the remote default branch; 0 when level, omitted when base_current is unverified>
   findings:
     critical: <count>
     important: <count>
@@ -637,7 +648,7 @@ A bless is **clean** only when the spec/plan is blessed AND every one of these c
 If the bless is **not** clean (any caveat above is present), do NOT auto-continue. After the normal report, print one line recommending the next step and stop:
 
 ```
-🟡 validate: blessed with caveats — recommend running the next stage manually after reviewing the deferred/accepted/skipped items above.
+🟡 validate: blessed with caveats — recommend running the next stage manually after reviewing the deferred/accepted/skipped items and the Base line above.
   Next stage: <superpowers:writing-plans if KIND==spec, else superpowers:subagent-driven-development>
 ```
 

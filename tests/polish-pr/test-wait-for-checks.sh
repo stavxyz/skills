@@ -46,11 +46,22 @@ command -v jq >/dev/null 2>&1 || { echo "test-wait-for-checks.sh needs jq on PAT
 
 cat > "$tmp/gh" <<'STUB'
 #!/usr/bin/env bash
+# Calls made without a scripted state (the usage cases) still need somewhere to
+# keep the stub's own notes that is not the caller's working directory.
+: "${GH_STUB_STATE:=$(dirname "$0")/state}"
 jq_prog=""; prev=""
 for a in "$@"; do [ "$prev" = "--jq" ] && jq_prog=$a; prev=$a; done
 if [ "$1 $2" = "pr view" ]; then
-  [ "${GH_STUB_HEAD:-}" = "ERROR" ] && { echo "view failed" >&2; exit 1; }
-  jq -n --arg h "${GH_STUB_HEAD-1111111111111111111111111111111111111111}" '{headRefOid:$h}' | jq -r "$jq_prog"
+  h="${GH_STUB_HEAD-1111111111111111111111111111111111111111}"
+  # GH_STUB_HEADS: one head per call, the last repeats. The first call is the
+  # watcher's startup reading.
+  if [ -n "${GH_STUB_HEADS:-}" ]; then
+    k=$(cat "$GH_STUB_HEADS.n" 2>/dev/null || echo 0); k=$((k + 1)); echo "$k" > "$GH_STUB_HEADS.n"
+    h=$(sed -n "${k}p" "$GH_STUB_HEADS"); [ -z "$h" ] && h=$(tail -n 1 "$GH_STUB_HEADS")
+  fi
+  [ "$h" = "ERROR" ] && { echo "view failed" >&2; exit 1; }
+  echo "$h" > "$GH_STUB_STATE.head"
+  jq -n --arg h "$h" '{headRefOid:$h}' | jq -r "$jq_prog"
   exit 0
 fi
 if [ "$1 $2" = "run list" ]; then
@@ -59,10 +70,18 @@ if [ "$1 $2" = "run list" ]; then
     k=$(cat "$GH_STUB_RUNS.n" 2>/dev/null || echo 0); k=$((k + 1)); echo "$k" > "$GH_STUB_RUNS.n"
     line=$(sed -n "${k}p" "$GH_STUB_RUNS"); [ -z "$line" ] && line=$(tail -n 1 "$GH_STUB_RUNS")
   fi
+  # Like gh, list only the runs of the commit asked for: a watcher that passed
+  # the wrong sha would get an empty list from GitHub and call it green.
+  commit=""; prev=""
+  for a in "$@"; do [ "$prev" = "--commit" ] && commit=$a; prev=$a; done
+  [ "$commit" = "$(cat "$GH_STUB_STATE.head" 2>/dev/null)" ] || line="NONE"
+  # A run is "status" or "completed:conclusion"; bare "completed" succeeded.
   case "$line" in
-    ERROR) echo "run list failed" >&2; exit 1 ;;
-    NONE)  echo '[]' | jq -r "$jq_prog" ;;
-    *)     jq -n --arg s "$line" '$s | split(",") | map({status: .})' | jq -r "$jq_prog" ;;
+    ERROR)   echo "run list failed" >&2; exit 1 ;;
+    GARBAGE) echo "not a run row" ;;
+    NONE)    echo '[]' | jq -r "$jq_prog" ;;
+    *)       jq -n --arg s "$line" '$s | split(",") | map(split(":") | {name: ("wf-" + .[0]), status: .[0],
+               conclusion: (if .[0] == "completed" then (.[1] // "success") else null end)})' | jq -r "$jq_prog" ;;
   esac
   exit 0
 fi
@@ -331,7 +350,7 @@ with_env() {
   shift
   printf '%s\n' "$@" > "$tmp/script.txt"
   : > "$tmp/state"
-  rm -f "$tmp/runs.txt.n"
+  rm -f "$tmp/runs.txt.n" "$tmp/heads.txt.n"
   local out got
   out=$(env GH_STUB_STATE="$tmp/state" GH_STUB_SCRIPT="$tmp/script.txt" \
         WAIT_FOR_PR_CHECKS_GH="$tmp/gh" ${envs[@]+"${envs[@]}"} \
@@ -375,6 +394,53 @@ with_env "gh failing on the head lookup is an error, never green" \
 with_env "an unreadable head sha is an error, never green" \
   3 "unreadable head sha" 0 30 GH_STUB_HEAD= -- "$P"
 
+printf '%s\n' "completed,queued" > "$tmp/runs.txt"
+with_env "a timeout on an unfinished run names the run and its status" \
+  2 "wf-queued (queued)" 0 1 GH_STUB_RUNS="$tmp/runs.txt" -- "$P"
+
+# A run held in its concurrency group has no jobs, so the check list is empty
+# too. "No checks" must not be called "no CI" while such a run is waiting.
+printf '%s\n' "queued" > "$tmp/runs.txt"
+with_env "an empty check list is not green while a workflow run for the head is queued" \
+  2 "VERDICT: timeout" 0 1 GH_STUB_RUNS="$tmp/runs.txt" -- "EMPTY"
+printf '%s\n' "queued" "completed" > "$tmp/runs.txt"
+with_env "an empty check list goes green once the queued run completes with no checks" \
+  0 "no workflow run waiting" 0 30 GH_STUB_RUNS="$tmp/runs.txt" -- "EMPTY"
+printf '%s\n' "ERROR" > "$tmp/runs.txt"
+with_env "gh failing on the run list is an error on the no-checks path too" \
+  3 "VERDICT: error" 0 30 GH_STUB_RUNS="$tmp/runs.txt" -- "EMPTY"
+
+# The rows and the head come from separate calls. A push between them must
+# start the wait over, not pair the old head's passes with the new head's
+# unregistered runs.
+A=1111111111111111111111111111111111111111
+B=2222222222222222222222222222222222222222
+printf '%s\n' "$A" "$B" > "$tmp/heads.txt"
+with_env "a head that moved during the watch restarts the settle window" \
+  0 "head moved to 222222222222" 0 30 GH_STUB_HEADS="$tmp/heads.txt" -- "$P"
+printf '%s\n' "$A" "$B" > "$tmp/heads.txt"
+with_env "a head that moved is not green on that reading: the next rows decide" \
+  1 "VERDICT: failed" 0 30 GH_STUB_HEADS="$tmp/heads.txt" -- "$P" "$F"
+printf '%s\n' "$A" "ERROR" > "$tmp/heads.txt"
+with_env "gh failing on the later head lookup is an error, never green" \
+  3 "gh failed while confirming workflow runs" 0 30 GH_STUB_HEADS="$tmp/heads.txt" -- "$P"
+
+# A run that failed before it had any job has no row in the check list.
+for c in failure startup_failure timed_out action_required; do
+  printf '%s\n' "completed,completed:$c" > "$tmp/runs.txt"
+  with_env "a run that ended in $c with no check row is a failure, not green" \
+    1 "wf-completed ($c)" 0 30 GH_STUB_RUNS="$tmp/runs.txt" -- "$P"
+done
+printf '%s\n' "completed:failure" > "$tmp/runs.txt"
+with_env "a failed run with no checks at all is a failure, not 'no CI'" \
+  1 "VERDICT: failed" 0 30 GH_STUB_RUNS="$tmp/runs.txt" -- "EMPTY"
+printf '%s\n' "completed,completed:cancelled,completed:skipped,completed:neutral" > "$tmp/runs.txt"
+with_env "cancelled, skipped, and neutral runs do not block green" \
+  0 "VERDICT: green" 0 30 GH_STUB_RUNS="$tmp/runs.txt" -- "$P"
+printf '%s\n' "GARBAGE" > "$tmp/runs.txt"
+with_env "an unreadable run list is an error, never green" \
+  3 "unreadable run list" 0 30 GH_STUB_RUNS="$tmp/runs.txt" -- "$P"
+
 # A push cancels the superseded run; the list can briefly still show it.
 with_env "a cancel inside the settle window is re-polled, and green follows" \
   0 "cancelled check(s) inside the settle window" 3 30 -- "$C" "$P"
@@ -409,6 +475,32 @@ with_env "a gh failure says VERDICT: error" 3 "VERDICT: error" 0 30 -- "ERROR"
 with_env "the green line counts the checks it settled on" 0 "1 check(s) settled" 0 30 -- "$P"
 piped=$(GH_STUB_STATE="$tmp/state" GH_STUB_SCRIPT="$tmp/script.txt" WAIT_FOR_PR_CHECKS_GH="$tmp/gh" \
         bash -c 'printf "ERROR\n" > "$GH_STUB_SCRIPT"; : > "$GH_STUB_STATE"; "$0" 1 --interval 0 --settle 0 2>/dev/null | tail -n 1' "$WATCHER")
+for args in "--bogus" "abc" "--settle"; do
+  # shellcheck disable=SC2086
+  last=$(WAIT_FOR_PR_CHECKS_GH="$tmp/gh" "$WATCHER" 1 $args 2>/dev/null | tail -n 1)
+  if [ "$last" = "VERDICT: error" ]; then
+    pass=$((pass + 1))
+  else
+    fail=$((fail + 1)); printf 'FAIL: usage error (%s) piped through tail should end with the verdict, got: %s\n' "$args" "$last"
+  fi
+done
+last=$(WAIT_FOR_PR_CHECKS_GH="$tmp/no-such-gh" "$WATCHER" 1 2>/dev/null | tail -n 1)
+if [ "$last" = "VERDICT: error" ]; then
+  pass=$((pass + 1))
+else
+  fail=$((fail + 1)); printf 'FAIL: a missing gh piped through tail should end with the verdict, got: %s\n' "$last"
+fi
+# An exit the script did not plan (here `date` failing under set -e) still ends
+# with a verdict, from the EXIT trap.
+mkdir -p "$tmp/bin"
+printf '#!/bin/sh\nexit 1\n' > "$tmp/bin/date"
+chmod +x "$tmp/bin/date"
+last=$(PATH="$tmp/bin:$PATH" WAIT_FOR_PR_CHECKS_GH="$tmp/gh" "$WATCHER" 1 --settle 0 --timeout 5 2>/dev/null | tail -n 1)
+if [ "$last" = "VERDICT: error" ]; then
+  pass=$((pass + 1))
+else
+  fail=$((fail + 1)); printf 'FAIL: an unplanned abort should still end with the verdict, got: %s\n' "$last"
+fi
 if [ "$piped" = "VERDICT: error" ]; then
   pass=$((pass + 1))
 else

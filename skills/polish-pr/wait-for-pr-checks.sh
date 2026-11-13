@@ -5,10 +5,10 @@
 # Usage:
 #   wait-for-pr-checks.sh <pr-number>
 #   wait-for-pr-checks.sh <pr-number> --interval 30 --timeout 1800
-#   wait-for-pr-checks.sh <pr-number> --settle 0      # accept "no checks" at once
+#   wait-for-pr-checks.sh <pr-number> --settle 0      # no minimum wait (see below)
 #
-# Defaults: poll every 20s, give up after 1800s (30 min), and require an empty
-# result to hold for at least 90s before believing it (see --settle below). The
+# Defaults: poll every 20s, give up after 1800s (30 min), and believe neither an
+# empty result nor a green one until 90s have passed (see --settle below). The
 # settle window is only evaluated at a poll boundary, so the real wait rounds up
 # to the next interval: 100s at the default 20s interval.
 #
@@ -16,9 +16,12 @@
 #   0  all checks settled, none failed, the settle window has passed, and every
 #      workflow run for the head commit is completed; or the PR has no checks
 #      and an empty result held for the settle window (see --settle)
-#   1  at least one check is in the `fail` or `cancel` bucket
+#   1  at least one check is in the `fail` or `cancel` bucket, or a workflow
+#      run for the head commit ended in failure or awaiting approval without
+#      producing any check row
 #   2  timed out before all checks settled, including checks that never
-#      registered at all
+#      registered at all, and checks that pass while a workflow run for the
+#      head commit never completes (the message names the runs)
 #   3  usage error, `gh` missing, or a `gh` invocation failure
 #
 # Output: a one-line status snapshot to stderr each poll; on exit, the final
@@ -28,7 +31,8 @@
 # Do not pipe this script (`... | tail`). A pipeline's status is its last
 # command's, so the exit code is lost and a failure reads as 0. That is how a
 # network error was once reported as "exit 0". Run it bare, or redirect to a
-# file. The VERDICT line exists for a caller that has lost the exit code anyway.
+# file. The VERDICT line exists for a caller that has lost the exit code anyway,
+# and is printed on every exit, usage errors included.
 #
 # Why this exists / why --json: the natural inline form
 # (`gh pr checks N | awk '{print $2}' | grep pending`) parses gh's
@@ -49,7 +53,10 @@
 # after a push, `gh pr checks` returned "no checks reported" for 62 seconds
 # while the workflows were still being queued, and this script exited green at
 # second 0. An empty reading must therefore persist for --settle seconds before
-# it is believed. A repo that genuinely has no CI pays that wait once.
+# it is believed. The same window is the minimum time before any green and the
+# grace period for a cancel, so every run takes at least that long. --settle 0
+# turns all three off: an empty list is "no CI" at once, green needs only the
+# workflow-run check, and a cancel is a failure at once.
 #
 # Why green is checked three ways: a check list that is non-empty and has
 # nothing pending is not the same as CI having finished. After a push GitHub
@@ -67,9 +74,18 @@
 
 set -euo pipefail
 
+# finish <exit-code> <word>: the last stdout line names the verdict, for a
+# caller whose pipeline swallowed the exit code. Every exit goes through it,
+# usage errors included. The EXIT trap covers an exit that did not: a command
+# that `set -e` aborted on still ends the output with a verdict.
+errfile=""
+verdict_done=""
+finish() { verdict_done=1; echo "VERDICT: $2"; exit "$1"; }
+trap '[[ -n "$errfile" ]] && rm -f "$errfile"; [[ -n "$verdict_done" ]] || echo "VERDICT: error"' EXIT
+
 usage() {
   echo "usage: wait-for-pr-checks.sh <pr-number> [--interval SECONDS] [--timeout SECONDS] [--settle SECONDS]" >&2
-  exit 3
+  finish 3 error
 }
 
 # WAIT_FOR_PR_CHECKS_GH overrides which gh answers, so the tests can drive the
@@ -77,7 +93,7 @@ usage() {
 # should set it, and a non-default value is announced on stderr below.
 GH_BIN="${WAIT_FOR_PR_CHECKS_GH:-gh}"
 
-command -v "$GH_BIN" >/dev/null 2>&1 || { echo "gh is not installed or not on PATH" >&2; exit 3; }
+command -v "$GH_BIN" >/dev/null 2>&1 || { echo "gh is not installed or not on PATH" >&2; finish 3 error; }
 
 [[ $# -ge 1 ]] || usage
 pr="$1"; shift
@@ -88,17 +104,17 @@ settle=90
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --interval) [[ $# -ge 2 ]] || { echo "--interval needs a value" >&2; exit 3; }; interval="$2"; shift 2 ;;
-    --timeout)  [[ $# -ge 2 ]] || { echo "--timeout needs a value"  >&2; exit 3; }; timeout="$2";  shift 2 ;;
-    --settle)   [[ $# -ge 2 ]] || { echo "--settle needs a value"   >&2; exit 3; }; settle="$2";   shift 2 ;;
-    *) echo "unknown arg: $1" >&2; exit 3 ;;
+    --interval) [[ $# -ge 2 ]] || { echo "--interval needs a value" >&2; finish 3 error; }; interval="$2"; shift 2 ;;
+    --timeout)  [[ $# -ge 2 ]] || { echo "--timeout needs a value"  >&2; finish 3 error; }; timeout="$2";  shift 2 ;;
+    --settle)   [[ $# -ge 2 ]] || { echo "--settle needs a value"   >&2; finish 3 error; }; settle="$2";   shift 2 ;;
+    *) echo "unknown arg: $1" >&2; finish 3 error ;;
   esac
 done
 
 # Validate every numeric input up front (not just the PR number).
 for pair in "pr-number:$pr" "interval:$interval" "timeout:$timeout" "settle:$settle"; do
   name="${pair%%:*}"; val="${pair#*:}"
-  [[ "$val" =~ ^[0-9]+$ ]] || { echo "$name must be numeric, got: $val" >&2; exit 3; }
+  [[ "$val" =~ ^[0-9]+$ ]] || { echo "$name must be numeric, got: $val" >&2; finish 3 error; }
 done
 
 # An inherited or stray override silently redirects the merge-gate verdict to
@@ -108,25 +124,63 @@ done
 started=$(date +%s)
 deadline=$(( started + timeout ))
 errfile="$(mktemp)"
-trap 'rm -f "$errfile"' EXIT
 
 # Emit the final name<TAB>bucket rows for the caller.
 print_rows() { printf '%s\n' "$rows"; }
 
-# finish <exit-code> <word>: the last stdout line names the verdict, for a
-# caller whose pipeline swallowed the exit code.
-finish() { echo "VERDICT: $2"; exit "$1"; }
+# read_head: print the PR's current head sha; non-zero if gh fails or the
+# answer is not a sha.
+read_head() {
+  local h
+  h="$("$GH_BIN" pr view "$pr" --json headRefOid --jq '.headRefOid' 2>"$errfile")" || return 1
+  [[ "$h" =~ ^[0-9a-f]{40}$ ]] || { echo "unreadable head sha: '$h'" >"$errfile"; return 1; }
+  echo "$h"
+}
 
-# Workflow runs for the PR's current head that have not completed. Prints a
-# count; returns non-zero if either gh call fails or answers with a non-number.
-incomplete_runs() {
-  local head n
-  head="$("$GH_BIN" pr view "$pr" --json headRefOid --jq '.headRefOid' 2>"$errfile")" || return 1
-  [[ "$head" =~ ^[0-9a-f]{40}$ ]] || { echo "unreadable head sha: '$head'" >"$errfile"; return 1; }
-  n="$("$GH_BIN" run list --commit "$head" --limit 100 --json status \
-        --jq '[.[] | select(.status != "completed")] | length' 2>"$errfile")" || return 1
-  [[ "$n" =~ ^[0-9]+$ ]] || { echo "unreadable run count: '$n'" >"$errfile"; return 1; }
-  echo "$n"
+# The head this watch is about. The check rows and the head come from separate
+# calls, so a push landing between them could pair the old head's passing rows
+# with the new head's not-yet-registered runs. runs_blocking compares against
+# this and starts the wait over when the head has moved.
+if ! watch_head="$(read_head)"; then
+  echo "gh pr view failed: $(cat "$errfile")" >&2
+  finish 3 error
+fi
+
+# runs_blocking: sets $blocking to the reason green must wait, or to empty when
+# every workflow run for the head commit is completed, and sets $run_failures
+# to the runs that completed without passing. A run that fails before it has
+# any job (a workflow file error, a fork PR awaiting approval) has no row in
+# the check list, so the rows alone would read as green. `cancelled` is not in
+# that set: push and pull_request triggers that share a concurrency group
+# cancel one of the pair on purpose. Returns non-zero if a gh call fails or
+# answers unreadably. Call it directly, never in $(...): it
+# updates the watch state when the head has moved.
+runs_blocking() {
+  local head listed unfinished n
+  blocking=""
+  run_failures=""
+  head="$(read_head)" || return 1
+  if [[ "$head" != "$watch_head" ]]; then
+    watch_head="$head"
+    started=$(date +%s)
+    empty_since=""
+    checks_seen=""
+    blocking="the PR's head moved to ${head:0:12}, so the settle window starts over"
+    return 0
+  fi
+  listed="$("$GH_BIN" run list --commit "$head" --limit 100 --json name,status,conclusion \
+        --jq '.[] | select(.status != "completed" or (.conclusion | IN("failure", "startup_failure", "timed_out", "action_required")))
+              | [(if .status == "completed" then "ended" else "open" end), .name, (if .status == "completed" then .conclusion else .status end)] | @tsv' 2>"$errfile")" || return 1
+  [[ -z "$listed" ]] && return 0
+  if grep -qvE "^(ended|open)$(printf '\t')[^$(printf '\t')]*$(printf '\t')[a-z_]+\$" <<<"$listed"; then
+    echo "unreadable run list: '$listed'" >"$errfile"
+    return 1
+  fi
+  run_failures="$(awk -F'\t' '$1 == "ended" { printf "%s%s (%s)", (c++ ? ", " : ""), $2, $3 }' <<<"$listed")"
+  unfinished="$(awk -F'\t' '$1 == "open" { print $2 "\t" $3 }' <<<"$listed")"
+  [[ -z "$unfinished" ]] && return 0
+  n="$(awk 'END { print NR }' <<<"$unfinished")"
+  blocking="$n workflow run(s) for the head commit not completed: $(awk -F'\t' '{ printf "%s%s (%s)", (NR > 1 ? ", " : ""), $1, $2 }' <<<"$unfinished")"
 }
 
 while :; do
@@ -159,22 +213,36 @@ while :; do
       # and the API can simply blip). Exiting 0 there would open the merge gate
       # for a PR whose only observed check never passed, so the anomaly is left
       # to resolve or to reach the deadline as a timeout.
+      # A run held in its concurrency group has no jobs, so it is not in the
+      # check list either: "no checks" is only "no CI" when no workflow run for
+      # the head is waiting.
+      blocking=""
       if [[ -z "${checks_seen:-}" && $held -ge $settle ]]; then
-        echo "=== no checks on this PR after ${held}s, nothing to wait for (green) ===" >&2
-        finish 0 green
+        if ! runs_blocking; then
+          echo "gh failed while confirming workflow runs: $(cat "$errfile")" >&2
+          finish 3 error
+        fi
+        if [[ -n "$run_failures" ]]; then
+          echo "=== CI FAILED (no checks, and workflow run(s) for the head commit ended without passing: $run_failures) ===" >&2
+          finish 1 failed
+        fi
+        if [[ -z "$blocking" ]]; then
+          echo "=== no checks on this PR after ${held}s, and no workflow run waiting: nothing to wait for (green) ===" >&2
+          finish 0 green
+        fi
       fi
       if [[ $now -ge $deadline ]]; then
         if [[ -n "${checks_seen:-}" ]]; then
           echo "=== TIMEOUT after ${timeout}s (checks were seen earlier, then the list went empty) ===" >&2
         else
-          echo "=== TIMEOUT after ${timeout}s (no checks ever registered) ===" >&2
+          echo "=== TIMEOUT after ${timeout}s (no checks ever registered${blocking:+; $blocking}) ===" >&2
         fi
         finish 2 timeout
       fi
       if [[ -n "${checks_seen:-}" ]]; then
         echo "[wait-for-pr-checks] check list went empty after checks were seen, re-polling in ${interval}s" >&2
       else
-        echo "[wait-for-pr-checks] no checks yet (${held}s of ${settle}s settle), sleeping ${interval}s" >&2
+        echo "[wait-for-pr-checks] no checks yet (${held}s of ${settle}s settle${blocking:+; $blocking}), sleeping ${interval}s" >&2
       fi
       sleep "$interval"
       continue
@@ -225,11 +293,15 @@ while :; do
   # complete: see "Why green is checked three ways" in the header.
   if [[ $watched -lt $settle ]]; then
     not_yet="registration window open (${watched}s of ${settle}s)"
-  elif ! unfinished="$(incomplete_runs)"; then
+  elif ! runs_blocking; then
     echo "gh failed while confirming workflow runs: $(cat "$errfile")" >&2
     finish 3 error
-  elif [[ "$unfinished" -gt 0 ]]; then
-    not_yet="$unfinished workflow run(s) for the head commit not completed"
+  elif [[ -n "$run_failures" ]]; then
+    echo "=== CI FAILED (workflow run(s) for the head commit ended without passing and have no check row: $run_failures) ===" >&2
+    print_rows
+    finish 1 failed
+  elif [[ -n "$blocking" ]]; then
+    not_yet="$blocking"
   else
     count="$(awk 'END { print NR }' <<<"$rows")"
     echo "=== CI GREEN ($count check(s) settled, every workflow run for the head completed) ===" >&2

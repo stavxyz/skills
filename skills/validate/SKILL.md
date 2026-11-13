@@ -412,7 +412,7 @@ On exit `1`, abort without applying any edit:
 Pull or rebase, then re-run validate: the findings were made against a copy that is no longer current.
 ```
 
-Exit `2` sets `CURRENCY_UNVERIFIED=1` as in the preconditions and continues. Any other result, including exit `3` and the Bash call timing out, aborts without applying any edit and reports the output: only `0` and `2` may reach the edits.
+Exit `2`, or the Bash call timing out, sets `CURRENCY_UNVERIFIED=1` as in the preconditions and continues. Any other result, including exit `3`, aborts without applying any edit and reports the output: only `0`, `2`, and a timeout may reach the edits.
 
 After the first Edit call begins, validate's own writes will advance mtime — no further re-stats are meaningful.
 
@@ -517,9 +517,9 @@ A bless says the document was checked against a commit and that the commit was c
 bash "$SKILL_DIR/check-currency.sh" "$ARGUMENTS" --since "$HEAD_SHA"
 ```
 
-On exit `1`, the run is not a bless, whatever the findings were. Report `⛔ validate: the base moved before the bless could be recorded.` with the script's reasons in place of the blessed banner, do not write the `validated:` block, skip "Persist the spec file" (do not stage or commit anything), and skip "Auto-continue on clean bless". The edits already applied stay uncommitted in the working copy for the operator to carry across a pull. Exit `2` sets `CURRENCY_UNVERIFIED=1`. Any other result, including exit `3` and the Bash call timing out, is handled as exit `1`: only `0` and `2` may reach the banner and the block, and only `0` may write `base_current: true`.
+On exit `1`, the run is not a bless, whatever the findings were. Report `⛔ validate: the base moved before the bless could be recorded.` with the script's reasons in place of the banner this run would otherwise print (blessed or blocked), do not write the `validated:` block, skip "Persist the spec file" (do not stage or commit anything), and skip "Auto-continue on clean bless". The edits already applied stay uncommitted in the working copy for the operator to carry across a pull. Exit `2`, or the Bash call timing out, sets `CURRENCY_UNVERIFIED=1`: a timeout is "could not tell", the same at all three calls, and never "the base moved". Any other result, including exit `3`, is handled as exit `1` with the script's own message. Only `0`, `2`, and a timeout may reach the banner and the block, and only `0` may write `base_current: true`.
 
-On exit `0`, keep the number from the script's `behind_default=<n>` line as `BEHIND_DEFAULT`.
+On exit `0`, keep the number from the script's `behind_default=<n>` line as `BEHIND_DEFAULT`. On every other path `BEHIND_DEFAULT` is unset, and nothing below prints or records a number for it.
 
 ### Print the structured banner
 
@@ -555,8 +555,8 @@ Findings:
                 cleared | BLOCKED | not run) — any non-zero raised count is a
                 clean-bless caveat
   Base:        current, <BEHIND_DEFAULT> commit(s) behind the default branch |
-               UNVERIFIED (<the script's reason>) — unverified is a
-               clean-bless caveat
+               UNVERIFIED (<the script's reasons>) — a clean-bless caveat |
+               STALE (<the script's reasons>) — not a bless
 ```
 
 Take the `Base:` line from `check-currency.sh`: `UNVERIFIED` if `CURRENCY_UNVERIFIED` was set at any of its three calls, with the reason it printed. If any call printed a `note:` line, print it under the table. A non-zero count means the document is unchanged on the default branch, but the reviewers verified its claims against code that many commits behind it; the script does not check whether the files the document cites changed there. It is recorded, and it is not a caveat.

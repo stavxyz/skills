@@ -192,32 +192,37 @@ api_or_exit() { # prints the answer; a gh failure is exit 3
 is_sha() { [[ "$1" =~ ^[0-9a-f]{40}$ ]]; }
 
 behind_note="behind 0"
-if [[ "$behind" -gt 0 && "$mergeable" == "MERGEABLE" ]]; then
+# The test merge is read only when it can change the answer: a blessed sha was
+# given and nothing else is already wrong. A probe, a moved head, a draft, or a
+# conflict gets the plain reason at once.
+if [[ "$behind" -gt 0 && ${#reasons[@]} -eq 0 && "$mergeable" == "MERGEABLE" ]]; then
   if ! test_merge="$("$GH_BIN" pr view "$pr" --json potentialMergeCommit --jq '.potentialMergeCommit.oid // "none"' 2>"$errfile")"; then
     echo "gh pr view failed: $(cat "$errfile")" >&2
     exit 3
   fi
-  is_sha "$test_merge" || { echo "UNKNOWN: PR #$pr is $behind commit(s) behind $base and GitHub has no test merge to compare ('$test_merge')"; exit 2; }
-
-  base_tip="$(api_or_exit "git/ref/heads/$base" '.object.sha')" || exit $?
-  is_sha "$base_tip" || { echo "UNKNOWN: unreadable tip of $base from gh: '$base_tip'"; exit 2; }
-  merged="$(api_or_exit "git/commits/$test_merge" '[.tree.sha, (.parents | map(.sha) | join(","))] | join("|")')" || exit $?
-  IFS='|' read -r merged_tree merged_parents extra <<<"$merged"
-  head_tree="$(api_or_exit "git/commits/$head" '.tree.sha')" || exit $?
-  if ! is_sha "${merged_tree:-}" || ! is_sha "$head_tree" || [[ -z "${merged_parents:-}" || -n "${extra:-}" ]]; then
-    echo "UNKNOWN: unreadable test merge from gh: '$merged' (head tree '$head_tree')"
-    exit 2
-  fi
-  # The test merge is recomputed in the background after a push to either
-  # side. One made for an older base or head says nothing about this merge.
-  if [[ "$merged_parents" != "$base_tip,$head" ]]; then
-    echo "UNKNOWN: GitHub's test merge for PR #$pr is not of $base's tip and this head yet (parents $merged_parents)"
-    exit 2
-  fi
-  if [[ "$merged_tree" == "$head_tree" ]]; then
-    behind_note="behind $behind by commits that change nothing (the merge result is the head's tree)"
+  if ! is_sha "$test_merge"; then
+    reasons+=("behind: head is $behind commit(s) behind $base, and GitHub has no test merge to show that merging changes nothing")
   else
-    reasons+=("behind: head is $behind commit(s) behind $base, and merging would change the head's tree: $base has changes the head lacks")
+    base_tip="$(api_or_exit "git/ref/heads/$base" '.object.sha')" || exit $?
+    is_sha "$base_tip" || { echo "UNKNOWN: unreadable tip of $base from gh: '$base_tip'"; exit 2; }
+    merged="$(api_or_exit "git/commits/$test_merge" '[.tree.sha, (.parents | map(.sha) | join(","))] | join("|")')" || exit $?
+    IFS='|' read -r merged_tree merged_parents extra <<<"$merged"
+    head_tree="$(api_or_exit "git/commits/$head" '.tree.sha')" || exit $?
+    if ! is_sha "${merged_tree:-}" || ! is_sha "$head_tree" || [[ -z "${merged_parents:-}" || -n "${extra:-}" ]]; then
+      echo "UNKNOWN: unreadable test merge from gh: '$merged' (head tree '$head_tree')"
+      exit 2
+    fi
+    if [[ "$merged_parents" != "$base_tip,$head" ]]; then
+      # GitHub often does not rebuild the test merge when the base moves, and
+      # can leave it that way for a day. A test merge of an older base says
+      # nothing about this merge, so this is the ordinary "behind": a feature
+      # PR is rebased, and running the gate again would not change it.
+      reasons+=("behind: head is $behind commit(s) behind $base, and GitHub's test merge is for a different base tip or head (stale test merge), so it cannot show that merging changes nothing")
+    elif [[ "$merged_tree" == "$head_tree" ]]; then
+      behind_note="behind $behind by commits that change nothing (the merge result is the head's tree)"
+    else
+      reasons+=("behind: head is $behind commit(s) behind $base, and merging would change the head's tree: $base has changes the head lacks")
+    fi
   fi
 elif [[ "$behind" -gt 0 ]]; then
   reasons+=("behind: head is $behind commit(s) behind $base")

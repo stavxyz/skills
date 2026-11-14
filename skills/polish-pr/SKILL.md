@@ -1,6 +1,6 @@
 ---
 name: polish-pr
-description: "Polish a pull request: rebase, run parallel reviews, address all findings, update docs, push, and land it when the run ends blessed"
+description: "Polish a feature pull request: rebase, run parallel reviews, address all findings, update docs, push, and land it when the run ends blessed"
 disable-model-invocation: false
 ---
 
@@ -36,10 +36,27 @@ The user's standing rule: polish-pr is non-optional before merge AND requires BO
 
 ## Workflow
 
+### A promotion PR is not polished here — check this before anything else
+
+A PR is a promotion PR when its head is a long-lived branch: the repo's default branch, or a branch the repo's docs name as an integration or environment branch (`dev`, `staging`, or a release branch); a feature branch that happens to have another PR stacked on it is not one. Read the
+head branch with `GH_REPO=<owner>/<repo> gh pr view <PR_NUMBER> --json headRefName,baseRefName`.
+
+If it is one, stop now, before the base-currency gate and before dispatching
+reviewers. This skill's fix loop and its attribution sweep commit and push to
+the PR's head, and nothing may be pushed straight onto a shared branch or
+rewrite it. Report that it is a promotion PR, and do not invoke `land-pr`
+yourself: landing a promotion is its own request. Print the command that does
+it, `/stavxyz:land-pr <PR_NUMBER>`, whose step 2 says what a promotion needs.
+Verdict: `NOT BLESSED: promotion PR, see land-pr`.
+
+Everything below is for a feature PR.
+
 ### Base-currency gate — DO THIS FIRST, with these exact commands
 
 The branch MUST be fully up to date with the branch the PR merges into
-(the PR's BASE branch, usually main) before any reviewer is dispatched.
+(the PR's BASE branch, usually main) before any reviewer is dispatched, or
+behind only in a way that leaves the merge result unchanged (the second case
+below).
 Prose like "make sure the branch is rebased" is not enough — a controller
 once "verified" currency by counting commits AHEAD of the base and checking
 sync with the branch's own upstream, neither of which detects being BEHIND.
@@ -99,7 +116,20 @@ invocation individually (`GH_REPO=<owner>/<repo> gh pr view …`) or run
 to see it.
 
 - `BEHIND` = 0 → proceed to dispatch reviewers.
-- `BEHIND` > 0 → STOP. Rebase onto `<BASE_REMOTE>/<BASE_BRANCH>` (resolve conflicts;
+- `BEHIND` > 0, and merging would change nothing about this branch → proceed,
+  and say so in the summary. Check it with:
+
+  ```bash
+  T=$(git rev-parse 'HEAD^{tree}') && [ -n "$T" ] && [ "$(git merge-tree --write-tree <BASE_REMOTE>/<BASE_BRANCH> HEAD 2>/dev/null)" = "$T" ] && echo "merge changes nothing"
+  ```
+
+  That prints only when the merge result is exactly this branch's tree, so the
+  reviewers are reading what will land: the base gained commits that add
+  nothing this branch lacks (merge commits of work the branch already has, or
+  a commit and its revert). A conflict, an error, or a git too old for
+  `merge-tree --write-tree` (before 2.38) prints nothing, which is the case
+  below.
+- `BEHIND` > 0 otherwise → STOP. Rebase onto `<BASE_REMOTE>/<BASE_BRANCH>` (resolve conflicts;
   if a conflict resolution is non-mechanical, surface it to the user before
   continuing), re-run the project's test suite and linters on the rebased
   result, `git push --force-with-lease` the feature branch, and only then
@@ -107,9 +137,9 @@ to see it.
   merge.
 
 **Re-run the same check before the verdict** (the base can move
-during the polish round itself). If it moved: rebase, re-run the suite,
-force-push, wait for CI again. Never give a BLESSED verdict, which is the
-ready-to-merge signal, on a branch that is behind its base.
+during the polish round itself). If the re-run lands in the STOP case, handle
+it as above, re-run the suite, and wait for CI again. Never give a BLESSED
+verdict, which is the ready-to-merge signal, on a branch in the STOP case.
 
 `git rev-list --count HEAD..<BASE_REMOTE>/<BASE_BRANCH>` (commits BEHIND) is the
 load-bearing direction. `<BASE_REMOTE>/<BASE_BRANCH>..HEAD` (commits ahead) and
@@ -263,7 +293,7 @@ Re-run the Step 2 grep to confirm zero attributions. Then:
 git push --force-with-lease <HEAD_REMOTE> <branch-name>
 ```
 
-Force-push to the **feature branch** is acceptable and required here. Force-push to `main`/`master` is forbidden by CLAUDE.md and would never apply at this stage anyway.
+Force-push to the **feature branch** is acceptable and required here. Force-push to `main`/`master`, or to any long-lived head as defined at the top of this workflow, is forbidden: this skill stops before reaching this step on such a PR, and if attributed commits are found on a shared branch anyway, report them and do not rewrite it.
 
 Push to `<HEAD_REMOTE>`, not `<BASE_REMOTE>`. On a fork PR they differ, and
 pushing the head branch at the base repo succeeds silently: it lands a stray
@@ -320,7 +350,8 @@ of them from the others.
 2. Every commit made after the reviewers ran is a fix for a named finding, a
    documentation update, or a rebase. Anything else added after the review is
    unreviewed, and needs the reviewers run again.
-3. The base-currency check reads `BEHIND` = 0, re-run after the final push.
+3. The base-currency check, re-run after the final push, reads `BEHIND` = 0,
+   or `BEHIND` > 0 with "merge changes nothing" printed.
 4. `wait-for-pr-checks.sh` exited 0 on the final push.
 5. The attribution sweep (Step 2) is empty.
 6. Every automatable open-PR item in the test plan was executed, passed, and is
@@ -331,9 +362,10 @@ which must equal `GH_REPO=<owner>/<repo> gh pr view <PR_NUMBER> --json headRefOi
 If they differ, the push did not land where the PR reads from: NOT BLESSED.
 
 The bless is for that commit on that base. Any later commit ends it. A movement
-of the base ends it too, with one exception that belongs to `land-pr`: a
-conflict-free rebase that passes the carry-over conditions in that skill's
-step 2.
+of the base ends it too, with two exceptions: a base that moved without
+changing the merge result (the "merge changes nothing" case above), and, in
+`land-pr`, a conflict-free rebase that passes the carry-over conditions in
+that skill's step 2.
 
 Then, by case:
 

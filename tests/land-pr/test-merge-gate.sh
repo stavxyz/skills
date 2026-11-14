@@ -109,7 +109,7 @@ case "$sub" in
     case "$2" in
       */compare/*)
         jq -n --argjson behind "$GH_STUB_BEHIND" '{status:"diverged", ahead_by:7, behind_by:$behind}' | jq -r "$jq_prog" ;;
-      */git/ref/heads/*)
+      */git/ref/heads/main|*/git/ref/heads/release/1.x)
         [ "${GH_STUB_MERGE-differs}" = "error" ] && { echo "HTTP 500" >&2; exit 1; }
         jq -n --arg s "$BASE_TIP" '{object:{sha:$s}}' | jq -r "$jq_prog" ;;
       */git/commits/"$TEST_MERGE")
@@ -117,12 +117,22 @@ case "$sub" in
         case "${GH_STUB_MERGE-differs}" in
           same)    tree=$TREE_HEAD;  first=$BASE_TIP ;;
           stale)   tree=$TREE_HEAD;  first=$TREE_OTHER ;;
+          oldhead) tree=$TREE_HEAD;  first=$BASE_TIP; head=$TREE_OTHER ;;
+          octopus) tree=$TREE_HEAD;  first=$BASE_TIP; head="$head,$TREE_OTHER" ;;
+          failmerge) echo "HTTP 502" >&2; exit 1 ;;
           garbage) echo "not json at all"; exit 0 ;;
           badtree) echo "not-a-sha|$BASE_TIP,$head"; exit 0 ;;
           *)       tree=$TREE_OTHER; first=$BASE_TIP ;;
         esac
-        jq -n --arg t "$tree" --arg a "$first" --arg b "$head" '{tree:{sha:$t}, parents:[{sha:$a},{sha:$b}]}' | jq -r "$jq_prog" ;;
+        jq -n --arg t "$tree" --arg a "$first" --arg b "$head" '{tree:{sha:$t}, parents: ([$a] + ($b | split(",")) | map({sha: .}))}' | jq -r "$jq_prog" ;;
       */git/commits/*)
+        # Only the head commit has the head's tree. Asking for any other
+        # commit's tree is a bug in the script.
+        [ "${2##*/}" = "$(cat "$GH_STUB_STATE.head")" ] || { echo "stub: tree asked for a commit that is not the head: $2" >&2; exit 9; }
+        case "${GH_STUB_MERGE-differs}" in
+          failhead)    echo "HTTP 502" >&2; exit 1 ;;
+          badheadtree) jq -n '{tree:{sha:"nope"}, parents:[]}' | jq -r "$jq_prog"; exit 0 ;;
+        esac
         jq -n --arg t "$TREE_HEAD" '{tree:{sha:$t}, parents:[]}' | jq -r "$jq_prog" ;;
       *) echo "stub: unexpected api path: $2" >&2; exit 9 ;;
     esac
@@ -151,6 +161,7 @@ gate() {
   printf '%s\n' "${views[@]}" > "$tmp/views.txt"
   : > "$tmp/state"
   : > "$tmp/api.log"
+  rm -f "$tmp/state.head"
   out=$(GH_STUB_STATE="$tmp/state" GH_STUB_VIEWS="$tmp/views.txt" \
         GH_STUB_BEHIND="$behind" GH_STUB_API_LOG="$tmp/api.log" \
         GH_STUB_MERGE="${GH_STUB_MERGE-differs}" GH_STUB_TEST_MERGE="${GH_STUB_TEST_MERGE-present}" \
@@ -237,8 +248,51 @@ check "behind, with a test merge whose tree is the head's tree, is READY" 0 "beh
 GH_STUB_MERGE=differs gate 10 "$ready" -- 7 --sha "$SHA" --interval 0
 check "behind, with a test merge that changes the head's tree (a hotfix on the base), is NOT READY" 1 "merging would change the head's tree"
 
+GH_STUB_MERGE=same gate 1 "$ready" -- 7 --sha "$SHA" --interval 0
+check "a single commit behind with an unchanged merge result is READY" 0 "behind 1 by commits that change nothing"
+
+# GitHub often leaves the test merge unrebuilt after the base moves. That is
+# the ordinary "behind" (exit 1, a feature PR gets rebased), not an unknown
+# that would stop the run.
 GH_STUB_MERGE=stale gate 10 "$ready" -- 7 --sha "$SHA" --interval 0
-check "a test merge made for an older base is UNKNOWN, even with a matching tree" 2 "is not of main's tip and this head yet"
+check "a test merge made for an older base is NOT READY as behind, even with a matching tree" 1 "stale test merge"
+
+GH_STUB_MERGE=oldhead gate 10 "$ready" -- 7 --sha "$SHA" --interval 0
+check "a test merge made for an older head is NOT READY as behind, even with a matching tree" 1 "stale test merge"
+
+GH_STUB_MERGE=octopus gate 10 "$ready" -- 7 --sha "$SHA" --interval 0
+check "a test merge with a third parent is not this merge" 1 "stale test merge"
+
+GH_STUB_MERGE=same GH_STUB_TEST_MERGE=none gate 10 "$ready" -- 7 --sha "$SHA" --interval 0
+check "behind with no test merge is NOT READY as behind, never READY" 1 "no test merge to show"
+
+GH_STUB_MERGE=failmerge gate 10 "$ready" -- 7 --sha "$SHA" --interval 0
+check "gh failing on the test merge commit exits 3" 3 "failed"
+
+GH_STUB_MERGE=failhead gate 10 "$ready" -- 7 --sha "$SHA" --interval 0
+check "gh failing on the head commit exits 3" 3 "failed"
+
+GH_STUB_MERGE=badheadtree gate 10 "$ready" -- 7 --sha "$SHA" --interval 0
+check "a head tree that is not a sha is UNKNOWN, never READY" 2 "unreadable test merge"
+
+# A probe (no --sha) or any other reason: the test merge is not read at all.
+GH_STUB_MERGE=same gate 10 "$ready" -- 7 --interval 0
+check "a probe of a behind PR is the plain behind reason, exit 1" 1 "behind: head is 10 commit(s) behind main"
+GH_STUB_MERGE=same gate 1 "$ready" -- 7 --interval 0
+check "a probe of a PR one commit behind still says behind" 1 "behind: head is 1 commit(s) behind main"
+if grep -q "test-merge\|git/" "$tmp/api.log"; then
+  fail=$((fail + 1)); printf 'FAIL: a probe must not read the test merge, log:\n%s\n' "$(cat "$tmp/api.log")"
+else
+  pass=$((pass + 1))
+fi
+
+GH_STUB_MERGE=same gate 4 "OPEN|false|$SHA|MERGEABLE|CLEAN|release/1.x|-" -- 7 --sha "$SHA" --interval 0
+check "behind on a base branch with a slash reads that branch's tip" 0 "behind 4 by commits that change nothing"
+if grep -qF "git/ref/heads/release/1.x" "$tmp/api.log"; then
+  pass=$((pass + 1))
+else
+  fail=$((fail + 1)); printf 'FAIL: the base tip should be read from git/ref/heads/release/1.x, log:\n%s\n' "$(cat "$tmp/api.log")"
+fi
 
 GH_STUB_MERGE=garbage gate 10 "$ready" -- 7 --sha "$SHA" --interval 0
 check "an unreadable test merge is UNKNOWN, never READY" 2 "unreadable test merge"
@@ -249,8 +303,6 @@ check "a test merge whose tree is not a sha is UNKNOWN, never READY" 2 "unreadab
 GH_STUB_MERGE=error gate 10 "$ready" -- 7 --sha "$SHA" --interval 0
 check "gh failing while reading the base tip exits 3, never READY" 3 "failed"
 
-GH_STUB_MERGE=same GH_STUB_TEST_MERGE=none gate 10 "$ready" -- 7 --sha "$SHA" --interval 0
-check "behind with no test merge to compare is UNKNOWN, never READY" 2 "no test merge to compare"
 
 GH_STUB_MERGE=same GH_STUB_TEST_MERGE=ERROR gate 10 "$ready" -- 7 --sha "$SHA" --interval 0
 check "gh failing on the test-merge lookup exits 3" 3 "gh pr view failed"

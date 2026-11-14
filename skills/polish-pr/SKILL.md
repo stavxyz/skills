@@ -202,6 +202,8 @@ If a deferral IS approved by the user, both of the following are required:
 
 Use software development best practices, be elegant, emphasize DRY and identify opportunities for breaking code down into reusable pieces. Don't get in a rush.
 
+Before dispatching the reviewers, re-derive every number in the PR description from its source (a count, a rate, a duration, a test total): re-run the query or command that produced it, and correct or remove any figure you cannot reproduce. A reviewer reads the diff and takes the description's numbers on trust.
+
 Ensure all repo documentation, README(s), PR title, PR description, and docstrings are fully updated. "Fact check" all documentation — ensure updates are thorough and complete and that all links work.
 
 Use atomic commits and push to the PR when finished.

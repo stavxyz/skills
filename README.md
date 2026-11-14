@@ -62,7 +62,7 @@ On a **clean bless** — blessed with zero caveats (e.g. no deferrals, no net-ne
 /stavxyz:polish-pr 142
 ```
 
-The last-mile pass before a PR merges. It rebases a feature branch onto the latest upstream (a promotion PR, whose head is a shared branch, is handed to `land-pr` instead), runs **two** code reviews in parallel (from `pr-review-toolkit` and `superpowers`), and fixes every finding in-PR rather than deferring. It also updates all docs, builds a test plan into the PR description, sweeps the branch for stray AI-attribution lines, and pushes. A run that ends blessed then lands the PR (see the verdict paragraph below).
+The last-mile pass before a PR merges. It rebases a feature branch onto the latest upstream (on a promotion PR, whose head is a shared branch, it stops and prints the `land-pr` command instead), runs **two** code reviews in parallel (from `pr-review-toolkit` and `superpowers`), and fixes every finding in-PR rather than deferring. It also updates all docs, builds a test plan into the PR description, sweeps the branch for stray AI-attribution lines, and pushes. A run that ends blessed then lands the PR (see the verdict paragraph below).
 
 **`/stavxyz:polish-pr` has prerequisites.** It hard-requires both review systems to be installed and refuses to run in degraded (single-reviewer) mode:
 

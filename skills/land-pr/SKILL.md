@@ -50,12 +50,27 @@ State the order, the reason, and each PR's base branch in one line. A base that 
 
 ## Step 2: polish, with the polish-pr skill itself
 
-**A promotion PR is the exception to this step.** A PR is a promotion PR only when its head is the repo's default branch, or a branch the repo's docs name as an integration or environment branch (`dev`, `staging`, a release branch). A feature branch that happens to have another PR stacked on it is not one, and it stays one only for a PR the user named. Anything else is a feature PR and goes through polish-pr below, whatever the repo's docs say about promotions. A promotion PR's changes were each polished when they merged into the head, and polish-pr cannot push fixes to a shared branch. For one of these:
+**A promotion PR is the exception to this step.** A PR is a promotion PR only when its head is a long-lived branch: the repo's default branch, or a branch the repo's docs name as an integration or environment branch (`dev`, `staging`, or a release branch); a feature branch that happens to have another PR stacked on it is not one. Anything else is a feature PR and goes through polish-pr below, whatever the repo's docs say about promotions. Being named by the user is required to land a promotion PR, as for any PR, but naming a PR does not make a feature PR a promotion PR. A promotion PR's changes were each polished when they merged into the head, and polish-pr cannot push fixes to a shared branch. For one of these:
 
-- First record the PR's head sha, and list what it would land: `gh pr view <PR_NUMBER> --json commits` against the merged PRs into the head branch (`gh pr list --base <head branch> --state merged`). Every commit must have arrived through a merged PR; a commit pushed straight to the head was reviewed by nobody, so name it in the report and stop.
+- First record the PR's head sha. Then confirm that every commit it would land arrived through a merged PR into the head branch. Ask for each commit's PR; do not compare two lists, because `gh pr view --json commits` stops at 100 commits and `gh pr list` at 30 without saying so:
+
+  ```bash
+  GH_REPO=<owner>/<repo> gh api --paginate "repos/{owner}/{repo}/pulls/<PR_NUMBER>/commits" --jq '.[].sha' > commits.txt
+  GH_REPO=<owner>/<repo> gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){commits{totalCount}}}}' -f o=<owner> -f r=<repo> -F n=<PR_NUMBER> --jq '.data.repository.pullRequest.commits.totalCount'
+  while read -r sha; do
+    n=$(GH_REPO=<owner>/<repo> gh api "repos/{owner}/{repo}/commits/$sha/pulls" --jq '[.[] | select(.merged_at != null and .base.ref == "<head branch>")] | length')
+    [ "$n" -gt 0 ] || echo "NO PR: $sha"
+  done < commits.txt
+  ```
+
+  If the number of lines in `commits.txt` differs from the total count, the list is incomplete (the REST list stops at 250 commits, so a larger promotion always ends here): say so and stop. A `NO PR` line is a commit pushed straight to the head (a merge commit that a merged PR created is found under that PR and does not print). Nobody reviewed it: name it in the report and stop.
 - If the repo's docs say what a promotion needs (each constituent PR polished, evidence from the lower environment, a named person's go), check each of those on evidence and write them in the report. A go counts only if it was given for this PR; one given for an earlier promotion does not carry over, and the authorization section above still applies in full. That takes the place of a polish-pr bless. Read the PR's head sha before the checks and again after them: if it moved, a new change reached the head, so check that one too. The sha step 3 is bound to is the head the checks covered.
 - If the repo's docs do not say, ask the user what a promotion needs before merging, with what you found (the constituent PRs and whether each was polished). Do not invent a standard, and do not run polish-pr's fix loop against a shared branch.
-- Never rebase or force-push the head of a promotion PR. If step 3's gate says it is `behind` or has `conflicts`, the base has a change the head lacks (a hotfix made on the base): report it, and name the fix, a PR that merges the base into the head.
+- Never rebase, force-push, or commit directly to the head of a promotion PR. Wherever a later step says to fix something in the PR, to rebase, or to run polish-pr again, a promotion PR does this instead:
+  - **A fix** (a failed check, a leftover) goes through its own PR into the head branch, polished like any feature PR. The promotion then has a new head.
+  - **`head moved`**: repeat this step's checks for the commits that are new, and bind to the new head.
+  - **`behind` with "merging would change the head's tree", or `conflicts`**: the base has a change the head lacks (a hotfix made on the base). Report it and name the fix, a PR that merges the base into the head.
+  - **`behind` with "stale test merge" or "no test merge"**: GitHub has not rebuilt its test merge since the base moved, and may not for a day; running the gate again does not help. Report it, with the output of `T=$(git rev-parse '<BLESSED_SHA>^{tree}') && [ -n "$T" ] && [ "$(git merge-tree --write-tree <BASE_REMOTE>/<base> <BLESSED_SHA> 2>/dev/null)" = "$T" ] && echo "merge changes nothing"` (after `git fetch <BASE_REMOTE>`) as evidence, and let the user decide.
 
 Everything else in this skill applies to a promotion PR unchanged: the gate, the merge on that sha, and the verification after it.
 
@@ -78,7 +93,7 @@ polish-pr verdict: NOT BLESSED: <reasons>
 - **NOT BLESSED:** this PR does not merge in this run. Do the work the reasons name if it is yours to do, then run polish-pr again. A second NOT BLESSED for the same condition ends it: leave this PR and report what keeps failing. If a reason needs the user (an open question, a deferral to approve), leave this PR, continue with the PRs that do not depend on it, and put the question in the report.
 - **polish-pr cannot run** (its preconditions fail, or the skill is not installed): stop for this PR and say what is missing. Reviewers dispatched by hand, a single review, or "CI is green" are not a polish, however thorough.
 
-**A bless belongs to one commit on one base.** The base has moved for every PR after the first one merged, and the gate in step 3 reports that as `behind` (or `conflicts`). A blessed feature PR in that state is handled here, and nowhere else; a promotion PR is never rebased (see the top of this step):
+**A bless belongs to one commit on one base.** The base has moved for every PR after the first one merged, and the gate in step 3 usually reports that as `behind` (or `conflicts`); when the new base commits leave the merge result unchanged it reports READY, and there is nothing to do. A blessed feature PR in that state is handled here, and nowhere else; a promotion PR is never rebased (see the top of this step):
 
 1. In a worktree of your own, start from the blessed commit itself, not from whatever the branch now points at: `git switch --detach <BLESSED_SHA>`. Then `git fetch <BASE_REMOTE>`, write down the new tip as `<new-base>` (`git rev-parse <BASE_REMOTE>/<base>`), and `git rebase <new-base>`.
 2. If the rebase stops on a conflict, abort it (`git rebase --abort`). The bless is void: run polish-pr again, which does its own rebase.
@@ -90,7 +105,7 @@ polish-pr verdict: NOT BLESSED: <reasons>
 
 This procedure runs once per PR per run. If the gate prints `behind` again after it, or after a re-polish, the base is moving faster than CI: leave this PR and report that.
 
-A gate reason of `head moved` means someone pushed to the PR after the bless. Those commits are unreviewed and there is nothing to carry over: run polish-pr again.
+A gate reason of `head moved` means someone pushed to the PR after the bless. Those commits are unreviewed and there is nothing to carry over: run polish-pr again. (A promotion PR repeats the promotion checks for the new commits instead.)
 
 `<BASE_REMOTE>` and `<HEAD_REMOTE>` here and below are the local remotes for the PR's base and head repositories, as polish-pr's `resolve-pr-remotes.sh` reports them. They differ on a fork PR.
 
@@ -106,7 +121,7 @@ First run the gate script once, with the blessed sha, before waiting on anything
 
    Run it bare, never piped: a pipeline hides its exit code, and its last stdout line is `VERDICT: green|failed|timeout|error` for that reason. It takes at least its settle window, about 100 seconds, even when every check passed long ago. polish-pr's SKILL.md gives the reasons.
 
-   Exit 0 is green. Exit 2 is a timeout: run the watcher once more, and if it times out again, leave this PR and report what never settled, by name: the pending checks, or the workflow runs the timeout message lists when every check passed but a run for the head never completed (one waiting on an approval, for example). Exit 3 is a `gh` or usage failure: fix the invocation and re-run. On exit 1, read the failed job's log before anything else (`gh run view <run-id> --log-failed`). If the failing test's file, or the code that test exercises, is in this PR's diff, it is a bug in the PR: fix it, and the bless is void. Re-running without a fix is allowed once, and only when both are true: neither the test nor the code it exercises is in this PR's diff, and the same test has failed on a recent run of the base branch (`gh run list --branch <base> --workflow <workflow> --limit 10`, then compare by job and test name, not by the run's overall conclusion, since a base can be red for an unrelated job). The re-run is `gh run rerun <run-id> --failed`, followed by the watcher again. A pass on that one re-run is green, and the flaky test goes in the report by name. Anything else is not green.
+   Exit 0 is green. Exit 2 is a timeout: run the watcher once more, and if it times out again, leave this PR and report what never settled, by name: the pending checks, or the workflow runs the timeout message lists when every check passed but a run for the head never completed (one waiting on an approval, for example). Exit 3 is a `gh` or usage failure: fix the invocation and re-run. On exit 1, read the failed job's log before anything else (`gh run view <run-id> --log-failed`). If the failing test's file, or the code that test exercises, is in this PR's diff, it is a bug in the PR: fix it, and the bless is void. (For a promotion PR the fix goes through its own PR into the head branch.) Re-running without a fix is allowed once, and only when both are true: neither the test nor the code it exercises is in this PR's diff, and the same test has failed on a recent run of the base branch (`gh run list --branch <base> --workflow <workflow> --limit 10`, then compare by job and test name, not by the run's overall conclusion, since a base can be red for an unrelated job). The re-run is `gh run rerun <run-id> --failed`, followed by the watcher again. A pass on that one re-run is green, and the flaky test goes in the report by name. Anything else is not green.
 
 2. **The gate script, with the blessed sha:**
 
@@ -117,8 +132,8 @@ First run the gate script once, with the blessed sha, before waiting on anything
    | Exit | Do |
    | --- | --- |
    | 0 READY | Merge now (step 4). READY does not read checks, which is why the watcher runs first. |
-   | 1 NOT READY | Act on each printed reason. `behind` and `conflicts`: the rebase procedure in step 2, or for a promotion PR, report it (never rebase a shared head). The gate does not call a head `behind` when merging would leave the head's tree unchanged, which is the normal state of a merge-commit promotion. `head moved`: polish-pr again (step 2). `draft`: run `gh pr ready <PR_NUMBER>` if the PR is blessed, then re-run the gate. `blocked`: a required review or check is missing; report it and leave this PR. |
-   | 2 UNKNOWN | The script has already retried for about a minute. Run it once more. Still unknown: leave this PR and report it. |
+   | 1 NOT READY | Act on each printed reason. `behind` (whatever follows it, including a stale or missing test merge) and `conflicts`: for a feature PR, the rebase procedure in step 2; for a promotion PR, the list at the top of step 2. The gate does not call a head `behind` when merging would leave the head's tree unchanged, which is the normal state of a merge-commit promotion. `head moved`: polish-pr again (step 2), or for a promotion PR, the list at the top of step 2. `draft`: run `gh pr ready <PR_NUMBER>` if the PR is blessed, then re-run the gate. `blocked`: a required review or check is missing; report it and leave this PR. |
+   | 2 UNKNOWN | GitHub has not computed mergeability, or an answer was unreadable. The script has already retried for about a minute. Run it once more. Still unknown: leave this PR and report it. |
    | 3 | `gh` failed or the arguments are wrong. Fix the invocation and re-run. |
    | 4 ALREADY MERGED | Someone else merged it while you worked. The output says whether the merged head is the blessed sha; if it differs, unreviewed commits landed, and the report says so. Go to step 5. |
    | 5 CLOSED | Report it. |
@@ -126,6 +141,8 @@ First run the gate script once, with the blessed sha, before waiting on anything
 ## Step 4: merge
 
 Merge method, first match wins: the method the repo's docs name; the only method the repo allows (`gh repo view --json mergeCommitAllowed,squashMergeAllowed,rebaseMergeAllowed`); the method the base branch's recent history shows (`git log -15 --format='%h %p %s' <BASE_REMOTE>/<base>`: two parents is a merge commit, one parent with a `(#N)` subject is a squash, and runs of one-parent commits with neither are rebase merges); and, if the history is mixed or too short to tell, a merge commit, named as a default in the report.
+
+If the gate's READY line said the head was behind by commits that change nothing, merge with `--merge` or `--squash` only: a rebase merge replays the head's commits one at a time and drops its merge commits, so its result is not the tree the gate compared.
 
 Before merging, write down the base's tip as `<pre-merge-base>`: `git fetch <BASE_REMOTE> && git rev-parse <BASE_REMOTE>/<base>`. Step 5 compares against it.
 
@@ -169,7 +186,7 @@ Then return to step 2 for the next PR.
 
 Everything that came up along the way (a reviewer's leftover, a flaky test, a stale doc line, a check that could not run) is handled in this order:
 
-1. **Fix it now.** Before the bless, in the PR, which is what polish-pr does with every finding. After the bless, in one small follow-up PR that batches the leftovers from every PR in this run, opened in this run and polished with `polish-pr <N> --no-land`.
+1. **Fix it now.** Before the bless, in the PR, which is what polish-pr does with every finding (for a promotion PR, through its own PR into the head branch). After the bless, in one small follow-up PR that batches the leftovers from every PR in this run, opened in this run and polished with `polish-pr <N> --no-land`.
 2. **Fold it into an existing issue.** Search first: `gh issue list --state all --search "<keywords>"`. Comment on the open issue that covers it, or reopen a closed one if this is a recurrence.
 3. **File a new issue** only when the fix needs a decision that is the user's, depends on something that has not happened yet, or is large enough to need its own spec. The issue's first line says which of the three.
 4. **Otherwise say it in the report and drop it.** An issue filed to look thorough is a note to nobody.

@@ -36,6 +36,21 @@ The user's standing rule: polish-pr is non-optional before merge AND requires BO
 
 ## Workflow
 
+### A promotion PR is not polished here — check this before anything else
+
+A PR is a promotion PR when its head is a long-lived branch: the repo's default branch, or a branch the repo's docs name as an integration or environment branch (`dev`, `staging`, or a release branch); a feature branch that happens to have another PR stacked on it is not one. Read the
+head branch with `GH_REPO=<owner>/<repo> gh pr view <PR_NUMBER> --json headRefName,baseRefName`.
+
+If it is one, stop now, before the base-currency gate and before dispatching
+reviewers. This skill's fix loop and its attribution sweep commit and push to
+the PR's head, and nothing may be pushed straight onto a shared branch or
+rewrite it. Report that it is a promotion PR, and do not invoke `land-pr`
+yourself: landing a promotion is its own request. Print the command that does
+it, `/stavxyz:land-pr <PR_NUMBER>`, whose step 2 says what a promotion needs.
+Verdict: `NOT BLESSED: promotion PR, see land-pr`.
+
+Everything below is for a feature PR.
+
 ### Base-currency gate — DO THIS FIRST, with these exact commands
 
 The branch MUST be fully up to date with the branch the PR merges into
@@ -105,32 +120,21 @@ to see it.
   and say so in the summary. Check it with:
 
   ```bash
-  [ "$(git merge-tree --write-tree <BASE_REMOTE>/<BASE_BRANCH> HEAD 2>/dev/null)" = "$(git rev-parse 'HEAD^{tree}')" ] && echo "merge changes nothing"
+  T=$(git rev-parse 'HEAD^{tree}') && [ -n "$T" ] && [ "$(git merge-tree --write-tree <BASE_REMOTE>/<BASE_BRANCH> HEAD 2>/dev/null)" = "$T" ] && echo "merge changes nothing"
   ```
 
   That prints only when the merge result is exactly this branch's tree, so the
-  reviewers are reading what will land. A conflict, an error, or a git too old
-  for `merge-tree --write-tree` (before 2.38) prints nothing, which is the
-  case below. It is the standing state of a promotion PR in a merge-commit
-  flow (`dev` into `main`): every earlier promote left a merge commit on the
-  base that the head never receives. Do not rebase there: the head is a shared
-  branch, and the count comes back after the next promote.
-- `BEHIND` > 0 otherwise → STOP. If the head is a long-lived branch (the repo's default branch, or a branch the repo's docs name as an integration or environment branch (`dev`, `staging`, a release branch). A feature branch that happens to have another PR stacked on it is not one),
-  do not rebase or force-push it: the base has a change the head lacks, and
-  the way to bring it across is a PR that merges the base into the head. Say
-  so and stop. For a feature branch, rebase onto `<BASE_REMOTE>/<BASE_BRANCH>` (resolve conflicts;
+  reviewers are reading what will land: the base gained commits that add
+  nothing this branch lacks (merge commits of work the branch already has, or
+  a commit and its revert). A conflict, an error, or a git too old for
+  `merge-tree --write-tree` (before 2.38) prints nothing, which is the case
+  below.
+- `BEHIND` > 0 otherwise → STOP. Rebase onto `<BASE_REMOTE>/<BASE_BRANCH>` (resolve conflicts;
   if a conflict resolution is non-mechanical, surface it to the user before
   continuing), re-run the project's test suite and linters on the rebased
   result, `git push --force-with-lease` the feature branch, and only then
   dispatch reviewers — they must review the combination that will actually
   merge.
-
-**A long-lived head is not polished here at all.** If this PR's head is a
-long-lived branch as defined above (a promotion PR), stop before dispatching
-reviewers: this skill's fix loop commits and pushes to the PR's head, and
-review fixes must not be pushed straight onto a shared branch. Report that it
-is a promotion PR and hand it to `land-pr`, whose step 2 says what a promotion
-needs. Verdict: `NOT BLESSED: promotion PR, see land-pr`.
 
 **Re-run the same check before the verdict** (the base can move
 during the polish round itself). If the re-run lands in the STOP case, handle
@@ -289,7 +293,7 @@ Re-run the Step 2 grep to confirm zero attributions. Then:
 git push --force-with-lease <HEAD_REMOTE> <branch-name>
 ```
 
-Force-push to the **feature branch** is acceptable and required here. Force-push to `main`/`master`, or to any long-lived head as defined in the base-currency gate, is forbidden: this skill stops before reaching this step on such a PR, and if attributed commits are found on a shared branch anyway, report them and do not rewrite it.
+Force-push to the **feature branch** is acceptable and required here. Force-push to `main`/`master`, or to any long-lived head as defined at the top of this workflow, is forbidden: this skill stops before reaching this step on such a PR, and if attributed commits are found on a shared branch anyway, report them and do not rewrite it.
 
 Push to `<HEAD_REMOTE>`, not `<BASE_REMOTE>`. On a fork PR they differ, and
 pushing the head branch at the base repo succeeds silently: it lands a stray
@@ -358,9 +362,10 @@ which must equal `GH_REPO=<owner>/<repo> gh pr view <PR_NUMBER> --json headRefOi
 If they differ, the push did not land where the PR reads from: NOT BLESSED.
 
 The bless is for that commit on that base. Any later commit ends it. A movement
-of the base ends it too, with one exception that belongs to `land-pr`: a
-conflict-free rebase that passes the carry-over conditions in that skill's
-step 2.
+of the base ends it too, with two exceptions: a base that moved without
+changing the merge result (the "merge changes nothing" case above), and, in
+`land-pr`, a conflict-free rebase that passes the carry-over conditions in
+that skill's step 2.
 
 Then, by case:
 

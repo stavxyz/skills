@@ -55,7 +55,7 @@ Verify in order, exiting on the first failure:
 
    - Exit `0` (`CURRENT`): continue. A `note:` line (a feature branch behind the default branch, with the document unchanged there) goes in the final report.
    - Exit `1` (`STALE`): report `⛔ validate: this checkout is out of date.` followed by the script's reasons, tell the operator to pull or rebase and re-run, and exit. Do not dispatch reviewers.
-   - Exit `2` (`UNVERIFIED`): there is no remote to compare against, or the fetch failed. Continue, set `CURRENCY_UNVERIFIED=1`, and say so in the final report. It is a caveat on the bless (see "Define clean bless"), never a pass.
+   - Exit `2` (`UNVERIFIED`): currency could not be established. There is no remote, a fetch failed, a remote's default branch could not be found, there is no common history, or the document may have been moved and rewritten beyond what git recognizes as a rename. The script prints which. Continue, set `CURRENCY_UNVERIFIED=1`, and say so in the final report. It is a caveat on the bless (see "Define clean bless"), never a pass.
    - Exit `3`, or any other exit code: report the script's message and exit.
    - The Bash call timing out (a fetch waiting on a network or an approval nobody answered): treat as exit `2`.
 

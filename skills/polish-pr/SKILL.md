@@ -167,6 +167,12 @@ Polish-pr's controller does NOT own the reviewer prompt templates (they live ins
 
 > **Repeated-pattern sweep — REQUIRED.** When you identify a finding that names an anti-pattern (e.g., "imports from wrong path," "uses wrong API option," "mounts on root app instead of sub-router," "redeclared regex that already exists upstream"), do NOT stop at the first instance. **Grep the rest of the diff for the same anti-pattern and emit one finding per location, at the same severity.** Operators apply fixes surgically (one Edit per finding); if N locations exhibit the same bug and you report only one, the surgical fix covers only the named site and the other N-1 ship broken. Each location must be named explicitly so it gets its own Edit. If the anti-pattern appears once, that's one finding — no inflation. If it appears N times, that's N findings — no collapsing.
 
+Append this second block to every reviewer dispatch as well, copied exactly:
+
+> **Probe without side effects — REQUIRED.** You may run tests and try mutations to check a claim, but nothing you run may reach a real service: a job queue, a database that is not a scratch one, a message bus, a webhook, a mail or payment API, or a deploy. Code under review often connects to whatever is listening on its default local address. Before running it, mutated or not, point its connections at a fake or an in-memory stand-in, or patch the client, and say in your report what you ran and what you stubbed. If you cannot isolate it, do not run it: reason from the source and say so.
+
+Why this exists: a reviewer probing tests with in-memory mutations pushed four real jobs onto a job server that happened to be running on the developer's machine, because the code under test connected to its default address.
+
 Why this exists: a polish-pr v2 run caught a mount-point anti-pattern at one task site but missed three other sites in the same diff with the identical bug. The surgical fix shipped, the siblings did not, and a follow-up validate caught the rest. The sweep instruction makes the reviewer responsible for enumerating every instance up front so the operator's first round of edits covers all of them.
 
 Apply this to both Reviewer A and Reviewer B, in whatever form each is dispatched — the `pr-review-toolkit:code-reviewer` Task prompt, the `general-purpose` subagent prompt you assemble from `superpowers:requesting-code-review`'s template, or (deprecated path) the `superpowers:code-reviewer` Task prompt. It composes with whatever finding format their internal templates already prescribe — it asks the reviewer to multiply findings, not to change the format.
@@ -201,6 +207,8 @@ If a deferral IS approved by the user, both of the following are required:
 ## Execution standards
 
 Use software development best practices, be elegant, emphasize DRY and identify opportunities for breaking code down into reusable pieces. Don't get in a rush.
+
+Before dispatching the reviewers, re-derive every number in the PR description from its source (a count, a rate, a duration, a test total): re-run the query or command that produced it, and correct or remove any figure you cannot reproduce. A reviewer reads the diff and takes the description's numbers on trust.
 
 Ensure all repo documentation, README(s), PR title, PR description, and docstrings are fully updated. "Fact check" all documentation — ensure updates are thorough and complete and that all links work.
 
@@ -244,7 +252,7 @@ about 100s at the default 20s interval. A repo that genuinely has no CI pays
 that wait on every run, this one included, since it has no CI of its own.
 `tests/polish-pr/test-wait-for-checks.sh` locks the verdicts in.
 
-Run it with `run_in_background: true` so the harness notifies you on completion instead of blocking the conversation. Do not poll, do not chain sleeps — wait for the completion notification, then read the output file. When it exits 0, proceed to the verdict; on non-zero, surface the failed-check list to the user before doing anything else.
+Run it with `run_in_background: true` so the harness notifies you on completion instead of blocking the conversation. Do not poll, do not chain sleeps — wait for the completion notification, then read the output file. When it exits 0, proceed to the verdict; on non-zero, surface the failed-check list to the user before doing anything else. If every job failed within seconds and `gh run view <run-id> --log-failed` finds no log, no job ever started: the reason is in the check run's annotations (`gh api "repos/{owner}/{repo}/check-runs/<job id>/annotations" --jq '.[].message'`). A job the host refused to start (a billing or spending limit, a disabled runner, Actions turned off) is not a failing test and no change to the PR fixes it: report the annotation's words and stop, because it is the owner's to fix.
 
 ## Mandatory attribution sweep — DO THIS, do not skip
 

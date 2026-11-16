@@ -246,7 +246,7 @@ about 100s at the default 20s interval. A repo that genuinely has no CI pays
 that wait on every run, this one included, since it has no CI of its own.
 `tests/polish-pr/test-wait-for-checks.sh` locks the verdicts in.
 
-Run it with `run_in_background: true` so the harness notifies you on completion instead of blocking the conversation. Do not poll, do not chain sleeps — wait for the completion notification, then read the output file. When it exits 0, proceed to the verdict; on non-zero, surface the failed-check list to the user before doing anything else.
+Run it with `run_in_background: true` so the harness notifies you on completion instead of blocking the conversation. Do not poll, do not chain sleeps — wait for the completion notification, then read the output file. When it exits 0, proceed to the verdict; on non-zero, surface the failed-check list to the user before doing anything else. If every job failed within seconds and `gh run view <run-id> --log-failed` finds no log, no job ever started: the reason is in the check run's annotations (`gh api "repos/{owner}/{repo}/check-runs/<job id>/annotations" --jq '.[].message'`). A job the host refused to start (a billing or spending limit, a disabled runner, Actions turned off) is not a failing test and no change to the PR fixes it: report the annotation's words and stop, because it is the owner's to fix.
 
 ## Mandatory attribution sweep — DO THIS, do not skip
 

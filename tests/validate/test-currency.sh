@@ -411,6 +411,81 @@ fresh
 check "--since before the document path is accepted" \
   0 "CURRENT" "$CHECK" --since "$(git -C "$W" rev-parse HEAD)" "$W/docs/plan.md"
 
+# `gh repo fork` layout: origin is the fork, and the parent is "upstream".
+fresh
+git init -q --bare -b main "$TMP/fork.git"
+git -C "$W" push -q "$TMP/fork.git" main
+git -C "$W" remote rename origin upstream
+git -C "$W" remote add origin "$TMP/fork.git"
+git -C "$W" fetch -q origin
+git -C "$W" checkout -q -b feature
+echo "f" > "$W/src/f.py"; git -C "$W" add -A; git -C "$W" commit -q -m f
+git -C "$W" push -q -u origin feature
+check "gh-fork layout, level with the parent, is current" 0 "CURRENT" "$CHECK" "$W/docs/plan.md"
+other_pushes main docs/plan.md "plan v2"
+check "gh-fork layout: a feature branch is STALE when the parent's default branch changed the document" \
+  1 "the document changed on upstream/main after this branch left it" "$CHECK" "$W/docs/plan.md"
+git -C "$W" checkout -q main
+git -C "$W" branch -q --set-upstream-to=origin/main
+check "gh-fork layout: main tracking the fork is STALE when the parent's main moved" \
+  1 "upstream/main" "$CHECK" "$W/docs/plan.md"
+rm -rf "$TMP/fork.git"
+
+# The remote renamed its default branch. A plain fetch leaves origin/HEAD
+# pointing at the old name and leaves the old branch in place, frozen.
+fresh
+git -C "$W" checkout -q -b feature
+git -C "$O" checkout -q -b trunk; git -C "$O" push -q origin trunk
+git -C "$TMP/origin.git" symbolic-ref HEAD refs/heads/trunk
+git -C "$W" config remote.origin.followRemoteHEAD never
+other_pushes trunk docs/plan.md "plan v2"
+check "a renamed default branch is learned from the remote, not from a stale origin/HEAD" \
+  1 "the document changed on origin/trunk" "$CHECK" "$W/docs/plan.md"
+if [ "$(git -C "$W" symbolic-ref refs/remotes/origin/HEAD)" = "refs/remotes/origin/main" ]; then
+  pass=$((pass + 1))
+else
+  fail=$((fail + 1)); printf 'FAIL: the rename fixture needs origin/HEAD to still name main, got %s\n' "$(git -C "$W" symbolic-ref refs/remotes/origin/HEAD)"
+fi
+
+# Criss-cross: two merge bases. Against one of them the default branch shows no
+# change to the document, while the document here and there differ.
+fresh
+git -C "$O" checkout -q -b m1 main; echo "code m1" > "$O/src/m1.py"; git -C "$O" add -A; git -C "$O" commit -q -m m1
+git -C "$O" checkout -q -b m2 main; echo "plan v1b" > "$O/docs/plan.md"; git -C "$O" add -A; git -C "$O" commit -q -m m2
+git -C "$O" push -q origin m1 m2
+git -C "$W" fetch -q origin
+git -C "$W" checkout -q -b feature origin/m1 --no-track
+git -C "$W" merge -q origin/m2 -m "feature merges m2"
+git -C "$O" checkout -q main; git -C "$O" merge -q --no-ff m2 -m "main merges m2"; git -C "$O" merge -q --no-ff m1 -m "main merges m1"
+echo "plan v1" > "$O/docs/plan.md"; git -C "$O" add -A; git -C "$O" commit -q -m "main reverts the document"
+git -C "$O" push -q origin main
+if [ "$(git -C "$W" fetch -q origin; git -C "$W" merge-base --all HEAD origin/main | wc -l | tr -d ' ')" = "2" ]; then
+  check "with two merge bases, a document change seen from either one is STALE" \
+    1 "the document changed on origin/main" "$CHECK" "$W/docs/plan.md"
+else
+  fail=$((fail + 1)); echo "FAIL: the criss-cross fixture did not produce two merge bases"
+fi
+
+# Moved and largely rewritten on this branch: git sees an add and a delete, not
+# a rename. The default branch edited the old path.
+fresh
+printf 'one\ntwo\nthree\nfour\n' > "$O/docs/plan.md"; git -C "$O" add -A; git -C "$O" commit -q -m long; git -C "$O" push -q origin main
+git -C "$W" pull -q --ff-only origin main
+git -C "$W" checkout -q -b feature
+git -C "$W" rm -q docs/plan.md; mkdir -p "$W/docs"; printf 'uno\ndos\ntres\nfour\n' > "$W/docs/plan-v2.md"
+git -C "$W" add -A; git -C "$W" commit -q -m "move and rewrite"
+other_pushes main docs/plan.md "$(printf 'one\ntwo\nthree\nfour\nfive')"
+check "a moved and rewritten document, with its old path edited on the default, is UNVERIFIED" \
+  2 "could not tell whether the document changed on origin/main" "$CHECK" "$W/docs/plan-v2.md"
+
+# A brand-new document on a branch that deleted nothing is still current.
+fresh
+git -C "$W" checkout -q -b feature
+echo "new" > "$W/docs/new.md"; git -C "$W" add -A; git -C "$W" commit -q -m new
+other_pushes main src/code.py "code v2"
+check "a brand-new document on a branch that deleted nothing is current" \
+  0 "the document is unchanged there" "$CHECK" "$W/docs/new.md"
+
 # --- --since ------------------------------------------------------------------
 fresh
 start=$(git -C "$W" rev-parse HEAD)
@@ -429,7 +504,7 @@ check "the remote moving during the run is caught by the re-check" \
 # --- unverified is never a pass ----------------------------------------------
 fresh
 git -C "$W" remote remove origin
-check "no remote at all is UNVERIFIED" 2 "no upstream and no remote to compare against" "$CHECK" "$W/docs/plan.md"
+check "no remote at all is UNVERIFIED" 2 "no remote to compare against" "$CHECK" "$W/docs/plan.md"
 out=$("$CHECK" "$W/docs/plan.md" --since "$(git -C "$W" rev-parse HEAD~0)" 2>&1)
 git -C "$W" commit -q --allow-empty -m moved
 out=$("$CHECK" "$W/docs/plan.md" --since "$(git -C "$W" rev-parse HEAD~1)" 2>&1); got=$?

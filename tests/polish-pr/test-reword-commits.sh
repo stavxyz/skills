@@ -131,8 +131,8 @@ $(identity)"; fi
 if [ "$n1" = "$c1" ]; then ok; else bad "a commit older than the changed one keeps its sha" "$c1 -> $n1"; fi
 if [ "$n2" != "$c2" ] && [ "$n3" != "$c3" ]; then ok; else bad "the changed commit and its descendants get new shas"; fi
 short=$(git -C "$R" rev-parse --short "$before_tip")
-if [ "$(git -C "$R" rev-parse "refs/rescue/main/$short" 2>/dev/null)" = "$before_tip" ]; then ok; else bad "the rescue ref points at the old tip" "$(rescue_refs)"; fi
-check "the rescue ref is announced" 0 "refs/rescue/main/$short"
+if [ "$(git -C "$R" rev-parse "refs/rescue/reword/main/$short" 2>/dev/null)" = "$before_tip" ]; then ok; else bad "the rescue ref points at the old tip" "$(rescue_refs)"; fi
+check "the rescue ref is announced" 0 "refs/rescue/reword/main/$short"
 # Without --remote-tip the helper cannot know what the remote holds, so the
 # lease is a placeholder with a line saying what goes there.
 check "without --remote-tip the push command carries a placeholder" 0 "git push --force-with-lease=main:<remote-tip> <remote> HEAD:main"
@@ -279,14 +279,15 @@ unchanged "dry run" "$t"
 
 # --- a branch that moves during the rewrite is not overwritten ---------------
 # A git wrapper first on PATH commits onto the branch just before the helper's
-# update-ref of refs/heads/main runs, which is the race the expected-value
-# argument exists for.
+# first update-ref runs, which is the race the expected-value argument exists
+# for. The rescue ref and the branch move are one transaction, so the refusal
+# must leave no rescue ref behind either.
 mkrepo
 real_git=$(command -v git)
 mkdir -p "$tmp/wrap"
 cat > "$tmp/wrap/git" <<WRAP
 #!/usr/bin/env bash
-if [ "\$1" = "update-ref" ] && [[ " \$* " == *" refs/heads/main "* ]] && [ ! -e "$tmp/raced" ]; then
+if [ "\$1" = "update-ref" ] && [ ! -e "$tmp/raced" ]; then
   touch "$tmp/raced"
   echo race >> race.txt
   "$real_git" add race.txt
@@ -302,6 +303,34 @@ if [ -e "$tmp/raced" ] && [ "$(git -C "$R" log -1 --format=%s main)" = "chore: s
   ok
 else
   bad "the commit that landed in the meantime is still the tip" "$(git -C "$R" log --oneline -3 main)"
+fi
+if [ -z "$(rescue_refs)" ]; then ok; else bad "a refused move leaves no rescue ref" "$(rescue_refs)"; fi
+
+# --- the rescue ref is created, never overwritten ----------------------------
+mkrepo; t=$(tip); short=$(git -C "$R" rev-parse --short "$t")
+git -C "$R" update-ref "refs/rescue/reword/main/$short" "$t"
+json '[{"old": "retries twice", "new": "retries three times"}]'
+rw --base base --replace "$tmp/replace.json"
+check "an existing rescue ref at the same commit is accepted" 0 "refs/rescue/reword/main/$short"
+if [ "$(tip)" != "$t" ] && [ "$(git -C "$R" rev-parse "refs/rescue/reword/main/$short")" = "$t" ]; then ok; else bad "the rewrite lands and the rescue ref still names the old tip" "$(rescue_refs)"; fi
+
+mkrepo; t=$(tip); short=$(git -C "$R" rev-parse --short "$t"); b=$(git -C "$R" rev-parse base)
+git -C "$R" update-ref "refs/rescue/reword/main/$short" "$b"
+rw --base base --replace "$tmp/replace.json"
+check "an existing rescue ref at another commit is refused" 1 "refs/rescue/reword/main/$short"
+if [ "$(tip)" = "$t" ] && [ "$(git -C "$R" rev-parse "refs/rescue/reword/main/$short")" = "$b" ]; then ok; else bad "neither the branch nor the existing rescue ref moves" "$(tip) $(rescue_refs)"; fi
+
+# A branch name with a slash keeps it in the rescue ref and the push command.
+mkrepo
+git -C "$R" checkout -q -b feature/widget-retry
+t=$(tip); short=$(git -C "$R" rev-parse --short "$t")
+rw --base base --replace "$tmp/replace.json"
+check "a branch with a slash is rewritten" 0 "refs/rescue/reword/feature/widget-retry/$short"
+check "the push command names the slashed branch" 0 "--force-with-lease=feature/widget-retry:<remote-tip> <remote> HEAD:feature/widget-retry"
+if [ "$(git -C "$R" rev-parse "refs/rescue/reword/feature/widget-retry/$short")" = "$t" ] && [ "$(git -C "$R" rev-parse main)" = "$t" ]; then
+  ok
+else
+  bad "the slashed branch's rescue ref names the old tip, and main is untouched" "$(rescue_refs)"
 fi
 
 # --- --remote-tip names the lease ------------------------------------------

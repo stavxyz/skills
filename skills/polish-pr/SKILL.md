@@ -275,7 +275,7 @@ python3 "$CLAUDE_PLUGIN_ROOT/skills/polish-pr/reword-commits.py" \
 
 Run it with `--dry-run` added first and read the diff: every removed line must be an attribution, and nothing else. Then run it without `--dry-run`.
 
-It rewrites only the messages, through `git commit-tree`: every commit keeps its tree, author, and author date, the working tree and index are not touched, and the old tip is parked at the `refs/rescue/...` ref it names. It refuses (exit 1, nothing changed) a detached HEAD, a merge commit in the range, or a pattern that would delete a subject line; a subject that carries an attribution is fixed with `--replace` instead. When it refuses a merge commit, rebase onto `<BASE_REMOTE>/<BASE_BRANCH>` first, which makes the branch linear, re-run the project's test suite, and run the helper again.
+It rewrites only the messages, through `git commit-tree`: every commit keeps its tree, author, and author date, the working tree and index are not touched, and the old tip is parked at the `refs/rescue/reword/...` ref it names, created in the same transaction that moves the branch. It refuses (exit 1, nothing changed) a detached HEAD, a merge commit in the range, or a pattern that would delete a subject line; a subject that carries an attribution is fixed with `--replace` instead. When it refuses a merge commit, rebase onto `<BASE_REMOTE>/<BASE_BRANCH>` first, which makes the branch linear, re-run the project's test suite, and run the helper again.
 
 Re-run the Step 2 grep to confirm zero attributions. Then push with the command the helper printed:
 

@@ -30,10 +30,13 @@ patterns can serve a grep that detects lines and this tool that removes them.
 The rewrite uses git commit-tree, not a rebase, so the index and working tree
 are never touched; that is safe because the tip's tree does not change, and
 uncommitted changes survive. Commits before the first changed one keep their
-shas. Before the branch moves, a rescue ref refs/rescue/<branch>/<short sha>
-is written at the old tip. The branch is moved with git update-ref naming the
-old tip as the expected value, so a branch that moved in the meantime is left
-alone. The tool never pushes; it prints the push command to run.
+shas. One `git update-ref --stdin` transaction creates the rescue ref
+refs/rescue/reword/<branch>/<short sha> at the old tip and moves the branch,
+naming the old tip as its expected value: both land or neither does, so a
+branch that moved in the meantime is left alone and no rescue ref is left
+behind. The rescue ref is created, never overwritten; one of that name that
+already names the old tip is accepted, and one that names another commit is
+refused. The tool never pushes; it prints the push command to run.
 
 The push lease names --remote-tip, the sha the caller knows the remote branch
 to hold (for a pull request, the head that was last reviewed). Without it the
@@ -279,6 +282,11 @@ def main(argv):
             print(f"dry run: {len(changed)} commit message(s) would change; nothing was written")
             return 0
 
+        rescue = f"refs/rescue/reword/{branch}/{short(old_tip)}"
+        existing = git(["rev-parse", "--verify", "--quiet", rescue], check=False).stdout.decode().strip()
+        if existing and existing != old_tip:
+            raise Refused(f"{rescue} already exists and names {existing}, not the old tip {old_tip}; it is not overwritten")
+
         sign = out(["config", "--type=bool", "--default=false", "commit.gpgsign"]) == "true"
         first = changed[0]
         new_shas = [c["sha"] for c in commits[:first]]
@@ -305,20 +313,22 @@ def main(argv):
                 )
         new_tip = new_shas[-1]
 
-        rescue = f"refs/rescue/{branch}/{short(old_tip)}"
-        git(["update-ref", rescue, old_tip])
-        print(f"rescue ref: {rescue} -> {old_tip}")
-
-        p = git(["update-ref", "-m", "reword-commits", head_ref, new_tip, old_tip], check=False)
+        # verify, not create, when the rescue ref already names the old tip,
+        # since create fails on any existing ref.
+        rescue_op = f"verify {rescue} {old_tip}" if existing else f"create {rescue} {old_tip}"
+        transaction = f"{rescue_op}\nupdate {head_ref} {new_tip} {old_tip}\n"
+        p = git(["update-ref", "-m", "reword-commits", "--stdin"], stdin=transaction.encode(), check=False)
         if p.returncode != 0:
             now = git(["rev-parse", "--verify", "--quiet", head_ref], check=False).stdout.decode().strip()
             if now != old_tip:
                 raise Refused(
                     f"{branch} moved during the rewrite (now {now or 'missing'}, was {old_tip}); "
-                    f"it was not overwritten. Run the tool again on the new tip."
+                    "nothing was changed: the branch was not overwritten and no rescue ref was written. "
+                    "Run the tool again on the new tip."
                 )
             err = p.stderr.decode("utf-8", "replace").strip()
-            raise UsageError(f"git update-ref failed (exit {p.returncode}): {err}")
+            raise UsageError(f"git update-ref failed (exit {p.returncode}), nothing was changed: {err}")
+        print(f"rescue ref: {rescue} -> {old_tip}")
 
         print(f"rewrote {len(changed)} message(s) on {branch}; every tree, author, and author date verified unchanged")
         for c, new, m in zip(commits, new_shas, messages):

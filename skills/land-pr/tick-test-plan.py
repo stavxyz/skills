@@ -307,7 +307,8 @@ def diff(old, new, name):
 
 def gh(args):
     try:
-        p = subprocess.run([GH] + args, capture_output=True, text=True)
+        # gh prints UTF-8 whatever the locale says.
+        p = subprocess.run([GH] + args, capture_output=True, encoding="utf-8", errors="replace")
     except OSError as exc:
         raise UsageError(f"cannot run {GH}: {exc}")
     if p.returncode != 0:
@@ -316,6 +317,9 @@ def gh(args):
 
 
 def main(argv):
+    # Box text echoed in messages may not fit the terminal's encoding.
+    for stream in (sys.stdout, sys.stderr):
+        stream.reconfigure(errors="replace")
     parser = Parser(
         prog="tick-test-plan.py",
         description="Tick one test-plan box in a PR description and record its evidence.",
@@ -372,6 +376,8 @@ def main(argv):
                     old = fh.read()
             except OSError as exc:
                 raise UsageError(f"cannot read {args.file}: {exc}")
+            except UnicodeDecodeError as exc:
+                raise UsageError(f"cannot read {args.file}: it is not UTF-8 ({exc})")
             name = os.path.basename(args.file)
         else:
             raw = gh(["pr", "view", args.pr, "--json", "body"] + repo)
@@ -393,13 +399,22 @@ def main(argv):
             return 0
 
         if args.file is not None:
-            with open(args.file, "w", encoding="utf-8", newline="") as fh:
-                fh.write(new)
-        else:
-            fd, path = tempfile.mkstemp(prefix="tick-test-plan-", suffix=".md")
             try:
-                with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+                with open(args.file, "w", encoding="utf-8", newline="") as fh:
                     fh.write(new)
+            except OSError as exc:
+                raise UsageError(f"cannot write {args.file}: {exc}")
+        else:
+            try:
+                fd, path = tempfile.mkstemp(prefix="tick-test-plan-", suffix=".md")
+            except OSError as exc:
+                raise UsageError(f"cannot create a temp file for the description: {exc}")
+            try:
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+                        fh.write(new)
+                except OSError as exc:
+                    raise UsageError(f"cannot write the temp description {path}: {exc}")
                 gh(["pr", "edit", args.pr, "--body-file", path] + repo)
             finally:
                 os.unlink(path)

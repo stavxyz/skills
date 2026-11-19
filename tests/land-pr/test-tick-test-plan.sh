@@ -36,7 +36,8 @@ case "$1 $2" in
       prev=$a
     done
     [ "$json" = "body" ] || { echo "stub: pr view must ask for --json body, got: $*" >&2; exit 9; }
-    python3 -c 'import json, sys; sys.stdout.write(json.dumps({"body": open(sys.argv[1], newline="", encoding="utf-8").read()}))' "$GH_STUB_BODY"
+    # Raw UTF-8, as gh prints it: no ASCII escaping to hide a decoding bug.
+    python3 -c 'import json, sys; sys.stdout.buffer.write(json.dumps({"body": open(sys.argv[1], newline="", encoding="utf-8").read()}, ensure_ascii=False).encode("utf-8"))' "$GH_STUB_BODY"
     ;;
   "pr edit")
     f=""
@@ -46,6 +47,8 @@ case "$1 $2" in
       prev=$a
     done
     [ -n "$f" ] || { echo "stub: pr edit without --body-file: $*" >&2; exit 9; }
+    echo "$f" > "$GH_STUB_BODY_FILE_PATH"
+    [ -n "${GH_STUB_FAIL_EDIT:-}" ] && { echo "HTTP 403: Resource not accessible" >&2; exit 1; }
     cp "$f" "$GH_STUB_WRITTEN"
     ;;
   *) echo "stub: unexpected gh call: $*" >&2; exit 9 ;;
@@ -67,6 +70,7 @@ tick() {
   rm -f "$tmp/written"
   : > "$tmp/gh.log"
   out=$(GH_STUB_BODY="$body" GH_STUB_WRITTEN="$tmp/written" GH_STUB_LOG="$tmp/gh.log" \
+        GH_STUB_BODY_FILE_PATH="$tmp/body-file-path" \
         TICK_TEST_PLAN_GH="$tmp/gh" python3 "$TICK" "$@" 2>&1)
   got=$?
 }
@@ -404,6 +408,37 @@ out=$(GH_STUB_FAIL_VIEW=1 GH_STUB_BODY="$tmp/body.md" GH_STUB_WRITTEN="$tmp/writ
       TICK_TEST_PLAN_GH="$tmp/gh" python3 "$TICK" 7 --box "Lint is clean" --evidence ok 2>&1); got=$?
 check "a failing gh pr view exits 3" 3 "Could not resolve"
 nothing_written "failing gh pr view"
+
+export GH_STUB_FAIL_EDIT=1
+tick "$tmp/body.md" 7 --box "Lint is clean" --evidence ok
+unset GH_STUB_FAIL_EDIT
+check "a failing gh pr edit exits 3" 3 "Resource not accessible"
+if grep -q Traceback <<<"$out"; then bad "a failing gh pr edit gives a message, not a traceback" "$out"; else ok; fi
+if [ -s "$tmp/body-file-path" ] && [ ! -e "$(cat "$tmp/body-file-path")" ]; then ok; else bad "the temp body file is removed after a failing edit" "$(cat "$tmp/body-file-path" 2>/dev/null)"; fi
+
+printf 'caf\xe9\n- [ ] Box\n' > "$tmp/latin1.md"
+tick "$tmp/body.md" --file "$tmp/latin1.md" --box "Box" --evidence ok
+check "a --file that is not UTF-8 exits 3" 3 "UTF-8"
+if grep -q Traceback <<<"$out"; then bad "an undecodable --file gives a message, not a traceback" "$out"; else ok; fi
+
+printf -- '- [ ] Box\n' > "$tmp/readonly.md"; chmod 444 "$tmp/readonly.md"
+tick "$tmp/body.md" --file "$tmp/readonly.md" --box "Box" --evidence ok
+check "a --file that cannot be written exits 3" 3 "cannot write"
+if grep -q Traceback <<<"$out"; then bad "an unwritable --file gives a message, not a traceback" "$out"; else ok; fi
+chmod 644 "$tmp/readonly.md"
+
+# Non-ASCII box text and evidence come through gh as UTF-8, even when the
+# locale would decode gh's output as something else.
+printf -- '## Test plan\n\n- [ ] Café menu renders ✓\n' > "$tmp/utf8.md"
+printf -- '## Test plan\n\n- [x] Café menu renders ✓\n  - naïve check: ✓ at 09:00 UTC\n' > "$tmp/want-utf8.md"
+tick "$tmp/utf8.md" 7 --box "Café menu" --evidence "naïve check: ✓ at 09:00 UTC"
+check "a non-ASCII box is ticked" 0
+written_is "non-ASCII text survives the round trip through gh" "$tmp/want-utf8.md"
+export LC_ALL=en_US.ISO8859-1 PYTHONUTF8=0
+tick "$tmp/utf8.md" 7 --box "Café menu" --evidence "naïve check: ✓ at 09:00 UTC"
+unset LC_ALL PYTHONUTF8
+check "under a Latin-1 locale a non-ASCII box is still ticked" 0
+written_is "gh's output is decoded as UTF-8 whatever the locale" "$tmp/want-utf8.md"
 
 tick "$tmp/body.md" 7 --box "Lint is clean" --evidence "line one
 line two"

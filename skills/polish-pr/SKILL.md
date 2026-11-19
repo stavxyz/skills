@@ -176,6 +176,18 @@ Ensure all repo documentation, README(s), PR title, PR description, and docstrin
 
 Use atomic commits and push to the PR when finished.
 
+A review finding about a commit message (a wrong subject, a stale claim in a body) is fixed with `reword-commits.py`, the sibling of this SKILL.md. Write the edits to a JSON file, a list of objects with `old` and `new` and optionally `subject_prefix` and `every`; each entry must match exactly one commit unless it sets `"every": true`. Record the PR's head first, so the push command the helper prints leases against what the remote holds, then run the helper with `--dry-run`, read the diff, and run it again without `--dry-run`:
+
+```bash
+REMOTE_TIP=$(GH_REPO=<owner>/<repo> gh pr view <PR_NUMBER> --json headRefOid --jq .headRefOid)
+python3 "$CLAUDE_PLUGIN_ROOT/skills/polish-pr/reword-commits.py" \
+  --base "$(git merge-base <BASE_REMOTE>/<BASE_BRANCH> HEAD)" \
+  --remote-tip "$REMOTE_TIP" \
+  --replace <file.json> --dry-run
+```
+
+The helper changes messages, not content: every commit keeps its tree, author, and author date, the committer becomes whoever runs it, and signatures are made again only when `commit.gpgsign` is set. Push with the command it prints, as in Step 3 of the attribution sweep below, which also says what a refused push means.
+
 Any GitHub issues closed by this PR should be referred to in the PR description so that they automatically close when the PR gets merged. Once the PR is created/updated, monitor CI checks in the background to ensure they pass.
 
 ### How to monitor CI checks
@@ -237,31 +249,51 @@ Before the push that closes out polish-pr (the one that triggers the final CI ru
 ```bash
 git log --format="%H" $(git merge-base <BASE_REMOTE>/<BASE_BRANCH> HEAD)..HEAD | while read sha; do
   body=$(git show -s --format=%B "$sha")
-  if echo "$body" | grep -qE "Co-Authored-By: Claude|🤖 Generated with .*Claude|Generated with .*Claude Code"; then
+  if printf '%s\n' "$body" | grep -qiE \
+      -e '^ *([-*+] +)?Co-Authored-By: Claude' \
+      -e '^ *🤖 Generated with .*Claude' \
+      -e '^ *Generated with .*Claude Code'; then
     echo "ATTRIBUTED: $sha $(git show -s --format=%s $sha)"
   fi
 done
 ```
 
+The patterns match an attribution only where it stands as a line of its own (leading spaces allowed, and a list marker before the co-author trailer), in any letter case, so git's lowercase `Co-authored-by:` is caught and a sentence that merely mentions the rule is not. Step 3 removes lines with these same three patterns; change them in both places or in neither. They use only syntax that `grep -E` on macOS and Linux and Python's `re` read the same way, which is why leading whitespace is written as spaces.
+
 If the output is empty, proceed to push.
 
-If the output lists any SHAs, you MUST strip the attribution lines via `git filter-branch` and force-push. Do not push attributed commits "to be cleaned up later" — they will never be cleaned up later.
+If the output lists any SHAs, you MUST strip the attribution lines with the helper in Step 3 and force-push. Do not push attributed commits "to be cleaned up later": they will never be cleaned up later.
 
 ### Step 3 — Strip + force-push when attributions are found
 
-```bash
-FILTER_BRANCH_SQUELCH_WARNING=1 git filter-branch -f --msg-filter '
-  sed -e "/^Co-Authored-By: Claude/d" \
-      -e "/^🤖 Generated with/d" \
-      -e "/^Generated with .* Claude/d"
-' $(git merge-base <BASE_REMOTE>/<BASE_BRANCH> HEAD)..HEAD
-```
-
-Re-run the Step 2 grep to confirm zero attributions. Then:
+First record the head the PR has on GitHub, which is what the remote branch holds:
 
 ```bash
-git push --force-with-lease <HEAD_REMOTE> <branch-name>
+REMOTE_TIP=$(GH_REPO=<owner>/<repo> gh pr view <PR_NUMBER> --json headRefOid --jq .headRefOid)
 ```
+
+Then run `reword-commits.py` (beside this SKILL.md; `$CLAUDE_PLUGIN_ROOT/skills/polish-pr/` under the plugin install) with one `--drop-lines` per pattern the Step 2 check looks for:
+
+```bash
+python3 "$CLAUDE_PLUGIN_ROOT/skills/polish-pr/reword-commits.py" \
+  --base "$(git merge-base <BASE_REMOTE>/<BASE_BRANCH> HEAD)" \
+  --remote-tip "$REMOTE_TIP" --ignore-case \
+  --drop-lines '^ *([-*+] +)?Co-Authored-By: Claude' \
+  --drop-lines '^ *🤖 Generated with .*Claude' \
+  --drop-lines '^ *Generated with .*Claude Code'
+```
+
+Run it with `--dry-run` added first and read the diff: every removed line must be an attribution, and nothing else. Then run it without `--dry-run`.
+
+It rewrites the messages through `git commit-tree`: every commit keeps its tree, author, and author date, the committer becomes whoever runs it, signatures are made again only when `commit.gpgsign` is set (it prints a note when a signature is dropped), the working tree and index are not touched, and the old tip is parked at the `refs/rescue/reword/...` ref it names, created in the same transaction that moves the branch. It refuses (exit 1, nothing changed) a detached HEAD, a merge commit in the range, or a pattern that would delete a subject line; a subject that carries an attribution is fixed with `--replace` instead. When it refuses a merge commit, rebase onto `<BASE_REMOTE>/<BASE_BRANCH>` first, which makes the branch linear, re-run the project's test suite, and run the helper again.
+
+Re-run the Step 2 grep to confirm zero attributions. Then push with the command the helper printed:
+
+```bash
+git push --force-with-lease=<branch-name>:<REMOTE_TIP> <HEAD_REMOTE> HEAD:<branch-name>
+```
+
+The lease names what the remote was last seen to hold, the PR head recorded above, not the local tip before the rewrite: commits of this round that were never pushed would make the local tip a sha the remote has never had, and the push would be refused as stale. A bare `--force-with-lease` after a fetch would accept, and overwrite, a commit someone pushed to the PR in the meantime (land-pr names its lease for the same reason). If the push is refused, the head moved: stop and look at what was pushed. Never retry with a bare `--force`.
 
 Force-push to the **feature branch** is acceptable and required here. Force-push to `main`/`master` is forbidden by CLAUDE.md and would never apply at this stage anyway.
 
@@ -295,7 +327,7 @@ The exact items depend on the project AND the PR's surface area. Tailor accordin
 
 **Prefer items Claude can run autonomously.** When a step genuinely requires human judgment (visual polish, third-party UX, cross-browser compatibility you can't automate), call it out as `[manual]` in the plan so the user knows what falls to them. Don't pad the plan with manual items just to have a longer list.
 
-For each automatable item: do it, capture the evidence (curl output, screenshot, log line, test result), and update the PR description's Test plan section with the result inline. Mark items the user must do manually with `- [ ]` checkboxes; mark items you've already executed with `- [x]` plus a one-line evidence summary.
+For each automatable item: do it, capture the evidence (curl output, screenshot, log line, test result), and record it in the PR description's Test plan section. Write every item as an unticked `- [ ]` box, including the ones you are about to run. Once an item has run, record it with `tick-test-plan.py` from the land-pr skill (`"$CLAUDE_PLUGIN_ROOT/skills/land-pr/tick-test-plan.py"`, or the `land-pr` directory beside this one under a symlink install; land-pr's step 5 gives the command, with its arguments in single quotes so the shell leaves the evidence alone). It ticks the box and adds the one-line evidence as a nested line beneath it, and it refuses a box that is already ticked, so do not tick it by hand first. Items the user must do manually stay unticked and are marked `[manual]`.
 
 When CI is fully green (every required check has succeeded) AND every automatable test-plan item has been executed and documented AND the attribution sweep below returns empty AND "Verdict and what happens next" says this is a case that opens the browser (blessed, and not being landed), open the PR in the user's default browser via `GH_REPO=<owner>/<repo> gh pr view <number> --web` so they can review and merge it. Do this only after every required check has passed AND the test plan is populated AND the sweep is clean; do not open the browser while checks are still pending, any have failed, test-plan items remain undocumented, or attributed commits remain.
 

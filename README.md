@@ -62,7 +62,7 @@ On a **clean bless** — blessed with zero caveats (e.g. no deferrals, no net-ne
 /stavxyz:polish-pr 142
 ```
 
-The last-mile pass before a PR merges. It rebases onto the latest upstream, runs **two** code reviews in parallel (from `pr-review-toolkit` and `superpowers`), and fixes every finding in-PR rather than deferring. It also updates all docs, builds a test plan into the PR description, sweeps the branch for stray AI-attribution lines, and pushes. A run that ends blessed then lands the PR (see the verdict paragraph below).
+The last-mile pass before a PR merges. It rebases onto the latest upstream, runs **two** code reviews in parallel (from `pr-review-toolkit` and `superpowers`), and fixes every finding in-PR rather than deferring. It also updates all docs, builds a test plan into the PR description, sweeps the branch for stray AI-attribution lines (stripping them with `reword-commits.py`, which rewrites commit messages and keeps every tree, author, and author date; the committer becomes whoever runs it, and signatures are made again only when `commit.gpgsign` is set), and pushes. A run that ends blessed then lands the PR (see the verdict paragraph below).
 
 **`/stavxyz:polish-pr` has prerequisites.** It hard-requires both review systems to be installed and refuses to run in degraded (single-reviewer) mode:
 
@@ -95,7 +95,7 @@ For each PR, one at a time, because every merge moves the base under the PRs tha
 1. **Polish** with `/stavxyz:polish-pr <PR#>`, the skill itself and never reviewers dispatched by hand. Only a `BLESSED` verdict goes further.
 2. **Gate**, immediately before merging: CI green on the blessed commit, then `merge-gate.sh`, which passes only when the PR is open, is not a draft, still has the blessed commit as its head, is zero commits behind its base, and is mergeable and not blocked. An unreadable or not-yet-computed answer from GitHub is "unknown" and is never treated as a pass.
 3. **Merge** with `gh pr merge --match-head-commit <blessed sha>`, using the repo's documented or customary merge method, and read the result from the PR's state, not from the exit code.
-4. **Verify**: the whole diff reached the base, the base branch's own runs for the merge commit (the deploy, where there is one) succeeded, what is running is the merge, and the change does what it was meant to do where it runs. Evidence goes into the PR's test plan. "Merged", "deployed", and "verified" are reported as three different states.
+4. **Verify**: the whole diff reached the base, the base branch's own runs for the merge commit (the deploy, where there is one) succeeded, what is running is the merge, and the change does what it was meant to do where it runs. Evidence goes into the PR's test plan, one box at a time, through `tick-test-plan.py`, which refuses a box it cannot match exactly once. "Merged", "deployed", and "verified" are reported as three different states.
 
 Then, once for the run: leftovers are fixed in a follow-up PR or folded into an existing issue, and a new issue is filed only for something that needs your decision, waits on something that has not happened, or needs its own spec. The other Claude Code sessions working on the same project get one message each with the merge commit, what is verified, and what touches their files (this uses `ListAgents` and `SendMessage`; without them, or with no peer session, that step is skipped and reported). The run then picks the next piece of work that collides with nobody's files and starts it, and the closing report gives issues opened and closed as two counts.
 
@@ -146,18 +146,20 @@ Installed this way they are **user skills**, which are not namespaced — so you
 │   ├── polish-pr/
 │   │   ├── SKILL.md
 │   │   ├── resolve-pr-remotes.sh
+│   │   ├── reword-commits.py
 │   │   └── wait-for-pr-checks.sh
 │   ├── land-pr/
 │   │   ├── SKILL.md
-│   │   └── merge-gate.sh
+│   │   ├── merge-gate.sh
+│   │   └── tick-test-plan.py
 │   └── reboot-ready/
 │       ├── SKILL.md
 │       └── census.sh
 └── tests/                 # dev-only, not part of the installed plugin
     ├── validate/          # automated tests for check-citations.py
     ├── validate-fixtures/ # sample specs for exercising validate by hand
-    ├── polish-pr/         # automated tests for resolve-pr-remotes.sh and wait-for-pr-checks.sh
-    ├── land-pr/           # automated tests for merge-gate.sh
+    ├── polish-pr/         # automated tests for resolve-pr-remotes.sh, reword-commits.py, and wait-for-pr-checks.sh
+    ├── land-pr/           # automated tests for merge-gate.sh and tick-test-plan.py
     ├── skill-bodies/      # no skill body may hold a positional token that argument substitution would replace
     └── reboot-ready/      # automated tests for census.sh
 ```

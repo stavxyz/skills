@@ -333,6 +333,40 @@ else
   bad "the slashed branch's rescue ref names the old tip, and main is untouched" "$(rescue_refs)"
 fi
 
+# --- messages the helper cannot represent ----------------------------------
+# A commit with an encoding header would be rewritten as mis-declared UTF-8,
+# and git commit-tree re-encodes a message that is not valid UTF-8, so either
+# one, among the commits that would be recreated, is refused. The refusal
+# names the commit, and printing its bytes must not raise.
+mkrepo
+printf 'fix: legacy encoding\n\nCaf\xe9 menu retries.\n' > "$tmp/latin1"
+echo x >> "$R/l.txt"; git -C "$R" add l.txt
+GIT_AUTHOR_DATE="2026-01-05 10:00:00 +0000" git -C "$R" -c i18n.commitEncoding=ISO-8859-1 commit -q -F "$tmp/latin1"
+t=$(tip)
+rw --base base --drop-lines '^Co-Authored-By:'
+check "a commit with an encoding header is refused" 1 "encoding"
+unchanged "encoding header" "$t"
+
+mkrepo
+tree=$(git -C "$R" rev-parse 'HEAD^{tree}')
+# commit-tree would re-encode the byte, so the object is written directly.
+raw=$(printf 'tree %s\nparent %s\nauthor Ada Example <ada@example.com> 1767607200 +0000\ncommitter Cy Example <cy@example.com> 1767607200 +0000\n\nfix: raw \xff byte\n\nThe widget waits.\n' \
+  "$tree" "$(git -C "$R" rev-parse HEAD)" | git -C "$R" hash-object -t commit -w --stdin)
+git -C "$R" update-ref refs/heads/main "$raw"
+t=$(tip)
+json '[{"old": "widget waits", "new": "widget waits longer"}]'
+# A strict UTF-8 stdout is what a UTF-8 terminal gives Python; the C locale
+# the tests may run under would hide the error.
+export PYTHONIOENCODING=utf-8:strict
+rw --base base --replace "$tmp/replace.json" --dry-run
+check "a message that is not UTF-8 is refused, in a dry run too" 1 "not valid UTF-8"
+if grep -q Traceback <<<"$out"; then bad "printing undecodable bytes must not raise" "$out"; else ok; fi
+rw --base base --replace "$tmp/replace.json"
+check "a message that is not UTF-8 is refused" 1 "not valid UTF-8"
+if grep -q Traceback <<<"$out"; then bad "the refusal must not raise on undecodable bytes" "$out"; else ok; fi
+unchanged "message not UTF-8" "$t"
+unset PYTHONIOENCODING
+
 # --- --remote-tip names the lease ------------------------------------------
 # The remote holds an ancestor of the local tip when the round's commits were
 # never pushed; the lease must name what the remote holds, as the caller says.

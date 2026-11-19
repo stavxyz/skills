@@ -45,12 +45,17 @@ remote-tracking ref to fill it in: a fetch can have moved that ref to a commit
 nobody reviewed, which is the commit a named lease exists to protect, and the
 local old tip is wrong whenever some of the branch was never pushed.
 
+A commit that would be recreated and carries an encoding header, or whose
+message is not valid UTF-8, is refused: git commit-tree would write it back
+as UTF-8 and change its bytes.
+
 Exit statuses:
   0  rewritten, or nothing to do
-  1  refused: detached HEAD, empty range, merge commit in the range, an edit
-     that matches no commit, several commits, or several places in one
-     message, a pattern that matches a subject, a message that would become
-     empty, or a branch that moved during the rewrite
+  1  refused: detached HEAD, empty range, merge commit in the range, a
+     recreated commit with an encoding header or a message that is not
+     UTF-8, an edit that matches no commit, several commits, or several
+     places in one message, a pattern that matches a subject, a message that
+     would become empty, or a branch that moved during the rewrite
   3  a usage error, or a failing git
 
 Why a script: sessions kept driving `git rebase -i` through editor hooks or
@@ -107,9 +112,16 @@ def out(args):
 def read_commit(sha):
     raw = git(["cat-file", "commit", sha]).stdout.decode("utf-8", "surrogateescape")
     header, _, message = raw.partition("\n\n")
-    info = {"sha": sha, "parents": [], "message": message}
+    info = {"sha": sha, "parents": [], "message": message, "encoding": None}
+    try:
+        message.encode("utf-8")
+        info["utf8"] = True
+    except UnicodeEncodeError:
+        info["utf8"] = False
     for line in header.split("\n"):
-        if line.startswith("tree "):
+        if line.startswith("encoding "):
+            info["encoding"] = line[9:]
+        elif line.startswith("tree "):
             info["tree"] = line[5:]
         elif line.startswith("parent "):
             info["parents"].append(line[7:])
@@ -176,6 +188,10 @@ def apply_drop(commits, patterns, messages):
 
 
 def main(argv):
+    # Messages are decoded with surrogateescape; printing one that is not
+    # UTF-8 must not raise on a strict terminal.
+    for stream in (sys.stdout, sys.stderr):
+        stream.reconfigure(errors="replace")
     parser = Parser(
         prog="reword-commits.py",
         description="Change commit messages on a branch without touching what the commits contain.",
@@ -183,9 +199,10 @@ def main(argv):
         epilog=(
             "Exit statuses:\n"
             "  0  rewritten, or nothing to do\n"
-            "  1  refused (detached HEAD, empty range, merge in the range, an edit that\n"
-            "     does not match exactly as required, a pattern matching a subject, an\n"
-            "     empty message, or a branch that moved during the rewrite)\n"
+            "  1  refused (detached HEAD, empty range, merge in the range, an encoding\n"
+            "     header or a message that is not UTF-8, an edit that does not match\n"
+            "     exactly as required, a pattern matching a subject, an empty message,\n"
+            "     or a branch that moved during the rewrite)\n"
             "  3  a usage error, or a failing git"
         ),
     )
@@ -265,6 +282,22 @@ def main(argv):
             raise Refused("a message would become empty:\n" + "\n".join(describe(c) for c in empty))
 
         changed = [i for i, c in enumerate(commits) if messages[i] != c["message"]]
+        # git commit-tree writes a message as UTF-8 with no encoding header and
+        # re-encodes bytes that are not UTF-8, so these commits cannot be
+        # recreated with their messages intact.
+        unrepresentable = []
+        if changed:
+            for c in commits[changed[0]:]:
+                if c["encoding"]:
+                    unrepresentable.append(f"{describe(c)} (carries an encoding header: {c['encoding']})")
+                elif not c["utf8"]:
+                    unrepresentable.append(f"{describe(c)} (its message is not valid UTF-8)")
+        if unrepresentable:
+            raise Refused(
+                "these commits would be recreated, and their messages cannot be kept exactly:\n"
+                + "\n".join(unrepresentable)
+            )
+
         if not changed:
             print("nothing to change: no commit message in the range would differ")
             return 0

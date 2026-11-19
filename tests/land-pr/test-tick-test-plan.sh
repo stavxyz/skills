@@ -336,6 +336,29 @@ PY
 written_is "every batch entry is applied" "$tmp/want6.md"
 if [ "$(grep -c '^pr edit' "$tmp/gh.log")" = "1" ]; then ok; else bad "a batch writes once" "$(cat "$tmp/gh.log")"; fi
 
+cat > "$tmp/batch-twice.json" <<'EOF'
+[
+  {"box": "Lint is clean", "evidence": "clean"},
+  {"box": "Lint is clean", "evidence": "clean again"}
+]
+EOF
+tick "$tmp/body.md" 7 --from "$tmp/batch-twice.json"
+check "two entries that tick the same box are refused" 1 "two entries tick the same box"
+nothing_written "two ticks of one box"
+
+# A box and a box nested under it, in one batch: each note sits with its own box.
+printf -- '- [ ] Parent\n  - [ ] Child\n- [ ] Other\n' > "$tmp/nested.md"
+cat > "$tmp/batch-nested.json" <<'EOF'
+[
+  {"box": "Parent", "evidence": "parent ran"},
+  {"box": "Child", "evidence": "child ran"}
+]
+EOF
+tick "$tmp/nested.md" 7 --from "$tmp/batch-nested.json"
+check "a batch with a box and its nested box succeeds" 0
+printf -- '- [x] Parent\n  - [x] Child\n    - child ran\n  - parent ran\n- [ ] Other\n' > "$tmp/want-nested.md"
+written_is "the nested box's note comes first, under it, then the parent's" "$tmp/want-nested.md"
+
 # A misspelt key must not turn an annotation into a tick.
 cat > "$tmp/batch-typo.json" <<'EOF'
 [{"box": "Lint is clean", "evidence": "two warnings remain", "note-only": true}]
@@ -399,6 +422,7 @@ check "neither a PR nor --file is a usage error" 3
 
 tick "$tmp/body.md" 7 --help
 check "--help lists the exit statuses" 0 "Exit statuses"
+check "--help lists the same-box refusal under exit 1" 0 "two entries tick"
 
 if [ "$fail" -eq 0 ]; then
   printf 'ok: %d tick-test-plan cases passed\n' "$pass"

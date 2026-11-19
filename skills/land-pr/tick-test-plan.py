@@ -42,8 +42,8 @@ missing final newline.
 
 Exit statuses:
   0  done, or nothing to change under --dry-run
-  1  a box could not be resolved (no match, or more than one), or is already
-     ticked; nothing was written
+  1  a box could not be resolved (no match, or more than one), is already
+     ticked, or is ticked by two entries of one batch; nothing was written
   3  a usage error, or a failing gh
 
 Why a script: the inline version of this was retyped in session after session,
@@ -323,8 +323,9 @@ def main(argv):
         epilog=(
             "Exit statuses:\n"
             "  0  done, or nothing to change under --dry-run\n"
-            "  1  a box could not be resolved (no match, or more than one), or is\n"
-            "     already ticked; nothing was written\n"
+            "  1  a box could not be resolved (no match, or more than one), is\n"
+            "     already ticked, or is ticked by two entries of one batch; nothing\n"
+            "     was written\n"
             "  3  a usage error, or a failing gh"
         ),
     )

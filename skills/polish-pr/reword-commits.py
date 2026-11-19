@@ -7,8 +7,11 @@ Usage:
                     [--ignore-case] [--remote-tip <sha>] [--dry-run]
 
 What it decides: that a message edit lands on exactly the commits it was meant
-for, and that nothing but messages changes. Every rewritten commit keeps its
-tree, author, and author date.
+for, and that the content does not change. Every rewritten commit keeps its
+tree, author, and author date. Its committer becomes whoever runs the tool,
+with the current date, as after a rebase, and it is signed only when
+commit.gpgsign is set; when signing is off and a commit that would be
+recreated carried a signature, the tool says so in one line before rewriting.
 
 The range is <base>..HEAD on the current branch, oldest first, and must be
 linear: a detached HEAD, an empty range, or a merge commit in it is refused.
@@ -112,7 +115,7 @@ def out(args):
 def read_commit(sha):
     raw = git(["cat-file", "commit", sha]).stdout.decode("utf-8", "surrogateescape")
     header, _, message = raw.partition("\n\n")
-    info = {"sha": sha, "parents": [], "message": message, "encoding": None}
+    info = {"sha": sha, "parents": [], "message": message, "encoding": None, "signed": False}
     try:
         message.encode("utf-8")
         info["utf8"] = True
@@ -121,6 +124,8 @@ def read_commit(sha):
     for line in header.split("\n"):
         if line.startswith("encoding "):
             info["encoding"] = line[9:]
+        elif line.startswith(("gpgsig ", "gpgsig-sha256 ")):
+            info["signed"] = True
         elif line.startswith("tree "):
             info["tree"] = line[5:]
         elif line.startswith("parent "):
@@ -322,6 +327,12 @@ def main(argv):
 
         sign = out(["config", "--type=bool", "--default=false", "commit.gpgsign"]) == "true"
         first = changed[0]
+        signed = sum(1 for c in commits[first:] if c["signed"])
+        if signed and not sign:
+            print(
+                f"note: {signed} commit(s) that would be recreated carried a signature; "
+                "commit.gpgsign is off, so the rewritten commits are unsigned"
+            )
         new_shas = [c["sha"] for c in commits[:first]]
         parent = commits[first]["parents"][0] if commits[first]["parents"] else None
         for i in range(first, len(commits)):

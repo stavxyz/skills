@@ -367,6 +367,37 @@ if grep -q Traceback <<<"$out"; then bad "the refusal must not raise on undecoda
 unchanged "message not UTF-8" "$t"
 unset PYTHONIOENCODING
 
+# --- signatures ---------------------------------------------------------------
+# A stub signing program stands in for gpg: it reads the payload, reports the
+# status line git waits for, and prints a fixed signature block.
+cat > "$tmp/fake-gpg" <<'GPG'
+#!/usr/bin/env bash
+cat > /dev/null
+echo "[GNUPG:] SIG_CREATED D 1 8 00 1767607200 0000000000000000000000000000000000000000" >&2
+printf -- '-----BEGIN PGP SIGNATURE-----\n\nc3R1Yg==\n-----END PGP SIGNATURE-----\n'
+GPG
+chmod +x "$tmp/fake-gpg"
+
+mkrepo
+git -C "$R" config gpg.program "$tmp/fake-gpg"
+git -C "$R" config user.signingkey example-key
+git -C "$R" config commit.gpgsign true
+json '[{"old": "retries twice", "new": "retries three times"}]'
+rw --base base --replace "$tmp/replace.json"
+check "with commit.gpgsign set the rewrite succeeds" 0
+if git -C "$R" cat-file commit "$(tip)" | grep -q '^gpgsig '; then ok; else bad "rewritten commits are signed when commit.gpgsign is set" "$(git -C "$R" cat-file commit "$(tip)")"; fi
+if grep -q "carried a signature" <<<"$out"; then bad "no signature note when commits are re-signed" "$out"; else ok; fi
+
+# Signed originals, signing now off: the signatures are dropped, and it says so.
+git -C "$R" config commit.gpgsign false
+rw --base base --drop-lines '^Co-Authored-By:'
+check "signed originals with signing off are rewritten" 0 "2 commit(s) that would be recreated carried a signature"
+if git -C "$R" cat-file commit "$(tip)" | grep -q '^gpgsig '; then bad "with signing off the new commits are unsigned"; else ok; fi
+
+mkrepo
+rw --base base --drop-lines '^Co-Authored-By:'
+if grep -q "carried a signature" <<<"$out"; then bad "no signature note when nothing was signed" "$out"; else ok; fi
+
 # --- --remote-tip names the lease ------------------------------------------
 # The remote holds an ancestor of the local tip when the round's commits were
 # never pushed; the lease must name what the remote holds, as the caller says.

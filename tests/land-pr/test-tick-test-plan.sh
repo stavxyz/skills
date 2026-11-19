@@ -198,6 +198,22 @@ tick "$tmp/body.md" 7 --box "not a box inside" --evidence "ok"
 check "a box-shaped line inside a code fence is not a box" 1 "no box"
 nothing_written "fenced line"
 
+# --- an exact match wins ------------------------------------------------------
+# A box whose whole text is the start of another box's text must still be
+# selectable; when exactly one box's text equals --box, it is the one.
+printf '## Test plan\n\n- [ ] Deploy\n- [ ] Deploy to prod\n' > "$tmp/exact.md"
+tick "$tmp/exact.md" 7 --box "Deploy" --evidence "deployed"
+check "an exact match is taken over a longer box that starts the same" 0
+printf '## Test plan\n\n- [x] Deploy\n  - deployed\n- [ ] Deploy to prod\n' > "$tmp/want-exact.md"
+written_is "the exactly matching box is ticked" "$tmp/want-exact.md"
+tick "$tmp/exact.md" 7 --box "Deploy to" --evidence "deployed"
+printf '## Test plan\n\n- [ ] Deploy\n- [x] Deploy to prod\n  - deployed\n' > "$tmp/want-exact2.md"
+written_is "a prefix that only one box starts with still selects it" "$tmp/want-exact2.md"
+printf '## Test plan\n\n- [ ] Deploy\n- [ ] Deploy\n- [ ] Deploy to prod\n' > "$tmp/exact2.md"
+tick "$tmp/exact2.md" 7 --box "Deploy" --evidence "deployed"
+check "two exact matches are still ambiguous" 1 "ambiguous"
+nothing_written "two exact matches"
+
 # --- already ticked, and --note-only ------------------------------------------
 tick "$tmp/body.md" 7 --box "Already done" --evidence "again"
 check "an already ticked box is refused without --note-only" 1 "already ticked"

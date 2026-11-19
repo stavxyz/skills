@@ -14,7 +14,8 @@ and that exactly one line is. A wrong or ambiguous match changes nothing.
 A box is a line that starts, after optional indentation, with "- [ ] " or
 "- [x] " (any case of x). --box matches a box whose text after the marker
 starts with the given text, compared exactly; a box that merely contains the
-text later in its line does not match. With --under, only boxes below a
+text later in its line does not match. When exactly one candidate's text
+equals --box, it is taken even if other boxes start with the same text. With --under, only boxes below a
 heading whose text contains the given text are candidates, up to the next
 heading of the same or a higher level. Lines inside fenced code blocks are
 neither boxes nor headings.
@@ -161,6 +162,11 @@ def resolve(lines, boxes, headings, entry):
     if entry.get("under") is not None:
         scope = [b for b in boxes if under(b["index"], headings, entry["under"])]
     matches = [b for b in scope if b["text"].startswith(entry["box"])]
+    # Without this, a box whose whole text starts a longer box's text could
+    # never be selected.
+    exact = [b for b in matches if b["text"] == entry["box"]]
+    if len(exact) == 1:
+        matches = exact
     where = f" under a heading containing {entry['under']!r}" if entry.get("under") is not None else ""
     if len(matches) == 1:
         box = matches[0]

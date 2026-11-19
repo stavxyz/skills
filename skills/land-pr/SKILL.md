@@ -151,10 +151,12 @@ A merged PR is merged. It is not deployed and it is not verified until the check
 5. **Record the evidence on the PR.** Tick each executed test-plan box in the PR description with a one-line result (command, UTC time, and outcome), leave `[manual]` items unticked and list them in the report, and follow the repo's convention if it wants a verification comment. Use the helper, which reads the description fresh, ticks exactly one box, and adds the evidence as a nested line beneath it:
 
    ```bash
-   python3 "$CLAUDE_PLUGIN_ROOT/skills/land-pr/tick-test-plan.py" <PR_NUMBER> --repo <owner>/<repo> --box "<start of the box's text>" --evidence "<command, UTC time, and outcome>"
+   python3 "$CLAUDE_PLUGIN_ROOT/skills/land-pr/tick-test-plan.py" <PR_NUMBER> --repo <owner>/<repo> --box '<start of the box text>' --evidence '<command, UTC time, and outcome>'
    ```
 
-   If `$CLAUDE_PLUGIN_ROOT` is unset (a symlink install), use the sibling `tick-test-plan.py` beside this SKILL.md. Add `--under "<heading text>"` when two boxes start with the same text under different headings, `--note-only` to annotate a box that ran and was not met as written without ticking it, and `--from <file.json>` to record several boxes in one write. Exit 1 means the box matched nothing, matched more than one box, or is already ticked, and nothing was written; the output lists the candidates. A PR with no test plan gets a "Post-merge verification" section holding the same lines, added with `gh pr edit <PR_NUMBER> --body-file <file>` starting from the current body.
+   Keep the arguments in single quotes: inside double quotes the shell runs backticks and `$(...)` and expands dollar signs before the helper sees them, and evidence usually holds a command, so the PR would record the command's output instead, after running it. Text that contains a single quote goes through `--from <file.json>`.
+
+   If `$CLAUDE_PLUGIN_ROOT` is unset (a symlink install), use the sibling `tick-test-plan.py` beside this SKILL.md. Add `--under '<heading text>'` when two boxes start with the same text under different headings, `--note-only` to annotate a box that ran and was not met as written without ticking it, and `--from <file.json>` to record several boxes in one write. Exit 1 means the box matched nothing, matched more than one box, or is already ticked, and nothing was written; the output lists the candidates. A PR with no test plan gets a "Post-merge verification" section holding the same lines, added with `gh pr edit <PR_NUMBER> --body-file <file>` starting from the current body.
 6. **Close what the merge resolved.** `gh pr view <PR_NUMBER> --json closingIssuesReferences`; any issue the change resolves that did not close by itself gets closed with the evidence.
 7. **Post-merge tasks the repo documents**: a release tag, a version announcement, an update instruction for users. Then clean up what this run created: worktrees, scratch databases, and review workspaces.
 

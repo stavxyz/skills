@@ -214,6 +214,65 @@ tick "$tmp/exact2.md" 7 --box "Deploy" --evidence "deployed"
 check "two exact matches are still ambiguous" 1 "ambiguous"
 nothing_written "two exact matches"
 
+# --- what is and is not a box ------------------------------------------------
+# tick_one <desc> <body printf> <want printf> <args...>: tick against a small
+# fixture and compare the whole result.
+tick_one() {
+  local desc=$1 body=$2 want=$3; shift 3
+  printf -- "$body" > "$tmp/one.md"
+  printf -- "$want" > "$tmp/one-want.md"
+  tick "$tmp/one.md" 7 "$@"
+  check "$desc: exit 0" 0
+  written_is "$desc" "$tmp/one-want.md"
+}
+# no_box <desc> <body printf> <args...>: the call must find no box.
+no_box() {
+  local desc=$1 body=$2; shift 2
+  printf -- "$body" > "$tmp/one.md"
+  tick "$tmp/one.md" 7 "$@"
+  check "$desc" 1 "no box"
+  nothing_written "$desc"
+}
+
+no_box "a box inside an HTML comment is not a box" \
+  '## Test plan\n\n<!--\n- [ ] Hidden box\n-->\n- [ ] Shown box\n' --box "Hidden" --evidence ok
+tick_one "a box after an HTML comment is still a box" \
+  '## Test plan\n\n<!--\n- [ ] Hidden box\n-->\n- [ ] Shown box\n' \
+  '## Test plan\n\n<!--\n- [ ] Hidden box\n-->\n- [x] Shown box\n  - ok\n' --box "Shown" --evidence ok
+no_box "a heading inside an HTML comment does not open a section" \
+  '## Pre\n\n<!--\n## Hidden\n-->\n- [ ] Check\n' --under "Hidden" --box "Check" --evidence ok
+no_box "a box inside an indented fence is not a box" \
+  '## Test plan\n\n    ```\n- [ ] Fenced box\n    ```\n' --box "Fenced" --evidence ok
+no_box "a line with an info string does not close a fence" \
+  '## Test plan\n\n```\n```bash\n- [ ] Still fenced\n```\n' --box "Still fenced" --evidence ok
+tick_one "evidence goes after a nested fence, not inside it" \
+  '- [ ] Run the script\n  ```bash\necho column-zero line\n  ```\n- [ ] Next\n' \
+  '- [x] Run the script\n  ```bash\necho column-zero line\n  ```\n  - ran\n- [ ] Next\n' --box "Run the script" --evidence ran
+tick_one "a star bullet is a box and keeps its marker" \
+  '* [ ] Star box\n' '* [x] Star box\n  - ok\n' --box "Star" --evidence ok
+tick_one "a plus bullet is a box and keeps its marker" \
+  '+ [ ] Plus box\n' '+ [x] Plus box\n  - ok\n' --box "Plus" --evidence ok
+tick_one "an ordered item is a box, and its evidence nests under its text" \
+  '1. [ ] Ordered box\n2. [ ] Second\n' '1. [x] Ordered box\n   - ok\n2. [ ] Second\n' --box "Ordered" --evidence ok
+tick_one "an ordered item with a parenthesis is a box" \
+  '1) [ ] Paren box\n' '1) [x] Paren box\n   - ok\n' --box "Paren" --evidence ok
+tick_one "a tab-indented box is a box" \
+  '- [ ] Parent\n\t- [ ] Tabbed box\n' '- [ ] Parent\n\t- [x] Tabbed box\n\t  - ok\n' --box "Tabbed" --evidence ok
+tick_one "a nested box gets its evidence beneath itself" \
+  '- [ ] Parent\n  - [ ] Child\n- [ ] Other\n' '- [ ] Parent\n  - [x] Child\n    - ok\n- [ ] Other\n' --box "Child" --evidence ok
+tick_one "a parent box gets its evidence after its nested box" \
+  '- [ ] Parent\n  - [ ] Child\n- [ ] Other\n' '- [x] Parent\n  - [ ] Child\n  - ok\n- [ ] Other\n' --box "Parent" --evidence ok
+tick_one "a # that is part of a heading's text is kept" \
+  '## C#\n- [ ] Check\n## C\n- [ ] Check\n' '## C#\n- [x] Check\n  - ok\n## C\n- [ ] Check\n' --under "C#" --box "Check" --evidence ok
+no_box "seven hashes are not a heading" \
+  '## Alpha\n####### Seven\n- [ ] Check\n' --under "Seven" --box "Check" --evidence ok
+# A '# line' inside a fence must not close the section it sits in.
+fenced_heading='## Pre\n```bash\n# Post\n```\n- [ ] Check\n## Post\n- [ ] Check\n'
+tick_one "a box after a fenced # line is still under its heading" \
+  "$fenced_heading" '## Pre\n```bash\n# Post\n```\n- [x] Check\n  - ok\n## Post\n- [ ] Check\n' --under "Pre" --box "Check" --evidence ok
+tick_one "the fenced # line opens no section of its own" \
+  "$fenced_heading" '## Pre\n```bash\n# Post\n```\n- [ ] Check\n## Post\n- [x] Check\n  - ok\n' --under "Post" --box "Check" --evidence ok
+
 # --- already ticked, and --note-only ------------------------------------------
 tick "$tmp/body.md" 7 --box "Already done" --evidence "again"
 check "an already ticked box is refused without --note-only" 1 "already ticked"

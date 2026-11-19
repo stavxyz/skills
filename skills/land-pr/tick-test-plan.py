@@ -11,20 +11,25 @@ Usage:
 What it decides: which line of the description is the box being recorded,
 and that exactly one line is. A wrong or ambiguous match changes nothing.
 
-A box is a line that starts, after optional indentation, with "- [ ] " or
-"- [x] " (any case of x). --box matches a box whose text after the marker
-starts with the given text, compared exactly; a box that merely contains the
-text later in its line does not match. When exactly one candidate's text
-equals --box, it is taken even if other boxes start with the same text. With --under, only boxes below a
-heading whose text contains the given text are candidates, up to the next
-heading of the same or a higher level. Lines inside fenced code blocks are
-neither boxes nor headings.
+A box is a line that starts, after optional indentation, with a list marker
+("-", "*", "+", "1." or "1)") followed by " [ ] " or " [x] " (any case of
+x); GitHub renders all of these as task items, and an edit keeps the line's
+own marker. --box matches a box whose text after the marker starts with the
+given text, compared exactly; a box that merely contains the text later in
+its line does not match. When exactly one candidate's text equals --box, it
+is taken even if other boxes start with the same text. With --under, only
+boxes below a heading whose text contains the given text are candidates, up
+to the next heading of the same or a higher level. A heading is one to six
+hashes followed by whitespace or the end of the line. Lines inside fenced
+code blocks (at any indentation, closed only by a line of fence characters)
+and inside HTML comments are neither boxes nor headings.
 
 Without --note-only the box must be unticked; it is ticked, and the evidence
-is added as a nested item two spaces deeper than the box, after the box's
-existing nested lines. With --note-only the mark is left as it is and the
-evidence is added the same way, for a box that was checked and not met as
-written. --from takes a JSON list of objects with "box", "evidence", and
+is added as a nested item aligned with the box's text (two spaces past a
+bullet, three past "1."), after the box's existing nested lines, including a
+fenced block nested under it. With --note-only the mark is left as it is and
+the evidence is added the same way, for a box that was checked and not met
+as written. --from takes a JSON list of objects with "box", "evidence", and
 optionally "under" and "note_only", and any other key is refused; every
 entry is resolved against the one fresh description before anything is
 written.
@@ -62,9 +67,13 @@ GH = os.environ.get("TICK_TEST_PLAN_GH", "gh")
 EXIT_UNRESOLVED = 1
 EXIT_USAGE = 3
 
-BOX_RE = re.compile(r"^([ \t]*)- \[([ xX])\] (.*)$")
-HEADING_RE = re.compile(r"^ {0,3}(#{1,6})(?:[ \t]+(.*?))?[ \t]*#*[ \t]*$")
-FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+# GitHub renders -, *, +, and ordered items (1. or 1)) as task items.
+BOX_RE = re.compile(r"^([ \t]*)([-*+]|\d{1,9}[.)]) \[([ xX])\] (.*)$")
+# One to six hashes, then whitespace or the end of the line. A closing run of
+# hashes counts only after whitespace, so the # in "C#" stays in the text.
+HEADING_RE = re.compile(r"^ {0,3}(#{1,6})(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$")
+FENCE_OPEN_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})")
+FENCE_CLOSE_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})[ \t]*$")
 
 
 class Refused(Exception):
@@ -103,26 +112,41 @@ def indent_width(s):
 
 
 def scan(lines):
-    """Return (boxes, headings): boxes as dicts, headings as (index, level, text)."""
+    """Return (boxes, headings, region).
+
+    boxes are dicts, headings are (index, level, text) tuples, and region[i]
+    is the index of the line that opened the fenced block or HTML comment
+    line i sits in (its closing line included), or None outside one.
+    """
     boxes, headings = [], []
-    fence = None
+    region = [None] * len(lines)
+    fence = comment = None
     for i, (content, _) in enumerate(lines):
-        m = FENCE_RE.match(content)
+        if comment is not None:
+            region[i] = comment
+            if "-->" in content:
+                comment = None
+            continue
         if fence is not None:
-            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence):
+            region[i] = fence[0]
+            m = FENCE_CLOSE_RE.match(content)
+            if m and m.group(1)[0] == fence[1][0] and len(m.group(1)) >= len(fence[1]):
                 fence = None
             continue
+        m = FENCE_OPEN_RE.match(content)
         if m:
-            fence = m.group(1)
+            fence = (i, m.group(1))
             continue
         h = HEADING_RE.match(content)
+        b = BOX_RE.match(content)
         if h:
             headings.append((i, len(h.group(1)), h.group(2) or ""))
-            continue
-        b = BOX_RE.match(content)
-        if b:
-            boxes.append({"index": i, "indent": b.group(1), "mark": b.group(2), "text": b.group(3)})
-    return boxes, headings
+        elif b:
+            boxes.append({"index": i, "indent": b.group(1), "marker": b.group(2), "mark": b.group(3), "text": b.group(4)})
+        opened = content.rfind("<!--")
+        if opened != -1 and "-->" not in content[opened:]:
+            comment = i
+    return boxes, headings, region
 
 
 def under(box_index, headings, needle):
@@ -139,11 +163,16 @@ def under(box_index, headings, needle):
     return False
 
 
-def last_nested(lines, box):
+def last_nested(lines, region, box):
     """Index of the last line nested under the box (the box itself if none)."""
     width = indent_width(box["indent"])
     last = box["index"]
     for j in range(box["index"] + 1, len(lines)):
+        # A fence or comment that opened inside the box's nested content runs
+        # to its closing line, whatever the indentation of the lines within.
+        if region[j] is not None and region[j] > box["index"]:
+            last = j
+            continue
         content = lines[j][0]
         if content.strip() == "":
             continue
@@ -214,7 +243,7 @@ def check_entry(entry, n):
 
 def apply(text, entries):
     lines = split_lines(text)
-    boxes, headings = scan(lines)
+    boxes, headings, region = scan(lines)
     resolved = [resolve(lines, boxes, headings, e) for e in entries]
 
     ticking = {}
@@ -231,14 +260,17 @@ def apply(text, entries):
     # The sort is stable, so entries for one box keep their given order.
     inserts = {}
     for e, box in sorted(zip(entries, resolved), key=lambda p: -p[1]["index"]):
-        at = last_nested(lines, box)
-        inserts.setdefault(at, []).append(box["indent"] + "  - " + e["evidence"])
+        at = last_nested(lines, region, box)
+        # Nested content lines up with the box's text: two spaces past a
+        # bullet, three past "1.".
+        pad = " " * (len(box["marker"]) + 1)
+        inserts.setdefault(at, []).append(box["indent"] + pad + "- " + e["evidence"])
 
     out = []
     for i, (content, eol) in enumerate(lines):
         if i in ticking:
             b = BOX_RE.match(content)
-            content = f"{b.group(1)}- [x] {b.group(3)}"
+            content = f"{b.group(1)}{b.group(2)} [x] {b.group(4)}"
         added = inserts.get(i, [])
         if not added:
             out.append(content + eol)
@@ -253,7 +285,7 @@ def apply(text, entries):
 
 
 def summary(text):
-    boxes, _ = scan(split_lines(text))
+    boxes, _, _ = scan(split_lines(text))
     ticked = [b for b in boxes if b["mark"] != " "]
     left = [b for b in boxes if b["mark"] == " "]
     lines = [f"{len(ticked)} ticked, {len(left)} unticked"]

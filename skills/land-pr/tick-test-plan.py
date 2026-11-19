@@ -25,8 +25,9 @@ is added as a nested item two spaces deeper than the box, after the box's
 existing nested lines. With --note-only the mark is left as it is and the
 evidence is added the same way, for a box that was checked and not met as
 written. --from takes a JSON list of objects with "box", "evidence", and
-optionally "under" and "note_only"; every entry is resolved against the one
-fresh description before anything is written.
+optionally "under" and "note_only", and any other key is refused; every
+entry is resolved against the one fresh description before anything is
+written.
 
 The description is read fresh with `gh pr view <PR> --json body` at every run
 and written back with `gh pr edit <PR> --body-file` only when it changed.
@@ -190,6 +191,11 @@ def check_entry(entry, n):
     label = f"entry {n}: " if n is not None else ""
     if not isinstance(entry, dict):
         raise UsageError(f"{label}each --from entry must be an object")
+    # A misspelt key such as "note-only" would otherwise tick a box the caller
+    # meant only to annotate.
+    unknown = sorted(set(entry) - {"box", "evidence", "under", "note_only"})
+    if unknown:
+        raise UsageError(f"{label}unknown key(s) {', '.join(unknown)}; allowed: box, evidence, under, note_only")
     for key in ("box", "evidence"):
         if not isinstance(entry.get(key), str):
             raise UsageError(f"{label}{key!r} is required and must be a string")

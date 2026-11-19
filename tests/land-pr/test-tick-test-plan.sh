@@ -277,6 +277,14 @@ PY
 written_is "every batch entry is applied" "$tmp/want6.md"
 if [ "$(grep -c '^pr edit' "$tmp/gh.log")" = "1" ]; then ok; else bad "a batch writes once" "$(cat "$tmp/gh.log")"; fi
 
+# A misspelt key must not turn an annotation into a tick.
+cat > "$tmp/batch-typo.json" <<'EOF'
+[{"box": "Lint is clean", "evidence": "two warnings remain", "note-only": true}]
+EOF
+tick "$tmp/body.md" 7 --from "$tmp/batch-typo.json"
+check "an unknown key in a --from entry is a usage error" 3 "note-only"
+nothing_written "unknown --from key"
+
 # --- dry run ------------------------------------------------------------------
 tick "$tmp/body.md" 7 --box "Lint is clean" --evidence "clean" --dry-run
 check "--dry-run exits 0" 0

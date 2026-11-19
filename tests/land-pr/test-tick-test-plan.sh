@@ -422,7 +422,7 @@ check "neither a PR nor --file is a usage error" 3
 
 tick "$tmp/body.md" 7 --help
 check "--help lists the exit statuses" 0 "Exit statuses"
-check "--help lists the same-box refusal under exit 1" 0 "two entries tick"
+check "--help lists the same-box refusal under exit 1" 0 "ticked by two entries"
 
 if [ "$fail" -eq 0 ]; then
   printf 'ok: %d tick-test-plan cases passed\n' "$pass"

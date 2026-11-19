@@ -239,11 +239,16 @@ Before the push that closes out polish-pr (the one that triggers the final CI ru
 ```bash
 git log --format="%H" $(git merge-base <BASE_REMOTE>/<BASE_BRANCH> HEAD)..HEAD | while read sha; do
   body=$(git show -s --format=%B "$sha")
-  if echo "$body" | grep -qE "Co-Authored-By: Claude|🤖 Generated with .*Claude|Generated with .*Claude Code"; then
+  if printf '%s\n' "$body" | grep -qiE \
+      -e '^ *([-*+] +)?Co-Authored-By: Claude' \
+      -e '^ *🤖 Generated with .*Claude' \
+      -e '^ *Generated with .*Claude Code'; then
     echo "ATTRIBUTED: $sha $(git show -s --format=%s $sha)"
   fi
 done
 ```
+
+The patterns match an attribution only where it stands as a line of its own (leading spaces allowed, and a list marker before the co-author trailer), in any letter case, so git's lowercase `Co-authored-by:` is caught and a sentence that merely mentions the rule is not. Step 3 removes lines with these same three patterns; change them in both places or in neither. They use only syntax that `grep -E` on macOS and Linux and Python's `re` read the same way, which is why leading whitespace is written as spaces.
 
 If the output is empty, proceed to push.
 
@@ -262,11 +267,13 @@ Then run `reword-commits.py` (beside this SKILL.md; `$CLAUDE_PLUGIN_ROOT/skills/
 ```bash
 python3 "$CLAUDE_PLUGIN_ROOT/skills/polish-pr/reword-commits.py" \
   --base "$(git merge-base <BASE_REMOTE>/<BASE_BRANCH> HEAD)" \
-  --remote-tip "$REMOTE_TIP" \
-  --drop-lines 'Co-Authored-By: Claude' \
-  --drop-lines '🤖 Generated with .*Claude' \
-  --drop-lines 'Generated with .*Claude Code'
+  --remote-tip "$REMOTE_TIP" --ignore-case \
+  --drop-lines '^ *([-*+] +)?Co-Authored-By: Claude' \
+  --drop-lines '^ *🤖 Generated with .*Claude' \
+  --drop-lines '^ *Generated with .*Claude Code'
 ```
+
+Run it with `--dry-run` added first and read the diff: every removed line must be an attribution, and nothing else. Then run it without `--dry-run`.
 
 It rewrites only the messages, through `git commit-tree`: every commit keeps its tree, author, and author date, the working tree and index are not touched, and the old tip is parked at the `refs/rescue/...` ref it names. It refuses (exit 1, nothing changed) a detached HEAD, a merge commit in the range, or a pattern that would delete a subject line; a subject that carries an attribution is fixed with `--replace` instead.
 

@@ -4,7 +4,7 @@
 Usage:
   reword-commits.py --base <ref> --replace <file.json> [--remote-tip <sha>] [--dry-run]
   reword-commits.py --base <ref> --drop-lines '<regex>' [--drop-lines '<regex>' ...]
-                    [--remote-tip <sha>] [--dry-run]
+                    [--ignore-case] [--remote-tip <sha>] [--dry-run]
 
 What it decides: that a message edit lands on exactly the commits it was meant
 for, and that nothing but messages changes. Every rewritten commit keeps its
@@ -23,7 +23,9 @@ each to the messages as the earlier entries left them.
 
 --drop-lines removes every line of every message in the range that the
 regular expression matches (re.search), then trims trailing blank lines from
-that message. A pattern that matches a subject line is refused.
+that message. A pattern that matches a subject line is refused. --ignore-case
+matches the patterns in any letter case, as `grep -i` does, so one set of
+patterns can serve a grep that detects lines and this tool that removes them.
 
 The rewrite uses git commit-tree, not a rebase, so the index and working tree
 are never touched; that is safe because the tip's tree does not change, and
@@ -188,11 +190,14 @@ def main(argv):
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--replace", help="JSON list of {old, new, subject_prefix?, every?}")
     mode.add_argument("--drop-lines", action="append", help="remove lines matching this regex (repeatable)")
+    parser.add_argument("--ignore-case", "-i", action="store_true", help="match --drop-lines patterns in any letter case")
     parser.add_argument("--remote-tip", help="full sha the remote branch holds; the push lease names it")
     parser.add_argument("--dry-run", action="store_true", help="print each message diff and change nothing")
     args = parser.parse_args(argv)
 
     entries = patterns = None
+    if args.ignore_case and args.drop_lines is None:
+        parser.error("--ignore-case applies to --drop-lines")
     if args.replace is not None:
         try:
             with open(args.replace, encoding="utf-8") as fh:
@@ -212,7 +217,8 @@ def main(argv):
                 parser.error(f"entry {n}: 'every' must be true or false")
     else:
         try:
-            patterns = [re.compile(p) for p in args.drop_lines]
+            flags = re.IGNORECASE if args.ignore_case else 0
+            patterns = [re.compile(p, flags) for p in args.drop_lines]
         except re.error as exc:
             parser.error(f"invalid --drop-lines pattern: {exc}")
 

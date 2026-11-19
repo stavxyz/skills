@@ -321,6 +321,78 @@ rw --base base --replace "$tmp/replace.json" --remote-tip 1234567890abcdef123456
 check "a --remote-tip that is not in the repository is a usage error" 3 "not a commit"
 unchanged "unknown remote tip" "$t"
 
+# --- the attribution sweep exactly as SKILL.md writes it ---------------------
+# Step 2's detection loop and Step 3's helper command are read out of the
+# skill text and run as written, so the test fails when the text drifts. Both
+# must agree: whatever Step 3 removes, Step 2 then finds nothing, and a line
+# that only mentions the rule in a sentence is neither detected nor removed.
+SKILL="$SCRIPT_DIR/SKILL.md"
+section() {
+  python3 - "$SKILL" "$1" "$2" <<'EXTRACT'
+import re, sys
+text = open(sys.argv[1], encoding="utf-8").read()
+start, end = text.index(sys.argv[2]), text.index(sys.argv[3])
+blocks = re.findall(r"```bash\n(.*?)```", text[start:end], re.S)
+print([b for b in blocks if "reword-commits.py" in b or "ATTRIBUTED" in b][-1], end="")
+EXTRACT
+}
+detect=$(section "### Step 2" "### Step 3")
+strip=$(section "### Step 3" "### Step 4")
+detect=${detect//<BASE_REMOTE>\/<BASE_BRANCH>/base}
+strip=${strip//<BASE_REMOTE>\/<BASE_BRANCH>/base}
+if grep -q "ATTRIBUTED" <<<"$detect" && grep -q -- "--drop-lines" <<<"$strip"; then ok; else bad "Step 2 and Step 3 blocks are found in SKILL.md" "$detect
+---
+$strip"; fi
+# The patterns are the same text in both steps.
+pat2=$(grep -oE -- "-e '[^']*'" <<<"$detect" | sed "s/^-e //" | sort)
+pat3=$(grep -oE -- "--drop-lines '[^']*'" <<<"$strip" | sed "s/^--drop-lines //" | sort)
+if [ -n "$pat2" ] && [ "$pat2" = "$pat3" ]; then ok; else bad "Step 2 and Step 3 use the same patterns" "step 2:
+$pat2
+step 3:
+$pat3"; fi
+
+mkrepo
+commit "$R" 05 f.txt "feat: robot footer
+
+Body.
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+"
+commit "$R" 06 g.txt "fix: lower-case trailer
+
+Body.
+
+co-authored-by: claude <noreply@anthropic.com>
+"
+commit "$R" 07 h.txt "chore: listed trailer
+
+Changes:
+- one thing
+  - Co-Authored-By: Claude <noreply@anthropic.com>
+
+Generated with Claude Code
+"
+commit "$R" 08 i.txt "docs: describe the sweep
+
+Strip Co-Authored-By: Claude trailers, and the Generated with Claude Code footer.
+"
+prose=$(tip)
+before_detect=$(cd "$R" && bash -c "$detect")
+if [ "$(grep -c ATTRIBUTED <<<"$before_detect")" = "3" ] && ! grep -q "docs: describe the sweep" <<<"$before_detect"; then
+  ok
+else
+  bad "Step 2 detects the three attributed commits and not the prose one" "$before_detect"
+fi
+out=$(cd "$R" && CLAUDE_PLUGIN_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)" REMOTE_TIP=$(git rev-parse HEAD) bash -c "$strip" 2>&1); got=$?
+check "Step 3's command, as written, rewrites the branch" 0 "rewrote 3 message(s)"
+after_detect=$(cd "$R" && bash -c "$detect")
+if [ -z "$after_detect" ]; then ok; else bad "Step 2 finds nothing after Step 3" "$after_detect"; fi
+if [ "$(msg "$(tip)")" = "$(git -C "$R" cat-file commit "$prose" | sed '1,/^$/d')" ]; then ok; else bad "the prose commit's message is unchanged" "$(msg "$(tip)")"; fi
+listed=$(git -C "$R" log -1 --format=%B "$(git -C "$R" rev-parse HEAD~1)")
+if [ "$listed" = $'chore: listed trailer\n\nChanges:\n- one thing' ]; then ok; else bad "the indented trailer and the plain footer are removed" "$listed"; fi
+
 # --- usage --------------------------------------------------------------------
 mkrepo
 rw --replace "$tmp/replace.json"

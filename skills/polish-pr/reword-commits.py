@@ -96,12 +96,10 @@ class Parser(argparse.ArgumentParser):
 
 
 def git(args, stdin=None, env=None, check=True):
-    p = subprocess.run(
-        ["git"] + args,
-        input=stdin,
-        capture_output=True,
-        env=env,
-    )
+    try:
+        p = subprocess.run(["git"] + args, input=stdin, capture_output=True, env=env)
+    except OSError as exc:
+        raise UsageError(f"cannot run git: {exc}")
     if check and p.returncode != 0:
         err = p.stderr.decode("utf-8", "replace").strip()
         raise UsageError(f"git {' '.join(args[:2])} failed (exit {p.returncode}): {err}")
@@ -234,6 +232,11 @@ def main(argv):
         for n, e in enumerate(entries, 1):
             if not isinstance(e, dict) or not isinstance(e.get("old"), str) or not isinstance(e.get("new"), str):
                 parser.error(f"entry {n}: 'old' and 'new' are required strings")
+            # A misspelt key such as "subject-prefix" would otherwise widen the
+            # edit to every commit without a word.
+            unknown = sorted(set(e) - {"old", "new", "subject_prefix", "every"})
+            if unknown:
+                parser.error(f"entry {n}: unknown key(s) {', '.join(unknown)}; allowed: old, new, subject_prefix, every")
             if e["old"] == "":
                 parser.error(f"entry {n}: 'old' must not be empty")
             if not isinstance(e.get("subject_prefix", ""), str):

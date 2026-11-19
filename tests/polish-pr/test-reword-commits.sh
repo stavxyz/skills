@@ -499,6 +499,40 @@ rw --base base --drop-lines '('
 check "an invalid regular expression is a usage error" 3
 rw --help
 check "--help lists the exit statuses" 0 "Exit statuses"
+t=$(tip)
+json '[{"old": "retries twice", "new": "retries three times", "subject-prefix": "fix:"}]'
+rw --base base --replace "$tmp/replace.json"
+check "an unknown key in a --replace entry is a usage error" 3 "subject-prefix"
+unchanged "unknown key" "$t"
+mkdir -p "$tmp/no-git"
+# The interpreter's own path, since a version-manager shim needs a shell on PATH.
+py=$(python3 -c 'import sys; print(sys.executable)')
+out=$(cd "$R" && PATH="$tmp/no-git" "$py" "$RW" --base base --drop-lines x 2>&1); got=$?
+check "a git that cannot be started is exit 3" 3 "cannot run git"
+if grep -q Traceback <<<"$out"; then bad "a missing git gives a message, not a traceback" "$out"; else ok; fi
+
+# --- a root commit in the range ----------------------------------------------
+# The range can begin at a root commit (a base on an unrelated history); the
+# recreated root must stay parentless.
+mkrepo
+git -C "$R" checkout -q --orphan fresh
+git -C "$R" rm -rq --cached .
+commit "$R" 09 root.txt "feat: fresh root
+
+Co-Authored-By: Example Bot <bot@example.com>
+"
+commit "$R" 10 root.txt "fix: fresh follow-up"
+old_root=$(git -C "$R" rev-list --max-parents=0 fresh)
+old_root_tree=$(git -C "$R" rev-parse "$old_root^{tree}")
+out=$(cd "$R" && python3 "$RW" --base main --drop-lines '^Co-Authored-By:' 2>&1); got=$?
+check "a range that starts at a root commit is rewritten" 0 "rewrote 1 message(s)"
+new_root=$(git -C "$R" rev-list --max-parents=0 fresh)
+if [ "$new_root" != "$old_root" ] && [ "$(git -C "$R" rev-parse "$new_root^{tree}")" = "$old_root_tree" ] \
+   && [ "$(git -C "$R" rev-list --count fresh)" = "2" ]; then
+  ok
+else
+  bad "the new root has no parent and keeps its tree" "$(git -C "$R" log --format='%h %p %s' fresh)"
+fi
 
 if [ "$fail" -eq 0 ]; then
   printf 'ok: %d reword-commits cases passed\n' "$pass"

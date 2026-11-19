@@ -133,7 +133,15 @@ if [ "$n2" != "$c2" ] && [ "$n3" != "$c3" ]; then ok; else bad "the changed comm
 short=$(git -C "$R" rev-parse --short "$before_tip")
 if [ "$(git -C "$R" rev-parse "refs/rescue/main/$short" 2>/dev/null)" = "$before_tip" ]; then ok; else bad "the rescue ref points at the old tip" "$(rescue_refs)"; fi
 check "the rescue ref is announced" 0 "refs/rescue/main/$short"
-check "the push command names the old tip's full sha" 0 "git push --force-with-lease=main:$before_tip <remote> HEAD:main"
+# Without --remote-tip the helper cannot know what the remote holds, so the
+# lease is a placeholder with a line saying what goes there.
+check "without --remote-tip the push command carries a placeholder" 0 "git push --force-with-lease=main:<remote-tip> <remote> HEAD:main"
+check "the placeholder is explained" 0 "<remote-tip> is the sha the remote branch held"
+if grep -qF -- "--force-with-lease=main:$before_tip" <<<"$out"; then
+  bad "the local old tip must not be offered as the lease" "$out"
+else
+  ok
+fi
 check "the table shows the new short sha" 0 "$(git -C "$R" rev-parse --short "$n2")"
 if [ "$(git -C "$R" status --porcelain)" = "$status_before" ] && grep -q "local edit" "$R/a.txt" && [ -f "$R/untracked.txt" ]; then
   ok
@@ -295,6 +303,23 @@ if [ -e "$tmp/raced" ] && [ "$(git -C "$R" log -1 --format=%s main)" = "chore: s
 else
   bad "the commit that landed in the meantime is still the tip" "$(git -C "$R" log --oneline -3 main)"
 fi
+
+# --- --remote-tip names the lease ------------------------------------------
+# The remote holds an ancestor of the local tip when the round's commits were
+# never pushed; the lease must name what the remote holds, as the caller says.
+mkrepo; read -r c1 c2 c3 < <(shas | tr '\n' ' ')
+json '[{"old": "retries twice", "new": "retries three times"}]'
+rw --base base --replace "$tmp/replace.json" --remote-tip "$c2"
+check "with --remote-tip the push command names that sha" 0 "git push --force-with-lease=main:$c2 <remote> HEAD:main"
+if grep -qF "<remote-tip>" <<<"$out"; then bad "no placeholder is printed when --remote-tip is given" "$out"; else ok; fi
+
+mkrepo; t=$(tip)
+rw --base base --replace "$tmp/replace.json" --remote-tip abc123
+check "a short --remote-tip is a usage error" 3 "full 40-character"
+unchanged "short remote tip" "$t"
+rw --base base --replace "$tmp/replace.json" --remote-tip 1234567890abcdef1234567890abcdef12345678
+check "a --remote-tip that is not in the repository is a usage error" 3 "not a commit"
+unchanged "unknown remote tip" "$t"
 
 # --- usage --------------------------------------------------------------------
 mkrepo

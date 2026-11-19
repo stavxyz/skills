@@ -2,8 +2,9 @@
 """Change commit messages on a branch without touching what the commits contain.
 
 Usage:
-  reword-commits.py --base <ref> --replace <file.json> [--dry-run]
-  reword-commits.py --base <ref> --drop-lines '<regex>' [--drop-lines '<regex>' ...] [--dry-run]
+  reword-commits.py --base <ref> --replace <file.json> [--remote-tip <sha>] [--dry-run]
+  reword-commits.py --base <ref> --drop-lines '<regex>' [--drop-lines '<regex>' ...]
+                    [--remote-tip <sha>] [--dry-run]
 
 What it decides: that a message edit lands on exactly the commits it was meant
 for, and that nothing but messages changes. Every rewritten commit keeps its
@@ -31,6 +32,13 @@ shas. Before the branch moves, a rescue ref refs/rescue/<branch>/<short sha>
 is written at the old tip. The branch is moved with git update-ref naming the
 old tip as the expected value, so a branch that moved in the meantime is left
 alone. The tool never pushes; it prints the push command to run.
+
+The push lease names --remote-tip, the sha the caller knows the remote branch
+to hold (for a pull request, the head that was last reviewed). Without it the
+command carries a placeholder in that position. The tool never reads a
+remote-tracking ref to fill it in: a fetch can have moved that ref to a commit
+nobody reviewed, which is the commit a named lease exists to protect, and the
+local old tip is wrong whenever some of the branch was never pushed.
 
 Exit statuses:
   0  rewritten, or nothing to do
@@ -180,6 +188,7 @@ def main(argv):
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--replace", help="JSON list of {old, new, subject_prefix?, every?}")
     mode.add_argument("--drop-lines", action="append", help="remove lines matching this regex (repeatable)")
+    parser.add_argument("--remote-tip", help="full sha the remote branch holds; the push lease names it")
     parser.add_argument("--dry-run", action="store_true", help="print each message diff and change nothing")
     args = parser.parse_args(argv)
 
@@ -216,6 +225,13 @@ def main(argv):
         if p.returncode != 0:
             raise UsageError(f"--base {args.base} does not name a commit")
         old_tip = out(["rev-parse", "--verify", head_ref])
+        if args.remote_tip is not None:
+            # A short sha could resolve to a different commit later; the lease
+            # must name exactly one.
+            if not re.fullmatch(r"[0-9a-f]{40}", args.remote_tip):
+                raise UsageError(f"--remote-tip must be a full 40-character sha, got: {args.remote_tip}")
+            if git(["cat-file", "-e", f"{args.remote_tip}^{{commit}}"], check=False).returncode != 0:
+                raise UsageError(f"--remote-tip {args.remote_tip} is not a commit in this repository")
 
         listing = out(["rev-list", "--reverse", f"{args.base}..{old_tip}"])
         shas = listing.split() if listing else []
@@ -303,7 +319,13 @@ def main(argv):
             mark = "*" if m != c["message"] else " "
             print(f"  {mark} {short(c['sha'])} -> {short(new)}  {subject(m)}")
         print("push with:")
-        print(f"  git push --force-with-lease={branch}:{old_tip} <remote> HEAD:{branch}")
+        lease = args.remote_tip or "<remote-tip>"
+        print(f"  git push --force-with-lease={branch}:{lease} <remote> HEAD:{branch}")
+        if args.remote_tip is None:
+            print(
+                "  <remote-tip> is the sha the remote branch held before the rewrite (for a pull "
+                "request, the head you last reviewed); pass it as --remote-tip to have it filled in"
+            )
         return 0
     except Refused as exc:
         print(f"refused: {exc}", file=sys.stderr)

@@ -176,7 +176,7 @@ Ensure all repo documentation, README(s), PR title, PR description, and docstrin
 
 Use atomic commits and push to the PR when finished.
 
-A review finding about a commit message (a wrong subject, a stale claim in a body) is fixed with `reword-commits.py --base <merge-base> --replace <file.json>`, the sibling of this SKILL.md (`"$CLAUDE_PLUGIN_ROOT/skills/polish-pr/reword-commits.py"`). Each entry names the `old` text and its `new` text, and must match exactly one commit unless it says otherwise. The helper changes messages only: every commit keeps its tree, author, and author date, and it prints the push command to use.
+A review finding about a commit message (a wrong subject, a stale claim in a body) is fixed with `reword-commits.py --base <merge-base> --replace <file.json>`, the sibling of this SKILL.md (`"$CLAUDE_PLUGIN_ROOT/skills/polish-pr/reword-commits.py"`). Each entry names the `old` text and its `new` text, and must match exactly one commit unless it says otherwise. The helper changes messages only: every commit keeps its tree, author, and author date. Record the PR's head before rewording and pass it as `--remote-tip`, so the push command the helper prints leases against what the remote holds, exactly as in Step 3 of the attribution sweep below.
 
 Any GitHub issues closed by this PR should be referred to in the PR description so that they automatically close when the PR gets merged. Once the PR is created/updated, monitor CI checks in the background to ensure they pass.
 
@@ -251,11 +251,18 @@ If the output lists any SHAs, you MUST strip the attribution lines with the help
 
 ### Step 3 — Strip + force-push when attributions are found
 
-Run `reword-commits.py` (beside this SKILL.md; `$CLAUDE_PLUGIN_ROOT/skills/polish-pr/` under the plugin install) with one `--drop-lines` per pattern the Step 2 check looks for:
+First record the head the PR has on GitHub, which is what the remote branch holds:
+
+```bash
+REMOTE_TIP=$(GH_REPO=<owner>/<repo> gh pr view <PR_NUMBER> --json headRefOid --jq .headRefOid)
+```
+
+Then run `reword-commits.py` (beside this SKILL.md; `$CLAUDE_PLUGIN_ROOT/skills/polish-pr/` under the plugin install) with one `--drop-lines` per pattern the Step 2 check looks for:
 
 ```bash
 python3 "$CLAUDE_PLUGIN_ROOT/skills/polish-pr/reword-commits.py" \
   --base "$(git merge-base <BASE_REMOTE>/<BASE_BRANCH> HEAD)" \
+  --remote-tip "$REMOTE_TIP" \
   --drop-lines 'Co-Authored-By: Claude' \
   --drop-lines '🤖 Generated with .*Claude' \
   --drop-lines 'Generated with .*Claude Code'
@@ -266,10 +273,10 @@ It rewrites only the messages, through `git commit-tree`: every commit keeps its
 Re-run the Step 2 grep to confirm zero attributions. Then push with the command the helper printed:
 
 ```bash
-git push --force-with-lease=<branch-name>:<old tip's full sha> <HEAD_REMOTE> HEAD:<branch-name>
+git push --force-with-lease=<branch-name>:<REMOTE_TIP> <HEAD_REMOTE> HEAD:<branch-name>
 ```
 
-The lease names the old tip on purpose: a bare `--force-with-lease` after a fetch would accept, and overwrite, a commit someone pushed to the PR in the meantime (land-pr says the same about its own push).
+The lease names what the remote was last seen to hold, the PR head recorded above, not the local tip before the rewrite: commits of this round that were never pushed would make the local tip a sha the remote has never had, and the push would be refused as stale. A bare `--force-with-lease` after a fetch would accept, and overwrite, a commit someone pushed to the PR in the meantime (land-pr names its lease for the same reason). If the push is refused, the head moved: stop and look at what was pushed. Never retry with a bare `--force`.
 
 Force-push to the **feature branch** is acceptable and required here. Force-push to `main`/`master` is forbidden by CLAUDE.md and would never apply at this stage anyway.
 

@@ -247,7 +247,7 @@ done
 
 If the output is empty, proceed to push.
 
-If the output lists any SHAs, you MUST strip the attribution lines with the helper in Step 3 and force-push. Do not push attributed commits "to be cleaned up later" — they will never be cleaned up later.
+If the output lists any SHAs, you MUST strip the attribution lines with the helper in Step 3 and force-push. Do not push attributed commits "to be cleaned up later": they will never be cleaned up later.
 
 ### Step 3 — Strip + force-push when attributions are found
 

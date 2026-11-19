@@ -487,6 +487,22 @@ if [ "$(msg "$(tip)")" = "$(git -C "$R" cat-file commit "$prose" | sed '1,/^$/d'
 listed=$(git -C "$R" log -1 --format=%B "$(git -C "$R" rev-parse HEAD~1)")
 if [ "$listed" = $'chore: listed trailer\n\nChanges:\n- one thing' ]; then ok; else bad "the indented trailer and the plain footer are removed" "$listed"; fi
 
+# The --replace command in "Execution standards" runs as written too, once
+# the gh line and the placeholders are filled in.
+replace_cmd=$(section "## Execution standards" "### How to monitor CI checks")
+if grep -q -- "--replace <file.json> --dry-run" <<<"$replace_cmd" && grep -q -- '--remote-tip "$REMOTE_TIP"' <<<"$replace_cmd"; then
+  ok
+else
+  bad "the --replace command has --dry-run and --remote-tip" "$replace_cmd"
+fi
+replace_cmd=$(grep -v "gh pr view" <<<"$replace_cmd")
+replace_cmd=${replace_cmd//<BASE_REMOTE>\/<BASE_BRANCH>/base}
+replace_cmd=${replace_cmd//<file.json>/"$tmp/replace.json"}
+mkrepo
+json '[{"old": "retries twice", "new": "retries three times"}]'
+out=$(cd "$R" && CLAUDE_PLUGIN_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)" REMOTE_TIP=$(git -C "$R" rev-parse HEAD) bash -c "$replace_cmd" 2>&1); got=$?
+check "the skill's --replace command runs as written" 0 "+The widget retries three times."
+
 # --- usage --------------------------------------------------------------------
 mkrepo
 rw --replace "$tmp/replace.json"

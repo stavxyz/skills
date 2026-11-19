@@ -176,7 +176,17 @@ Ensure all repo documentation, README(s), PR title, PR description, and docstrin
 
 Use atomic commits and push to the PR when finished.
 
-A review finding about a commit message (a wrong subject, a stale claim in a body) is fixed with `reword-commits.py --base <merge-base> --replace <file.json>`, the sibling of this SKILL.md (`"$CLAUDE_PLUGIN_ROOT/skills/polish-pr/reword-commits.py"`). Each entry names the `old` text and its `new` text, and must match exactly one commit unless it says otherwise. The helper changes messages, not content: every commit keeps its tree, author, and author date, the committer becomes whoever runs it, and signatures are made again only when `commit.gpgsign` is set. Record the PR's head before rewording and pass it as `--remote-tip`, so the push command the helper prints leases against what the remote holds, exactly as in Step 3 of the attribution sweep below.
+A review finding about a commit message (a wrong subject, a stale claim in a body) is fixed with `reword-commits.py`, the sibling of this SKILL.md. Write the edits to a JSON file, a list of objects with `old` and `new` and optionally `subject_prefix` and `every`; each entry must match exactly one commit unless it sets `"every": true`. Record the PR's head first, so the push command the helper prints leases against what the remote holds, then run the helper with `--dry-run`, read the diff, and run it again without `--dry-run`:
+
+```bash
+REMOTE_TIP=$(GH_REPO=<owner>/<repo> gh pr view <PR_NUMBER> --json headRefOid --jq .headRefOid)
+python3 "$CLAUDE_PLUGIN_ROOT/skills/polish-pr/reword-commits.py" \
+  --base "$(git merge-base <BASE_REMOTE>/<BASE_BRANCH> HEAD)" \
+  --remote-tip "$REMOTE_TIP" \
+  --replace <file.json> --dry-run
+```
+
+The helper changes messages, not content: every commit keeps its tree, author, and author date, the committer becomes whoever runs it, and signatures are made again only when `commit.gpgsign` is set. Push with the command it prints, as in Step 3 of the attribution sweep below, which also says what a refused push means.
 
 Any GitHub issues closed by this PR should be referred to in the PR description so that they automatically close when the PR gets merged. Once the PR is created/updated, monitor CI checks in the background to ensure they pass.
 

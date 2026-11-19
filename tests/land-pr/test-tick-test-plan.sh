@@ -268,6 +268,9 @@ tick_one "a parent box gets its evidence after its nested box" \
   '- [ ] Parent\n  - [ ] Child\n- [ ] Other\n' '- [x] Parent\n  - [ ] Child\n  - ok\n- [ ] Other\n' --box "Parent" --evidence ok
 tick_one "a # that is part of a heading's text is kept" \
   '## C#\n- [ ] Check\n## C\n- [ ] Check\n' '## C#\n- [x] Check\n  - ok\n## C\n- [ ] Check\n' --under "C#" --box "Check" --evidence ok
+tick_one "a deeper heading inside an --under scope does not close it" \
+  '## Test plan\n### Pre-merge\n- [ ] Check\n## Notes\n- [ ] Check\n' \
+  '## Test plan\n### Pre-merge\n- [x] Check\n  - ok\n## Notes\n- [ ] Check\n' --under "Test plan" --box "Check" --evidence ok
 no_box "seven hashes are not a heading" \
   '## Alpha\n####### Seven\n- [ ] Check\n' --under "Seven" --box "Check" --evidence ok
 # A '# line' inside a fence must not close the section it sits in.

@@ -35,13 +35,13 @@ entry is resolved against the one fresh description before anything is
 written.
 
 The description is read fresh with `gh pr view <PR> --json body` at every run
-and written back with `gh pr edit <PR> --body-file` only when it changed.
+and written back once with `gh pr edit <PR> --body-file`.
 --file edits a local file in place instead and never calls gh. Everything
 outside the edit is preserved byte for byte, including CRLF endings and a
 missing final newline.
 
 Exit statuses:
-  0  done, or nothing to change under --dry-run
+  0  done, or under --dry-run the diff was printed
   1  a box could not be resolved (no match, or more than one), is already
      ticked, or is ticked by two entries of one batch; nothing was written
   3  a usage error, or a failing gh
@@ -235,6 +235,10 @@ def check_entry(entry, n):
         raise UsageError(f"{label}evidence must be one line")
     if ev.strip() == "":
         raise UsageError(f"{label}evidence must not be empty")
+    # The evidence is written as "- <evidence>", so a leading "[ ] " or
+    # "[x] " would make it a task item of its own.
+    if re.match(r"\[[ xX]\]( |$)", ev):
+        raise UsageError(f"{label}evidence starting with {ev[:4]!r} would itself be a box beneath the box")
     if entry.get("under") is not None and not isinstance(entry["under"], str):
         raise UsageError(f"{label}'under' must be a string")
     if not isinstance(entry.get("note_only", False), bool):
@@ -326,7 +330,7 @@ def main(argv):
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Exit statuses:\n"
-            "  0  done, or nothing to change under --dry-run\n"
+            "  0  done, or under --dry-run the diff was printed\n"
             "  1  a box could not be resolved (no match, or more than one), is\n"
             "     already ticked, or is ticked by two entries of one batch; nothing\n"
             "     was written\n"
@@ -391,11 +395,9 @@ def main(argv):
 
         new = apply(old, entries)
 
+        # Every resolved entry adds a line, so new always differs from old.
         if args.dry_run:
-            sys.stdout.write(diff(old, new, name) or "nothing to change\n")
-            return 0
-        if new == old:
-            print("nothing to change")
+            sys.stdout.write(diff(old, new, name))
             return 0
 
         if args.file is not None:

@@ -445,6 +445,16 @@ line two"
 check "multi-line evidence is refused" 3 "one line"
 nothing_written "multi-line evidence"
 
+# Written as "- [ ] ..." beneath the box, this evidence would be a new box.
+tick "$tmp/body.md" 7 --box "Lint is clean" --evidence "[ ] follow up later"
+check "evidence that would become an unticked box is refused" 3 "would itself be a box"
+nothing_written "box-shaped evidence"
+tick "$tmp/body.md" 7 --box "Lint is clean" --evidence "[X] done"
+check "evidence that would become a ticked box is refused" 3 "would itself be a box"
+nothing_written "ticked-box-shaped evidence"
+tick "$tmp/body.md" 7 --box "Lint is clean" --evidence "[link](https://example.com) shows it"
+check "evidence that starts with a bracket but is not a box marker is accepted" 0
+
 tick "$tmp/body.md" 7 --box "Lint is clean" --evidence "   "
 check "blank evidence is refused" 3 "empty"
 nothing_written "blank evidence"

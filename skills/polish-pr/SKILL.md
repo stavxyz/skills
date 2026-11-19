@@ -176,6 +176,8 @@ Ensure all repo documentation, README(s), PR title, PR description, and docstrin
 
 Use atomic commits and push to the PR when finished.
 
+A review finding about a commit message (a wrong subject, a stale claim in a body) is fixed with `reword-commits.py --base <merge-base> --replace <file.json>`, the sibling of this SKILL.md (`"$CLAUDE_PLUGIN_ROOT/skills/polish-pr/reword-commits.py"`). Each entry names the `old` text and its `new` text, and must match exactly one commit unless it says otherwise. The helper changes messages only: every commit keeps its tree, author, and author date, and it prints the push command to use.
+
 Any GitHub issues closed by this PR should be referred to in the PR description so that they automatically close when the PR gets merged. Once the PR is created/updated, monitor CI checks in the background to ensure they pass.
 
 ### How to monitor CI checks
@@ -245,23 +247,29 @@ done
 
 If the output is empty, proceed to push.
 
-If the output lists any SHAs, you MUST strip the attribution lines via `git filter-branch` and force-push. Do not push attributed commits "to be cleaned up later" — they will never be cleaned up later.
+If the output lists any SHAs, you MUST strip the attribution lines with the helper in Step 3 and force-push. Do not push attributed commits "to be cleaned up later" — they will never be cleaned up later.
 
 ### Step 3 — Strip + force-push when attributions are found
 
-```bash
-FILTER_BRANCH_SQUELCH_WARNING=1 git filter-branch -f --msg-filter '
-  sed -e "/^Co-Authored-By: Claude/d" \
-      -e "/^🤖 Generated with/d" \
-      -e "/^Generated with .* Claude/d"
-' $(git merge-base <BASE_REMOTE>/<BASE_BRANCH> HEAD)..HEAD
-```
-
-Re-run the Step 2 grep to confirm zero attributions. Then:
+Run `reword-commits.py` (beside this SKILL.md; `$CLAUDE_PLUGIN_ROOT/skills/polish-pr/` under the plugin install) with one `--drop-lines` per pattern the Step 2 check looks for:
 
 ```bash
-git push --force-with-lease <HEAD_REMOTE> <branch-name>
+python3 "$CLAUDE_PLUGIN_ROOT/skills/polish-pr/reword-commits.py" \
+  --base "$(git merge-base <BASE_REMOTE>/<BASE_BRANCH> HEAD)" \
+  --drop-lines 'Co-Authored-By: Claude' \
+  --drop-lines '🤖 Generated with .*Claude' \
+  --drop-lines 'Generated with .*Claude Code'
 ```
+
+It rewrites only the messages, through `git commit-tree`: every commit keeps its tree, author, and author date, the working tree and index are not touched, and the old tip is parked at the `refs/rescue/...` ref it names. It refuses (exit 1, nothing changed) a detached HEAD, a merge commit in the range, or a pattern that would delete a subject line; a subject that carries an attribution is fixed with `--replace` instead.
+
+Re-run the Step 2 grep to confirm zero attributions. Then push with the command the helper printed:
+
+```bash
+git push --force-with-lease=<branch-name>:<old tip's full sha> <HEAD_REMOTE> HEAD:<branch-name>
+```
+
+The lease names the old tip on purpose: a bare `--force-with-lease` after a fetch would accept, and overwrite, a commit someone pushed to the PR in the meantime (land-pr says the same about its own push).
 
 Force-push to the **feature branch** is acceptable and required here. Force-push to `main`/`master` is forbidden by CLAUDE.md and would never apply at this stage anyway.
 

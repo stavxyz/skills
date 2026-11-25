@@ -14,6 +14,10 @@
 
 set -uo pipefail
 
+# An inherited GIT_DIR would point the sandbox's git commands at the caller's
+# repository.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR
+
 CHECK="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../skills/validate" && pwd)/check-currency.sh"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
@@ -722,6 +726,92 @@ git -C "$W" push -q -u origin feature
 git -C "$W" commit -q --amend -m "edit plan, reworded"
 check "amending a pushed commit that edited the document is still current" \
   0 "holds an earlier push of this branch" "$CHECK" "$W/docs/plan.md"
+
+# A teammate's CODE-only commit, pulled and then dropped by a local rewrite.
+# The document is untouched, and the checkout has diverged, but the commit it
+# lacks was never pushed from here.
+fresh
+git -C "$W" checkout -q -b feature
+echo "f" > "$W/src/f.py"; git -C "$W" add -A; git -C "$W" commit -q -m f
+git -C "$W" push -q -u origin feature
+git -C "$O" fetch -q origin; git -C "$O" checkout -q -b feature origin/feature
+other_pushes feature src/code.py "code from a teammate"
+git -C "$W" pull -q --ff-only origin feature
+git -C "$W" reset -q --hard HEAD~1
+echo "mine" > "$W/src/mine.py"; git -C "$W" add -A; git -C "$W" commit -q -m mine
+check "a teammate's code commit, pulled and then reset away, is STALE" \
+  1 "behind origin/feature" "$CHECK" "$W/docs/plan.md"
+
+# The same on main itself.
+fresh
+other_pushes main src/code.py "code from a teammate"
+git -C "$W" pull -q --ff-only origin main
+git -C "$W" reset -q --hard HEAD~1
+echo "mine" > "$W/src/mine.py"; git -C "$W" add -A; git -C "$W" commit -q -m mine
+check "main with a teammate's commit pulled and then reset away is STALE" \
+  1 "behind origin/main" "$CHECK" "$W/docs/plan.md"
+
+# A fresh clone of a branch never pushed anything: its tip arrived by clone.
+fresh
+git -C "$O" checkout -q -b feature main; echo "t" > "$O/src/t.py"; git -C "$O" add -A; git -C "$O" commit -q -m t
+git -C "$O" push -q origin feature
+rm -rf "$TMP/single"; git clone -q -b feature "$TMP/origin.git" "$TMP/single"
+git -C "$TMP/single" reset -q --hard HEAD~1
+echo "mine" > "$TMP/single/src/mine.py"; git -C "$TMP/single" add -A; git -C "$TMP/single" commit -q -m mine
+check "a fresh clone that rewrote away a commit it never pushed is STALE" \
+  1 "behind origin/feature" "$CHECK" "$TMP/single/docs/plan.md"
+
+# Pulled a teammate's commit, pushed on top of it, then dropped THEIR commit
+# locally: the remote's tip was pushed from here, but one missing commit was not.
+fresh
+git -C "$W" checkout -q -b feature
+echo "f" > "$W/src/f.py"; git -C "$W" add -A; git -C "$W" commit -q -m f
+git -C "$W" push -q -u origin feature
+git -C "$O" fetch -q origin; git -C "$O" checkout -q -b feature origin/feature
+other_pushes feature src/code.py "code from a teammate"
+git -C "$W" pull -q --ff-only origin feature
+echo "mine" > "$W/src/mine.py"; git -C "$W" add -A; git -C "$W" commit -q -m mine
+git -C "$W" push -q origin feature
+git -C "$W" reset -q --hard HEAD~2
+echo "again" > "$W/src/again.py"; git -C "$W" add -A; git -C "$W" commit -q -m again
+check "dropping a teammate's commit from under one's own push is STALE" \
+  1 "behind origin/feature" "$CHECK" "$W/docs/plan.md"
+
+# Pushed a code commit, then amended it to also edit the document: still this
+# checkout's own push, whatever the document now says.
+fresh
+git -C "$W" checkout -q -b feature
+echo "f" > "$W/src/f.py"; git -C "$W" add -A; git -C "$W" commit -q -m f
+git -C "$W" push -q -u origin feature
+echo "plan, edited after the push" > "$W/docs/plan.md"; git -C "$W" add -A; git -C "$W" commit -q --amend --no-edit
+check "amending a pushed commit to also edit the document is still current" \
+  0 "all pushed from it" "$CHECK" "$W/docs/plan.md"
+
+# Pushed from here, then reset back: behind this checkout's own push. The
+# document it would edit is older than the one it pushed, so that is stale.
+fresh
+git -C "$W" checkout -q -b feature
+echo "f" > "$W/src/f.py"; git -C "$W" add -A; git -C "$W" commit -q -m f
+echo "g" > "$W/src/g.py"; git -C "$W" add -A; git -C "$W" commit -q -m g
+git -C "$W" push -q -u origin feature
+git -C "$W" reset -q --hard HEAD~1
+check "a checkout reset back behind its own push is STALE" \
+  1 "behind origin/feature" "$CHECK" "$W/docs/plan.md"
+
+# Checked out from a teammate's branch and rebased onto main here: every
+# commit on the remote copy came from there, not from a push made here, so the
+# rewrite is not excused. Pushing it makes it this checkout's own.
+fresh
+git -C "$O" checkout -q -b theirs main; echo "t" > "$O/src/t.py"; git -C "$O" add -A; git -C "$O" commit -q -m t
+git -C "$O" push -q origin theirs
+other_pushes main src/code.py "code v2"
+git -C "$W" fetch -q origin
+git -C "$W" checkout -q -b theirs origin/theirs
+git -C "$W" rebase -q origin/main
+check "a teammate's branch rebased here but not yet pushed is STALE" \
+  1 "push first if you rewrote commits that came from there" "$CHECK" "$W/docs/plan.md"
+git -C "$W" push -q -f origin theirs
+check "and current once it has been pushed" 0 "CURRENT" "$CHECK" "$W/docs/plan.md"
 
 # The upstream's remote is not a configured remote.
 fresh

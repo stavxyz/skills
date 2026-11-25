@@ -141,7 +141,10 @@ to see it.
 - `BEHIND` > 0 otherwise → STOP. Rebase onto `<BASE_REMOTE>/<BASE_BRANCH>` (resolve conflicts;
   if a conflict resolution is non-mechanical, surface it to the user before
   continuing), re-run the project's test suite and linters on the rebased
-  result, `git push --force-with-lease` the feature branch, and only then
+  result, push the feature branch with a lease on the PR head as it was
+  before the rebase (`git push --force-with-lease=<branch>:<that sha>
+  <HEAD_REMOTE> HEAD:<branch>`; a bare `--force-with-lease` after a fetch
+  would overwrite a commit someone pushed meanwhile), and only then
   dispatch reviewers — they must review the combination that will actually
   merge.
 

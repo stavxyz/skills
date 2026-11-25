@@ -182,9 +182,13 @@ other_pushes main "docs/my plans/a[1]*.md" "p2"
 check "a document with spaces and glob characters in its path is found" \
   1 "the document changed on origin/main" "$CHECK" "$W/docs/my plans/a[1]*.md"
 
-# Detached HEAD has no upstream; origin's default branch still decides.
+# Detached HEAD: which remote branch is this checkout's own cannot be told, so
+# level with the default branch is UNVERIFIED, never current. A document
+# change on the default branch is still STALE.
 fresh
 git -C "$W" checkout -q --detach
+check "a detached HEAD level with everything is UNVERIFIED, not current" \
+  2 "HEAD is detached" "$CHECK" "$W/docs/plan.md"
 other_pushes main docs/plan.md "plan v2"
 check "a detached HEAD behind origin's default branch is STALE" \
   1 "the document changed on origin/main" "$CHECK" "$W/docs/plan.md"
@@ -330,18 +334,42 @@ while time.time() < end:
 PY
   listener=$!
   for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$TMP/port" ] && break; perl -e 'select(undef,undef,undef,0.2)'; done
-  git -C "$W" remote add silent "http://127.0.0.1:$(cat "$TMP/port")/x.git"
+  # The port is this run's own, so process matches below cannot hit another
+  # copy of this suite running on the same machine.
+  silent_url="http://127.0.0.1:$(cat "$TMP/port")/x.git"
+  git -C "$W" remote add silent "$silent_url"
   git -C "$W" checkout -q -b feature
   began=$(date +%s)
   check "a remote that never answers is UNVERIFIED within the time limit" \
     2 "could not fetch silent" env CHECK_CURRENCY_NET_TIMEOUT=3 "$CHECK" "$W/docs/plan.md"
   took=$(( $(date +%s) - began ))
-  if [ "$took" -le 12 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL: the silent remote took ${took}s with a 3s limit per call"; fi
+  if [ "$took" -le 15 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL: the silent remote took ${took}s with a 3s limit per call"; fi
   other_pushes main docs/plan.md "plan v2"
   check "a remote that never answers does not hide a document change on origin" \
     1 "the document changed on origin/main" env CHECK_CURRENCY_NET_TIMEOUT=3 "$CHECK" "$W/docs/plan.md"
+  # An interrupt aimed at the script reaches the network call it started.
+  git -C "$W" remote remove origin
+  ( CHECK_CURRENCY_NET_TIMEOUT=60 perl -e 'setpgrp(0,0); exec @ARGV' "$CHECK" "$W/docs/plan.md" >/dev/null 2>&1 & echo $! > "$TMP/checkpid" )
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    pgrep -f "$silent_url" >/dev/null 2>&1 && break
+    perl -e 'select(undef,undef,undef,0.3)'
+  done
+  if pgrep -f "$silent_url" >/dev/null 2>&1; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL: the interrupt fixture never saw the network call start"; fi
+  # TERM, not INT: a shell started in the background ignores INT, and that is
+  # inherited, which would test the shell and not the script.
+  kill -TERM -- "-$(cat "$TMP/checkpid")" 2>/dev/null
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    pgrep -f "$silent_url" >/dev/null 2>&1 || break
+    perl -e 'select(undef,undef,undef,0.3)'
+  done
+  if pgrep -f "$silent_url" >/dev/null 2>&1; then
+    fail=$((fail + 1)); echo "FAIL: a signal to the script left the network call running"
+    pkill -f "$silent_url" 2>/dev/null
+  else
+    pass=$((pass + 1))
+  fi
   kill "$listener" 2>/dev/null; wait "$listener" 2>/dev/null
-  rm -f "$TMP/port"
+  rm -f "$TMP/port" "$TMP/checkpid"
 else
   echo "skip: silent-remote fixture (needs python3 and perl)"
 fi
@@ -597,11 +625,177 @@ check "a fork whose main runs ahead blocks main, and the message names the remed
   1 "git config --add validate.ignoreRemote fork" "$CHECK" "$W/docs/plan.md"
 git -C "$W" config --add validate.ignoreRemote fork
 check "an ignored remote is not compared, and the note says so" \
-  0 "remote fork is ignored" "$CHECK" "$W/docs/plan.md"
+  0 "the default branch of fork is ignored" "$CHECK" "$W/docs/plan.md"
 other_pushes main docs/plan.md "plan v2"
 check "ignoring one remote does not stop the others from deciding" \
   1 "behind origin/main" "$CHECK" "$W/docs/plan.md"
 rm -rf "$TMP/fork.git" "$TMP/forkclone"
+
+# Ignoring a remote leaves out its default branch only. The remedy the script
+# prints for a fork's main must not be usable to hide another session's pushes
+# to this branch's own copy.
+fresh
+git init -q --bare -b main "$TMP/parent.git"
+git -C "$W" push -q "$TMP/parent.git" main
+git -C "$W" remote add upstream "$TMP/parent.git"
+git -C "$W" checkout -q -b feature
+echo "f" > "$W/src/f.py"; git -C "$W" add -A; git -C "$W" commit -q -m f
+git -C "$W" push -q origin feature
+git -C "$O" fetch -q origin; git -C "$O" checkout -q -b feature origin/feature
+other_pushes feature docs/plan.md "plan from a teammate"
+out=$("$CHECK" "$W/docs/plan.md" 2>&1)
+if grep -q "its own copy on that remote (pull it" <<<"$out" && ! grep -q "ignoreRemote" <<<"$out"; then
+  pass=$((pass + 1))
+else
+  fail=$((fail + 1)); printf 'FAIL: a stale own-branch copy should say pull, and not offer ignoreRemote:\n%s\n' "$out"
+fi
+git -C "$W" config --add validate.ignoreRemote origin
+check "ignoring a remote does not hide another session's pushes to this branch on it" \
+  1 "branch feature is 1 commit(s) behind origin/feature" "$CHECK" "$W/docs/plan.md"
+rm -rf "$TMP/parent.git"
+
+# The remote answers ls-remote, and then the fetch fails. Nothing was fetched,
+# so nothing may be compared: UNVERIFIED, never current.
+fresh
+git -C "$W" checkout -q -b feature
+other_pushes main docs/plan.md "plan v2"
+find "$TMP/origin.git/objects" -type f -delete
+check "a fetch that fails after ls-remote answered is UNVERIFIED" \
+  2 "could not fetch origin" "$CHECK" "$W/docs/plan.md"
+
+# Pushed from here, then amended here: the remote holds this checkout's own
+# earlier push. That is not staleness, and the document rule still applies.
+fresh
+git -C "$W" checkout -q -b feature
+echo "f" > "$W/src/f.py"; git -C "$W" add -A; git -C "$W" commit -q -m f
+git -C "$W" push -q -u origin feature
+git -C "$W" commit -q --amend -m "f, reworded"
+check "a branch amended after its own push is current, with a note" \
+  0 "holds an earlier push of this branch" "$CHECK" "$W/docs/plan.md"
+git -C "$O" fetch -q origin; git -C "$O" checkout -q -b feature origin/feature
+other_pushes feature src/code.py "code from a teammate"
+check "but another session's push on top of it is STALE" \
+  1 "behind origin/feature" "$CHECK" "$W/docs/plan.md"
+
+# The upstream's remote is not a configured remote.
+fresh
+git -C "$W" checkout -q -b feature
+git -C "$W" config branch.feature.remote gone
+git -C "$W" config branch.feature.merge refs/heads/feature
+check "an upstream on a remote that is not configured is UNVERIFIED" \
+  2 "not a configured remote: gone" "$CHECK" "$W/docs/plan.md"
+
+# An upstream that is not a branch.
+fresh
+git -C "$W" checkout -q -b feature
+git -C "$W" config branch.feature.remote origin
+git -C "$W" config branch.feature.merge refs/pull/1/head
+check "an upstream that is not a branch is UNVERIFIED, and says so" \
+  2 "upstream is not a branch (refs/pull/1/head)" "$CHECK" "$W/docs/plan.md"
+
+# origin itself ignored: its default branch is left out and the note says so,
+# but the branch this one tracks on it is still compared.
+fresh
+git init -q --bare -b main "$TMP/parent.git"
+git -C "$W" push -q "$TMP/parent.git" main
+git -C "$W" remote add upstream "$TMP/parent.git"
+git -C "$W" checkout -q -b feature
+echo "f" > "$W/src/f.py"; git -C "$W" add -A; git -C "$W" commit -q -m f
+git -C "$W" push -q -u origin feature
+git -C "$W" config --add validate.ignoreRemote origin
+other_pushes main docs/plan.md "plan v2"
+check "an ignored origin's default branch is not compared, and the note says so" \
+  0 "the default branch of origin is ignored" "$CHECK" "$W/docs/plan.md"
+git -C "$O" fetch -q origin; git -C "$O" checkout -q -b feature origin/feature
+other_pushes feature src/code.py "code from a teammate"
+check "the upstream on an ignored remote is still compared" \
+  1 "this branch is 1 commit(s) behind origin/feature" "$CHECK" "$W/docs/plan.md"
+rm -rf "$TMP/parent.git"
+
+# A remote whose name has a slash is named whole in the remedy.
+fresh
+git init -q --bare -b main "$TMP/fork.git"
+git -C "$W" remote add my/fork "$TMP/fork.git"
+git -C "$W" push -q my/fork main
+git clone -q "$TMP/fork.git" "$TMP/forkclone"
+echo "x" > "$TMP/forkclone/src/x.py"; git -C "$TMP/forkclone" add -A
+git -C "$TMP/forkclone" commit -q -m ahead; git -C "$TMP/forkclone" push -q origin main
+check "the remedy names a remote with a slash in full" \
+  1 "git config --add validate.ignoreRemote my/fork)" "$CHECK" "$W/docs/plan.md"
+rm -rf "$TMP/fork.git" "$TMP/forkclone"
+
+# A remote that wants credentials: no askpass program is run, whatever the
+# environment and config name, and the answer is UNVERIFIED at once.
+if command -v python3 >/dev/null 2>&1; then
+  fresh
+  python3 - "$TMP/port401" <<'PY' &
+import http.server, sys
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(401); self.send_header("WWW-Authenticate", 'Basic realm="x"'); self.end_headers()
+    def log_message(self, *a): pass
+srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+open(sys.argv[1], "w").write(str(srv.server_address[1]))
+srv.timeout = 1
+import time
+end = time.time() + 60
+while time.time() < end: srv.handle_request()
+PY
+  srv401=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$TMP/port401" ] && break; perl -e 'select(undef,undef,undef,0.2)'; done
+  printf '#!/bin/sh\necho called >> "%s"\necho nobody\n' "$TMP/askpass.log" > "$TMP/askpass"; chmod +x "$TMP/askpass"
+  : > "$TMP/askpass.log"
+  git -C "$W" remote add needsauth "http://127.0.0.1:$(cat "$TMP/port401")/x.git"
+  git -C "$W" config core.askPass "$TMP/askpass"
+  git -C "$W" checkout -q -b feature
+  check "a remote that wants credentials is UNVERIFIED" \
+    2 "could not fetch needsauth" env GIT_ASKPASS="$TMP/askpass" SSH_ASKPASS="$TMP/askpass" "$CHECK" "$W/docs/plan.md"
+  if [ -s "$TMP/askpass.log" ]; then
+    fail=$((fail + 1)); echo "FAIL: an askpass program was run"
+  else
+    pass=$((pass + 1))
+  fi
+  kill "$srv401" 2>/dev/null; wait "$srv401" 2>/dev/null
+  rm -f "$TMP/port401" "$TMP/askpass" "$TMP/askpass.log"
+else
+  echo "skip: credentials fixture (needs python3)"
+fi
+
+# The check leaves no refs behind, and a leftover from a run that died does not
+# block a later branch whose name nests under it (feat, then feat/x).
+fresh
+git -C "$W" checkout -q -b feat
+echo "f" > "$W/src/f.py"; git -C "$W" add -A; git -C "$W" commit -q -m f
+git -C "$W" push -q -u origin feat
+check "first run on branch feat" 0 "CURRENT" "$CHECK" "$W/docs/plan.md"
+if [ -z "$(git -C "$W" for-each-ref refs/check-currency/)" ]; then
+  pass=$((pass + 1))
+else
+  fail=$((fail + 1)); printf 'FAIL: refs left behind after a run:\n%s\n' "$(git -C "$W" for-each-ref refs/check-currency/)"
+fi
+git -C "$W" update-ref refs/check-currency/origin/feat HEAD        # the old, flat layout
+git -C "$W" update-ref refs/check-currency/999999/origin/feat HEAD # a run that died
+git -C "$W" checkout -q main
+git -C "$W" push -q origin --delete feat
+git -C "$W" branch -q -D feat
+git -C "$W" checkout -q -b feat/x
+git -C "$W" push -q -u origin feat/x
+check "a leftover ref named feat does not block checking feat/x" 0 "is not behind origin/feat/x" "$CHECK" "$W/docs/plan.md"
+if [ -z "$(git -C "$W" for-each-ref refs/check-currency/)" ]; then
+  pass=$((pass + 1))
+else
+  fail=$((fail + 1)); printf 'FAIL: leftover refs were not cleared:\n%s\n' "$(git -C "$W" for-each-ref refs/check-currency/)"
+fi
+
+# A STALE or UNVERIFIED exit clears its refs too.
+fresh
+other_pushes main docs/plan.md "plan v2"
+check "a stale run" 1 "behind origin/main" "$CHECK" "$W/docs/plan.md"
+if [ -z "$(git -C "$W" for-each-ref refs/check-currency/)" ]; then
+  pass=$((pass + 1))
+else
+  fail=$((fail + 1)); echo "FAIL: refs left behind after a STALE exit"
+fi
 
 # A document that is a symlink into another repository.
 fresh

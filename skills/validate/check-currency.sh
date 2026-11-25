@@ -119,11 +119,21 @@ fi
 # no upstream at all.
 branch_ref="$(g symbolic-ref -q HEAD 2>/dev/null)" || branch_ref=""
 branch_short="${branch_ref#refs/heads/}"
+if [[ -z "$branch_short" ]]; then
+  # Detached (or mid-rebase): which branch this is, and so which remote branch
+  # another session might have pushed to, cannot be told.
+  unknowns+=("HEAD is detached, so this checkout's branch on the remote could not be compared")
+fi
 up_remote=""
 up_branch=""
 if [[ -n "$branch_short" ]]; then
   up_remote="$(g config "branch.$branch_short.remote" 2>/dev/null)" || up_remote=""
   up_branch="$(g config "branch.$branch_short.merge" 2>/dev/null)" || up_branch=""
+  if [[ -n "$up_branch" && "$up_branch" != refs/heads/* ]]; then
+    unknowns+=("the branch's upstream is not a branch ($up_branch), so it was not compared")
+    up_remote=""
+    up_branch=""
+  fi
   up_branch="${up_branch#refs/heads/}"
   if [[ "$up_remote" == "." || -z "$up_remote" || -z "$up_branch" ]]; then
     # Tracking a local branch, or nothing, says nothing about a remote.
@@ -132,7 +142,8 @@ if [[ -n "$branch_short" ]]; then
   fi
 fi
 
-has_remote() { g remote | grep -qxF -- "$1"; }
+remote_names="$(g remote 2>/dev/null || true)"
+has_remote() { grep -qxF -- "$1" <<<"$remote_names"; }
 if [[ -n "$up_remote" ]] && ! has_remote "$up_remote"; then
   unknowns+=("the branch's upstream remote is not a configured remote: $up_remote")
   up_remote=""
@@ -144,26 +155,20 @@ fi
 # while the document's history is on origin, and `gh repo fork` makes the fork
 # origin and the parent "upstream". origin goes first only so the messages
 # read the same way from run to run.
-# A remote that should not count (a mirror, an unrelated project, a personal
-# fork whose main runs ahead) is named in git config, once per remote:
+# A remote whose default branch should not count (a mirror, an unrelated
+# project, a personal fork whose main runs ahead) is named in git config, once
+# per remote:
 #   git config --add validate.ignoreRemote <name>
+# Only its default branch is left out. Its copy of this branch, and the branch
+# this one tracks, are still compared: those are where another session pushes,
+# and ignoring them would turn a stale checkout into a current one.
 ignored="$(g config --get-all validate.ignoreRemote 2>/dev/null || true)"
 is_ignored() { [[ -n "$ignored" ]] && grep -qxF -- "$1" <<<"$ignored"; }
 remotes=()
-has_remote origin && ! is_ignored origin && remotes+=(origin)
+has_remote origin && remotes+=(origin)
 while IFS= read -r r; do
-  [[ -n "$r" && "$r" != "origin" ]] || continue
-  if is_ignored "$r"; then
-    notes+=("remote $r is ignored (validate.ignoreRemote)")
-  else
-    remotes+=("$r")
-  fi
+  [[ -n "$r" && "$r" != "origin" ]] && remotes+=("$r")
 done < <(g remote)
-if [[ -n "$up_remote" ]] && is_ignored "$up_remote"; then
-  unknowns+=("the branch's upstream remote is ignored (validate.ignoreRemote): $up_remote")
-  up_remote=""
-  up_branch=""
-fi
 [[ ${#remotes[@]} -gt 0 ]] || unknowns+=("no remote to compare against")
 
 # Network calls. No prompt may block one, and none may run for ever: two of
@@ -173,18 +178,27 @@ fi
 # remotes still decide. The ssh options are added to whatever ssh command this
 # repository already uses; a bare "ssh" would bypass a configured
 # core.sshCommand or GIT_SSH.
-net_timeout="${CHECK_CURRENCY_NET_TIMEOUT:-60}"
-[[ "$net_timeout" =~ ^[0-9]+$ && "$net_timeout" -gt 0 ]] || net_timeout=60
+# 25 seconds a call keeps a run with two dead remotes inside the two minutes a
+# caller commonly allows one command, so the verdict still prints.
+net_timeout="${CHECK_CURRENCY_NET_TIMEOUT:-25}"
+[[ "$net_timeout" =~ ^[0-9]+$ && "$net_timeout" -gt 0 ]] || net_timeout=25
 ssh_cmd="${GIT_SSH_COMMAND:-$(g config core.sshCommand 2>/dev/null || true)}"
-ssh_cmd="${ssh_cmd:-${GIT_SSH:-ssh}}"
+if [[ -z "$ssh_cmd" ]]; then
+  # GIT_SSH is a program path, not a command line: quote it for the shell git
+  # hands GIT_SSH_COMMAND to.
+  if [[ -n "${GIT_SSH:-}" ]]; then ssh_cmd="$(printf '%q' "$GIT_SSH")"; else ssh_cmd=ssh; fi
+fi
 ssh_cmd="$ssh_cmd -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=5 -o ServerAliveCountMax=3"
 # The limit is enforced on the whole process group. Killing git alone is not
 # enough: its transport helper (git-remote-https, ssh) keeps running and keeps
-# the output pipe open, so the caller would go on waiting for it.
+# the output pipe open, so the caller would go on waiting for it. Because the
+# group is its own, an interrupt aimed at this script would miss it, so the
+# wrapper passes INT, TERM, and HUP on.
 # shellcheck disable=SC2016  # a perl program, not shell
 net_limit='my $t = shift; my $pid = fork(); defined $pid or exit 127;
 if (!$pid) { setpgrp(0, 0); exec @ARGV or exit 127 }
 $SIG{ALRM} = sub { kill "TERM", -$pid; select(undef, undef, undef, 0.5); kill "KILL", -$pid; exit 124 };
+for my $sig (qw(INT TERM HUP)) { $SIG{$sig} = sub { kill "TERM", -$pid; exit 130 } }
 alarm $t; waitpid($pid, 0);
 exit(($? & 127) ? 128 + ($? & 127) : $? >> 8);'
 net() {
@@ -197,11 +211,16 @@ net() {
       git -C "$root" -c core.askPass=true -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=20 "$@"
   fi
 }
+command -v perl >/dev/null 2>&1 || notes+=("perl is not installed, so network calls had no time limit")
+# git 2.29 and later can leave FETCH_HEAD alone.
+fetch_quiet=(fetch --quiet --no-tags)
+fetch_help="$(g fetch -h 2>&1 || true)"
+grep -q -- "write-fetch-head" <<<"$fetch_help" && fetch_quiet+=(--no-write-fetch-head)
 first_line() { head -n 1 <<<"$1"; }
 
 # What to compare with. Each remote is asked what it holds now (ls-remote), and
-# the branches that matter are fetched by name into refs/check-currency/, which
-# this script owns. The clone's own remote-tracking refs are not used: they
+# the branches that matter are fetched by name into refs/check-currency/<pid>/,
+# which this run owns. The clone's own remote-tracking refs are not used: they
 # are only as fresh as the configured refspec makes them, and a ref this
 # script once created outside that refspec would never be updated again.
 #
@@ -212,10 +231,36 @@ first_line() { head -n 1 <<<"$1"; }
 #   - a branch with this branch's own name (strict: it is the same branch,
 #     where another session pushes, whether or not it is the configured
 #     upstream).
+# The refs live in a namespace of this run's own and are deleted on exit, along
+# with any left by a run that died: a check should leave nothing behind, a
+# leftover ref named like a branch would block fetching a later branch whose
+# name nests under it (feat, then feat/x), and refs outside refs/remotes would
+# travel with a `git push --mirror`.
+ref_ns="refs/check-currency/$$"
+# shellcheck disable=SC2329  # both are reached through the EXIT trap
+drop_refs() { # delete every ref under the given prefix
+  g for-each-ref --format='delete %(refname)' "$1" 2>/dev/null | g update-ref --stdin 2>/dev/null
+}
+# shellcheck disable=SC2329
+cleanup_refs() {
+  drop_refs "$ref_ns/"
+  local ref pid
+  while IFS= read -r ref; do
+    pid="${ref#refs/check-currency/}"; pid="${pid%%/*}"
+    if [[ "$pid" =~ ^[0-9]+$ ]]; then
+      kill -0 "$pid" 2>/dev/null || drop_refs "refs/check-currency/$pid/"
+    else
+      drop_refs "$ref"   # a ref from before runs had their own namespace
+    fi
+  done < <(g for-each-ref --format='%(refname)' refs/check-currency/ 2>/dev/null)
+}
+trap cleanup_refs EXIT
+
 t_disp=()   # how the target is named in messages, e.g. origin/main
 t_ref=()    # the private ref holding what was fetched
 t_kind=()   # upstream | same | default
 t_isdef=()  # 1 when it is its remote's default branch
+t_remote=() # the remote's name (it may contain a slash, so it is not parsed back out)
 if [[ ${#remotes[@]} -gt 0 ]]; then
   for r in "${remotes[@]}"; do
     if ! listing="$(net ls-remote --symref "$r" HEAD 'refs/heads/*' 2>&1)"; then
@@ -224,15 +269,29 @@ if [[ ${#remotes[@]} -gt 0 ]]; then
     fi
     dname="$(awk -F'\t' '$2 == "HEAD" && $1 ~ /^ref: refs\/heads\// { sub("^ref: refs/heads/", "", $1); print $1; exit }' <<<"$listing")"
     on_remote() { awk -F'\t' -v w="refs/heads/$1" '$2 == w { f = 1 } END { exit !f }' <<<"$listing"; }
+    ign=""
+    if is_ignored "$r"; then
+      ign=1
+      notes+=("the default branch of $r is ignored (validate.ignoreRemote)")
+    fi
     if [[ -z "$dname" ]] || ! on_remote "$dname"; then
-      unknowns+=("no remote default branch could be found on $r, so the document was not compared with it")
+      [[ -n "$ign" ]] || unknowns+=("no remote default branch could be found on $r, so the document was not compared with it")
       dname=""
     fi
     want=()
-    [[ -n "$dname" ]] && want+=("$dname")
+    # An ignored remote's default branch is skipped, unless it is the very
+    # branch this one tracks.
+    if [[ -n "$dname" ]]; then
+      if [[ -z "$ign" || ( "$r" == "$up_remote" && "$dname" == "$up_branch" ) ]]; then
+        want+=("$dname")
+      fi
+    fi
     if [[ -n "$branch_short" && "$branch_short" != "$dname" ]] && on_remote "$branch_short"; then
       want+=("$branch_short")
     fi
+    # On an ignored remote, a branch that shares its name with that remote's
+    # default branch (main on a fork) IS the ignored default: skip it unless
+    # it is the upstream. Any other own-name branch is still compared.
     if [[ "$r" == "$up_remote" && "$up_branch" != "$dname" && "$up_branch" != "$branch_short" ]]; then
       if on_remote "$up_branch"; then
         want+=("$up_branch")
@@ -243,8 +302,8 @@ if [[ ${#remotes[@]} -gt 0 ]]; then
     fi
     [[ ${#want[@]} -gt 0 ]] || continue
     refspecs=()
-    for n in "${want[@]}"; do refspecs+=("+refs/heads/$n:refs/check-currency/$r/$n"); done
-    if ! err="$(net fetch --quiet --no-tags "$r" "${refspecs[@]}" 2>&1)"; then
+    for n in "${want[@]}"; do refspecs+=("+refs/heads/$n:$ref_ns/$r/$n"); done
+    if ! err="$(net "${fetch_quiet[@]}" "$r" "${refspecs[@]}" 2>&1)"; then
       unknowns+=("could not fetch $r: $(first_line "${err:-no answer within ${net_timeout}s}")")
       continue
     fi
@@ -260,7 +319,8 @@ if [[ ${#remotes[@]} -gt 0 ]]; then
         kind=default
       fi
       t_disp+=("$r/$n")
-      t_ref+=("refs/check-currency/$r/$n")
+      t_ref+=("$ref_ns/$r/$n")
+      t_remote+=("$r")
       t_kind+=("$kind")
       if [[ "$n" == "$dname" ]]; then t_isdef+=(1); else t_isdef+=(0); fi
     done
@@ -326,7 +386,7 @@ upstream_disp=""
 default_disps=""
 i=0
 while [[ $i -lt ${#t_ref[@]} ]]; do
-  disp="${t_disp[$i]}"; ref="${t_ref[$i]}"; kind="${t_kind[$i]}"; isdef="${t_isdef[$i]}"
+  disp="${t_disp[$i]}"; ref="${t_ref[$i]}"; kind="${t_kind[$i]}"; isdef="${t_isdef[$i]}"; rname="${t_remote[$i]}"
   i=$((i + 1))
   [[ "$kind" == "upstream" ]] && upstream_disp="$disp"
   [[ "$isdef" == "1" ]] && default_disps="${default_disps:+$default_disps, }$disp"
@@ -337,12 +397,30 @@ while [[ $i -lt ${#t_ref[@]} ]]; do
   fi
   [[ "$isdef" == "1" && "$n" -gt "$behind_default" ]] && behind_default="$n"
   [[ "$n" -gt 0 ]] || continue
+  if [[ "$kind" != "default" && -n "$branch_short" ]]; then
+    # The remote's copy of this branch is an earlier state of this very
+    # checkout when its tip appears in the local branch's reflog: it was
+    # pushed from here and then amended or rebased here. Nobody else has
+    # pushed anything newer, so that is not staleness.
+    tip="$(g rev-parse --verify --quiet "$ref^{commit}")" || tip=""
+    # Captured first, not piped: with pipefail, grep -q leaving early would make
+    # the pipeline read as a failure.
+    seen="$(g reflog show --format=%H "refs/heads/$branch_short" 2>/dev/null || true)"
+    if [[ -n "$tip" ]] && grep -qxF -- "$tip" <<<"$seen"; then
+      notes+=("$disp holds an earlier push of this branch, since rewritten here ($n commit(s) not in this checkout)")
+      continue
+    fi
+  fi
   case "$kind" in
     upstream|same)
       if [[ "$kind" == "upstream" ]]; then
         reasons+=("behind: this branch is $n commit(s) behind $disp")
       else
-        reasons+=("behind: branch $branch_short is $n commit(s) behind $disp (if ${disp%%/*} should not count, run: git config --add validate.ignoreRemote ${disp%%/*})")
+        if [[ "$isdef" == "1" ]]; then
+          reasons+=("behind: branch $branch_short is $n commit(s) behind $disp, that remote's default branch (if it should not count, run: git config --add validate.ignoreRemote $rname)")
+        else
+          reasons+=("behind: branch $branch_short is $n commit(s) behind $disp, its own copy on that remote (pull it; if you rewrote the branch elsewhere, push it)")
+        fi
       fi
       doc_changed "$ref"; rc=$?
       [[ $rc -eq 0 ]] && reasons+=("the document changed in those commits: $rel")

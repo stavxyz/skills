@@ -78,8 +78,9 @@
 # cloud sessions: every `gh pr view --json` and `gh pr checks --json` failed,
 # while `gh api repos/...` went through). Without this the skill cannot watch
 # CI there at all and falls back to hand-rolled polling, which is the thing the
-# script exists to replace. So when `gh pr checks` fails for any reason other
-# than "no checks reported", the same facts are read over REST: the head sha
+# script exists to replace. So when `gh pr view` fails, or `gh pr checks` fails
+# for any reason other than "no checks reported", the same facts are read over
+# REST (the head read comes first, so that is usually where the switch happens): the head sha
 # from the pull request, then its check runs and commit statuses, mapped onto
 # the same five buckets gh uses. The switch is announced once on stderr and
 # held for the rest of the run. WAIT_FOR_PR_CHECKS_TRANSPORT=rest skips the
@@ -160,7 +161,7 @@ read_head() {
       h=""
     fi
   fi
-  if [[ -z "$h" ]]; then
+  if [[ -z "$h" && "$transport" != "graphql" ]]; then
     # `gh pr view --json` is GraphQL; the pull-request endpoint is REST.
     if ! h="$("$GH_BIN" api "repos/{owner}/{repo}/pulls/$pr" --jq '.head.sha' 2>"$errfile")"; then
       [[ -n "$graphql_err" ]] && echo "$graphql_err; and over REST: $(cat "$errfile")" >"$errfile"
@@ -181,7 +182,7 @@ read_head() {
 # this and starts the wait over when the head has moved.
 head_sha=""
 if ! read_head; then
-  echo "gh pr view failed: $(cat "$errfile")" >&2
+  echo "reading the PR's head failed: $(cat "$errfile")" >&2
   finish 3 error
 fi
 watch_head="$head_sha"
@@ -224,13 +225,15 @@ runs_blocking() {
   blocking="$n workflow run(s) for the head commit not completed: $(awk -F'\t' '{ printf "%s%s (%s)", (NR > 1 ? ", " : ""), $1, $2 }' <<<"$unfinished")"
 }
 
-# The same rows as `gh pr checks --json name,bucket`, read over REST: the head
+# The rows `gh pr checks --json name,bucket` gives, read over REST: the head
 # sha from the pull request, then that commit's check runs (one per name, the
-# endpoint's default `filter=latest`) and its commit statuses. The bucket
-# mapping is gh's own (pkg/cmd/pr/checks/aggregate.go): a run that has not
-# completed is pending; success is pass; neutral and skipped are skipping;
-# cancelled is cancel; every other conclusion (failure, timed_out,
-# action_required, startup_failure, stale) is fail. A status context is pass,
+# endpoint's default `filter=latest`) and its commit statuses. REST is never
+# less strict than gh, and differs in two ways. It can list a check run gh's
+# rollup leaves out (seen: a Copilot review run). And the bucket mapping
+# follows gh's (pkg/cmd/pr/checks/aggregate.go) with one deliberate change: a
+# run that has not completed is pending; success is pass; neutral and skipped
+# are skipping; cancelled is cancel; every other conclusion is fail, including
+# startup_failure and stale, which gh calls pending. A status context is pass,
 # pending or fail. `{owner}/{repo}` resolve the way `gh pr checks` does without
 # `--repo`: from GH_REPO, else from the repository in the current directory.
 # Any failure returns non-zero with gh's own message on stderr.
@@ -245,7 +248,9 @@ read_rest() {
       elif .conclusion == "neutral" or .conclusion == "skipped" then "skipping"
       elif .conclusion == "cancelled" then "cancel"
       else "fail" end)] | @tsv')" || return 1
-  statuses="$("$GH_BIN" api "repos/{owner}/{repo}/commits/$sha/status" --jq '
+  # Paginated: the endpoint returns 30 contexts a page, and a pending or
+  # failing one on a later page must not be missed.
+  statuses="$("$GH_BIN" api "repos/{owner}/{repo}/commits/$sha/status?per_page=100" --paginate --jq '
     .statuses[] | [.context, (
       if .state == "success" then "pass"
       elif .state == "pending" then "pending"

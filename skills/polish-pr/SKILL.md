@@ -93,9 +93,14 @@ whenever you are not certain.
 Both bundled scripts read the PR over GitHub's REST API when `gh`'s GraphQL
 calls are refused, which is how Claude Code's cloud sessions answer every
 `gh pr view --json` and `gh pr checks --json` (a 403 from the GitHub proxy,
-whatever the token). The switch is announced once on stderr and nothing else
-changes, so run the scripts there exactly as written rather than replacing them
-with hand-rolled `git` and `gh api` polling.
+whatever the token). The switch is announced once on stderr, and the
+scripts behave the same (REST can list a check run gh leaves out, and is never
+less strict), so run the scripts there rather than replacing them with
+hand-rolled `git` and `gh api` polling. Pass `--repo <owner>/<repo>` to the
+resolver and set `GH_REPO` for the watcher there: the REST calls need a
+repository, and a cloud session's remote may not be a github.com URL. This was
+checked against live PRs with GraphQL refused by a wrapper; it has not yet
+been run inside a cloud session.
 
 **Why a script and not inline shell:** exactly the reason given below for
 `wait-for-pr-checks.sh`. `git remote -v` is human-formatted output, not a

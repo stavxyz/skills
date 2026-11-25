@@ -137,7 +137,7 @@ $META
 
 $WRONG_REPO_HINT"
   printf '[resolve-pr-remotes] gh pr view failed (%s); read the pull request over the REST API instead\n' \
-    "$(printf '%s\n' "$GRAPHQL_ERR" | sed -n 1p)" >&2
+    "$(printf '%s\n' "$GRAPHQL_ERR" | sed -n '$p')" >&2
 fi
 
 PR_URL=$(printf '%s\n' "$META" | sed -n 1p)

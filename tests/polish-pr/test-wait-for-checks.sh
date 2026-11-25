@@ -533,7 +533,14 @@ cat > "$tmp/gh-rest" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$1 $2" >> "$GH_STUB_CALLS"
 case "$1 $2" in
-  "pr checks"|"pr view")
+  "pr view")
+    # GH_STUB_VIEW_OK: only `pr checks` is refused, so the watcher meets the
+    # refusal in its checks read and not in its head read.
+    [ "${GH_STUB_VIEW_OK:-}" = empty ] && exit 0
+    if [ -n "${GH_STUB_VIEW_OK:-}" ]; then printf '%s\n' deadbeefdeadbeefdeadbeefdeadbeefdeadbeef; exit 0; fi
+    echo "GraphQL: Error: HTTP 403: Forbidden (https://api.github.com/graphql)" >&2
+    exit 1 ;;
+  "pr checks")
     echo "GraphQL: Error: HTTP 403: Forbidden (https://api.github.com/graphql)" >&2
     exit 1 ;;
   "run list")
@@ -552,7 +559,14 @@ rows() {  # name=bucket|name=bucket -> one "name<TAB>bucket" per line
 }
 case "$2" in
   repos/*/pulls/*)
-    printf '%s\n' deadbeefdeadbeefdeadbeefdeadbeefdeadbeef ;;
+    # GH_STUB_PULLS: one head per call (the last repeats); ERROR fails the call.
+    h=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef
+    if [ -n "${GH_STUB_PULLS:-}" ]; then
+      k=$(cat "$GH_STUB_PULLS.n" 2>/dev/null || echo 0); k=$((k + 1)); echo "$k" > "$GH_STUB_PULLS.n"
+      h=$(sed -n "${k}p" "$GH_STUB_PULLS"); [ -z "$h" ] && h=$(tail -n 1 "$GH_STUB_PULLS")
+    fi
+    [ "$h" = "ERROR" ] && { echo "HTTP 502: Bad Gateway" >&2; exit 1; }
+    printf '%s\n' "$h" ;;
   repos/*/check-runs*)
     # a poll is complete when its check-runs are read; advance the script then
     echo "$((n + 1))" > "$state"
@@ -561,7 +575,7 @@ case "$2" in
       RAW)  printf '{"total_count":1,"check_runs":[{"name":"build","status":"completed","conclusion":"failure"}]}\n' ;;
       *)    rows "${line%%;*}" ;;
     esac ;;
-  repos/*/status)
+  repos/*/status\?per_page=100)
     case "$line" in
       *";"*) rows "${line#*;}" ;;
       *) ;;
@@ -618,6 +632,28 @@ run_rest "...and names the REST failure too"          3 "HTTP 502"  -- "API_ERRO
 run_rest "transport pinned to graphql never falls back" 3 "HTTP 403" WAIT_FOR_PR_CHECKS_TRANSPORT=graphql -- "$RP"
 run_rest "transport pinned to rest skips gh pr checks"  0 "transport pinned to rest" WAIT_FOR_PR_CHECKS_TRANSPORT=rest -- "$RP"
 run_rest "an unknown transport is a usage error"      3 "must be auto, graphql or rest" WAIT_FOR_PR_CHECKS_TRANSPORT=soap -- "$RP"
+
+# The refusal met in the checks read (the head read answered): the same switch,
+# and a pin to graphql still forbids it.
+run_rest "pr checks alone refused: the checks read falls back" 0 "reading check runs over the REST API" GH_STUB_VIEW_OK=1 -- "$RP"
+run_rest "pr checks alone refused, pinned to graphql: no fallback" 3 "HTTP 403" GH_STUB_VIEW_OK=1 WAIT_FOR_PR_CHECKS_TRANSPORT=graphql -- "$RP"
+if grep -q 'check-runs' "$tmp/calls"; then
+  fail=$((fail + 1)); echo "FAIL: pinned to graphql, no REST call may be made"
+else
+  pass=$((pass + 1))
+fi
+
+# On REST the head is read with the pull-request endpoint. Calls in order: the
+# startup read, then per poll the rows' own read and the read that confirms
+# the head before green.
+HA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+HB=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+printf '%s\n' "$HA" "$HA" "$HB" > "$tmp/pulls"; rm -f "$tmp/pulls.n"
+run_rest "a head that moves while on REST starts the window over, then settles" 0 "head moved to bbbbbbbbbbbb" GH_STUB_PULLS="$tmp/pulls" -- "$RP"
+printf '%s\n' "$HA" "$HA" "ERROR" > "$tmp/pulls"; rm -f "$tmp/pulls.n"
+run_rest "a head read that fails mid-watch on REST is exit 3, not green" 3 "gh failed while confirming workflow runs" GH_STUB_PULLS="$tmp/pulls" -- "$RP"
+# A pin to graphql holds even when gh pr view answers with nothing.
+run_rest "pinned to graphql, an empty head answer does not fall back" 3 "unreadable head sha" GH_STUB_VIEW_OK=empty WAIT_FOR_PR_CHECKS_TRANSPORT=graphql -- "$RP"
 
 # Once REST has answered, GraphQL is not retried on every poll: three polls
 # make exactly one GraphQL call (the first head reading) and no `pr checks`.

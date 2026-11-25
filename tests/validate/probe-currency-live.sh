@@ -23,20 +23,26 @@
 
 set -uo pipefail
 
+# An inherited GIT_DIR would make the resets below act on the caller's
+# repository instead of the clone.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR
+
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 script="$ROOT/skills/validate/check-currency.sh"
 remote=""
 doc="README.md"
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --script) script="$2"; shift 2 ;;
-    --remote) remote="$2"; shift 2 ;;
-    --doc)    doc="$2"; shift 2 ;;
+    --script) [[ $# -ge 2 ]] || { echo "--script needs a value" >&2; exit 3; }; script="$2"; shift 2 ;;
+    --remote) [[ $# -ge 2 ]] || { echo "--remote needs a value" >&2; exit 3; }; remote="$2"; shift 2 ;;
+    --doc) [[ $# -ge 2 ]] || { echo "--doc needs a value" >&2; exit 3; }; doc="$2"; shift 2 ;;
     *) echo "usage: probe-currency-live.sh [--script PATH] [--remote URL] [--doc PATH]" >&2; exit 3 ;;
   esac
 done
 [[ -n "$remote" ]] || remote="$(git -C "$ROOT" remote get-url origin 2>/dev/null)" || { echo "no origin remote; pass --remote" >&2; exit 3; }
 [[ -f "$script" ]] || { echo "no such script: $script" >&2; exit 3; }
+# Made absolute now: the probe changes directory before it runs the script.
+script="$(cd "$(dirname "$script")" && pwd)/$(basename "$script")"
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
@@ -60,7 +66,7 @@ expect() {
 
 expect "a fresh clone of $default is current" 0 "CURRENT"
 
-git reset -q --hard HEAD~1
+git reset -q --hard HEAD~1 || { echo "the remote's $default has a single commit; the probe needs two" >&2; exit 3; }
 expect "$default reset one commit back is stale" 1 "behind origin/$default"
 
 git checkout -q -b probe-feature

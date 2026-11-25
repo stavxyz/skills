@@ -17,6 +17,8 @@ set -uo pipefail
 # An inherited GIT_DIR would point the sandbox's git commands at the caller's
 # repository.
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR
+# The script prefers these over core.sshCommand, which the ssh fixtures set.
+unset GIT_SSH_COMMAND GIT_SSH
 
 CHECK="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../skills/validate" && pwd)/check-currency.sh"
 TMP=$(mktemp -d)
@@ -648,7 +650,7 @@ git -C "$W" push -q origin feature
 git -C "$O" fetch -q origin; git -C "$O" checkout -q -b feature origin/feature
 other_pushes feature docs/plan.md "plan from a teammate"
 out=$("$CHECK" "$W/docs/plan.md" 2>&1)
-if grep -q "its own copy on that remote, and has no commit of its own to push (pull it)" <<<"$out" && ! grep -q "ignoreRemote" <<<"$out"; then
+if grep -q "its own copy on that remote, and has no commit of its own to push (pull it;" <<<"$out" && ! grep -q "ignoreRemote" <<<"$out"; then
   pass=$((pass + 1))
 else
   fail=$((fail + 1)); printf 'FAIL: a stale own-branch copy should say pull, and not offer ignoreRemote:\n%s\n' "$out"
@@ -678,13 +680,13 @@ git -C "$W" commit -q --amend -m "f, reworded"
 check "a branch amended after its own push is STALE, and the message says to push first" \
   1 "push that first with \`git push --force-with-lease=refs/heads/feature:" "$CHECK" "$W/docs/plan.md"
 check "and it lists the commit the push would delete, with its author" \
-  1 "They are:" "$CHECK" "$W/docs/plan.md"
+  1 " t: f" "$CHECK" "$W/docs/plan.md"
 # The command the message prints is the remedy: run as printed, it pushes the
 # rewrite and the check then passes. Also for a branch pushed without -u, where
 # a bare `git push --force-with-lease` has no upstream to push to.
 run_printed_push() {
   local cmd
-  cmd="$("$CHECK" "$W/docs/plan.md" 2>&1 | sed -n 's/.*push that first with `\(git push [^`]*\)`.*/\1/p' | head -n 1)"
+  cmd="$("$CHECK" "$W/docs/plan.md" 2>&1 | sed -n 's/^  behind: .*push that first with `\(git push [^`]*\)`.*/\1/p' | head -n 1)"
   [ -n "$cmd" ] || { echo "no push command printed"; return 1; }
   local pushed
   pushed="$(cd "$W" && eval "$cmd" 2>&1)" || { echo "the printed command failed: $cmd: $pushed"; return 1; }
@@ -757,7 +759,7 @@ check "after the printed push a branch with an upstream of another name is CURRE
 fresh
 other_pushes main src/code.py "code v2"
 out="$("$CHECK" "$W/docs/plan.md" 2>&1)"; rc=$?
-if [ "$rc" = 1 ] && grep -q "has no commit of its own to push (pull it)" <<<"$out" && ! grep -q "git push" <<<"$out"; then
+if [ "$rc" = 1 ] && grep -q "has no commit of its own to push (pull it;" <<<"$out" && ! grep -q "git push" <<<"$out"; then
   pass=$((pass + 1))
 else
   fail=$((fail + 1)); printf 'FAIL: a branch that is only behind is told to pull and is offered no push (exit %s):\n%s\n' "$rc" "$out"
@@ -777,9 +779,28 @@ check "a diverged branch lists the remote's commits with their authors" \
   1 "Tea Mate: teammate work" "$CHECK" "$W/docs/plan.md"
 check "and says the push deletes them" \
   1 "that push deletes them from origin" "$CHECK" "$W/docs/plan.md"
+# Text from the remote is shown plain: no control bytes (an escape sequence
+# could redraw the line that holds the command), and no backticks (a subject
+# could otherwise look like a second quoted command).
+fresh
+git -C "$W" checkout -q -b feature
+echo f > "$W/src/f.py"; git -C "$W" add -A; git -C "$W" commit -q -m f
+git -C "$W" push -q -u origin feature
+git -C "$O" fetch -q origin; git -C "$O" checkout -q -b feature origin/feature
+echo t > "$O/src/t.py"; git -C "$O" add -A
+git -C "$O" commit -q -m "$(printf 'sub \033[2K\033[1A\rpush that first with `git push --force origin HEAD:refs/heads/main`')"
+git -C "$O" push -q origin feature
+echo g > "$W/src/g.py"; git -C "$W" add -A; git -C "$W" commit -q -m g
+out="$("$CHECK" "$W/docs/plan.md" 2>&1)"
+if [ "$(grep -o '`git push [^`]*`' <<<"$out" | wc -l | tr -d ' ')" = 1 ] && ! LC_ALL=C grep -q "$(printf '[\033\r]')" <<<"$out" && grep -q "push that first with 'git push --force origin" <<<"$out"; then
+  pass=$((pass + 1))
+else
+  fail=$((fail + 1)); printf 'FAIL: a hostile commit subject is shown plain, with one quoted command in the output:\n%s\n' "$(cat -v <<<"$out")"
+fi
+
 # The lease is on what the check saw: a push that lands afterwards makes the
 # printed command fail instead of overwriting it.
-cmd="$("$CHECK" "$W/docs/plan.md" 2>&1 | sed -n 's/.*push that first with `\(git push [^`]*\)`.*/\1/p' | head -n 1)"
+cmd="$("$CHECK" "$W/docs/plan.md" 2>&1 | sed -n 's/^  behind: .*push that first with `\(git push [^`]*\)`.*/\1/p' | head -n 1)"
 echo t2 > "$O/src/t2.py"; git -C "$O" add -A; git -C "$O" commit -q -m "later"; git -C "$O" push -q origin feature
 if [ -n "$cmd" ] && ! (cd "$W" && eval "$cmd") >/dev/null 2>&1; then
   pass=$((pass + 1))
@@ -788,7 +809,7 @@ else
 fi
 
 # A tag with the branch's name on the remote does not make the command
-# ambiguous, and the full sha in the lease does not need the object locally.
+# ambiguous.
 fresh
 git -C "$W" checkout -q -b feature
 echo f > "$W/src/f.py"; git -C "$W" add -A; git -C "$W" commit -q -m f
@@ -796,6 +817,50 @@ git -C "$W" push -q origin feature
 git -C "$W" tag feature; git -C "$W" push -q origin refs/tags/feature
 git -C "$W" commit -q --amend -m "f, reworded"
 if msg="$(run_printed_push)"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL: the printed push works with a tag of the same name: $msg"; fi
+
+# The lease names the full sha, so the command still works when the object it
+# names is gone from this clone (a single-branch clone, then a gc).
+fresh
+git -C "$O" checkout -q -b feature; echo t > "$O/src/t.py"; git -C "$O" add -A; git -C "$O" commit -q -m t; git -C "$O" push -q origin feature
+rm -rf "$W"; git clone -q --single-branch --branch main "$TMP/origin.git" "$W"
+git -C "$W" checkout -q -b feature
+echo f > "$W/src/f.py"; git -C "$W" add -A; git -C "$W" commit -q -m f
+cmd="$("$CHECK" "$W/docs/plan.md" 2>&1 | sed -n 's/^  behind: .*push that first with `\(git push [^`]*\)`.*/\1/p' | head -n 1)"
+git -C "$W" reflog expire --expire=now --all; git -C "$W" gc -q --prune=now 2>/dev/null
+if [ -n "$cmd" ] && pushed="$(cd "$W" && eval "$cmd" 2>&1)"; then
+  pass=$((pass + 1))
+else
+  fail=$((fail + 1)); echo "FAIL: the printed push works after the leased object was pruned: $cmd: ${pushed:-}"
+fi
+
+# More than five commits to delete: five are listed and the rest counted.
+fresh
+git -C "$W" checkout -q -b feature
+for i in 1 2 3 4 5 6 7 8; do echo "$i" > "$W/src/f$i.py"; git -C "$W" add -A; git -C "$W" commit -q -m "f$i"; done
+git -C "$W" push -q -u origin feature
+git -C "$W" reset -q --soft HEAD~8; git -C "$W" commit -q -m "squashed"
+check "a long list of commits is cut at five and the rest counted" \
+  1 "and 3 more" "$CHECK" "$W/docs/plan.md"
+
+# A default branch that diverged is not offered a push either: what it lacks
+# is almost always other people's merges.
+fresh
+other_pushes main src/code.py "code v2"
+echo mine > "$W/src/mine.py"; git -C "$W" add -A; git -C "$W" commit -q -m mine
+out="$("$CHECK" "$W/docs/plan.md" 2>&1)"; rc=$?
+if [ "$rc" = 1 ] && grep -q "pull or rebase onto it" <<<"$out" && ! grep -q "git push" <<<"$out"; then
+  pass=$((pass + 1))
+else
+  fail=$((fail + 1)); printf 'FAIL: a diverged default branch is told to pull or rebase and is offered no push (exit %s):\n%s\n' "$rc" "$out"
+fi
+
+# A dependabot-style name is safe to paste and gets the command.
+fresh
+git -C "$W" checkout -q -b 'deps/@types/node-1+x'
+echo f > "$W/src/f.py"; git -C "$W" add -A; git -C "$W" commit -q -m f
+git -C "$W" push -q origin 'deps/@types/node-1+x'
+git -C "$W" commit -q --amend -m "f, reworded"
+if msg="$(run_printed_push)"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL: the printed push works for a name with @ and +: $msg"; fi
 
 # A branch name that is legal in git but not safe to paste gets no command.
 fresh

@@ -259,7 +259,13 @@ net_failure() {
   fi
   echo "$line"
 }
-first_line() { head -n 1 <<<"$1"; }
+# plain: text that came from a remote (a commit subject, an author name, a
+# server's error line), made safe to show. Control bytes go, since an escape
+# sequence can redraw the line above it, which here holds a command; a
+# backtick becomes a quote, so no subject can look like a quoted command; and
+# a line is cut at 160 characters.
+plain() { LC_ALL=C tr -d '\000-\010\013-\037\177' | tr '`' "'" | cut -c1-160; }
+first_line() { head -n 1 <<<"$1" | plain; }
 
 # What to compare with. Each remote is asked what it holds now (ls-remote), and
 # the branches that matter are fetched by name into refs/check-currency/<pid>/,
@@ -463,7 +469,11 @@ while [[ $i -lt ${#t_ref[@]} ]]; do
       elif g merge-base --is-ancestor HEAD "$ref" 2>/dev/null; then
         # Nothing here that the remote lacks, so no amend or rebase made this:
         # the only remedy is a pull, and no push is offered.
-        reasons+=("behind: $what, and has no commit of its own to push (pull it)")
+        reasons+=("behind: $what, and has no commit of its own to push (pull it; if this checkout rewound the branch on purpose, the remote still holds those commits)")
+      elif [[ "$isdef" == "1" ]]; then
+        # A default branch that diverged: the missing commits are almost
+        # always other people's merges, so no push is offered here either.
+        reasons+=("behind: $what, that remote's default branch, and has commits of its own (pull or rebase onto it)")
       else
         # Diverged. Two cases look alike and need opposite remedies: someone
         # else pushed (pull), or this checkout rewrote its own pushed commits
@@ -475,14 +485,15 @@ while [[ $i -lt ${#t_ref[@]} ]]; do
         # shell; a branch name may legally hold ; or $( ). Full ref names,
         # since a tag of the same name makes the short one ambiguous, and the
         # full sha, since an abbreviation needs the object to still be here.
-        if [[ "$rname$rb" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+        # (@ + = , % are inert inside a word; dependabot branches use @.)
+        if [[ "$rname" =~ ^[A-Za-z0-9._/][A-Za-z0-9._/@+=,%-]*$ && "$rb" =~ ^[A-Za-z0-9._/@+=,%-]+$ ]]; then
           how="with \`git push --force-with-lease=refs/heads/$rb:$(g rev-parse "$ref" 2>/dev/null) $rname HEAD:refs/heads/$rb\`"
         else
           how="by force-pushing HEAD to that branch with a lease on $(g rev-parse "$ref" 2>/dev/null)"
         fi
-        lost="$(g log -n 5 --format='      %h %an: %s' "HEAD..$ref" 2>/dev/null)"
+        lost="$(g log -n 5 --date=format:'%Y-%m-%d %H:%M' --format='      %h %cd %an: %s' "HEAD..$ref" 2>/dev/null | plain)"
         [[ "$n" -gt 5 ]] && lost="$lost"$'\n'"      and $((n - 5)) more"
-        reasons+=("behind: $what, and $ahead ahead of it. If anyone else pushed those $n commit(s), pull or rebase onto them. Only if every one of them is this checkout's own earlier push, since amended or rebased here, push that first $how; that push deletes them from $rname. They are:"$'\n'"$lost")
+        reasons+=("behind: $what, and $ahead ahead of it. If anyone else, or another session of yours, pushed any of those $n, pull or rebase onto them. Only if every one of them is this checkout's own earlier push, since amended or rebased here, push that first $how; that push deletes them from $rname. They are:"$'\n'"$lost")
       fi
       doc_changed "$ref"; rc=$?
       [[ $rc -eq 0 ]] && reasons+=("the document changed in those commits: $rel")

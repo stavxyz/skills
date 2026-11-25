@@ -148,6 +148,38 @@ def describe(c):
     return f"  {short(c['sha'])} {subject(c['message'])}"
 
 
+def stale_sha_mentions(commits, messages, first):
+    """Messages in the range that cite a commit this rewrite replaces.
+
+    Every commit from the first changed one onward gets a new sha, so a later
+    message that names one of them by sha ("fixes the test added in 1a2b3c4")
+    is left pointing at a commit that is no longer on the branch. Returns
+    (index of the citing commit, the cited text, index of the cited commit).
+    """
+    replaced = [(i, c["sha"]) for i, c in enumerate(commits) if i >= first]
+    found = []
+    for i, m in enumerate(messages):
+        for word in set(re.findall(r"\b[0-9a-f]{7,40}\b", m)):
+            for j, sha in replaced:
+                if sha.startswith(word):
+                    found.append((i, word, j))
+    return sorted(found)
+
+
+def print_stale_mentions(commits, messages, first, new_shas=None):
+    mentions = stale_sha_mentions(commits, messages, first)
+    if not mentions:
+        return
+    print(
+        f"note: {len(mentions)} mention(s) of a sha this rewrite replaces. Fix each with --replace "
+        "in a second pass, or the message will cite a commit that is not on the branch:"
+    )
+    for i, word, j in mentions:
+        now = f" (now {short(new_shas[j])})" if new_shas else ""
+        where = short(new_shas[i]) if new_shas else short(commits[i]["sha"])
+        print(f"  {where} \"{subject(messages[i])}\" cites {word}{now}")
+
+
 def apply_replace(commits, entries, messages):
     for n, e in enumerate(entries, 1):
         prefix = e.get("subject_prefix", "")
@@ -320,6 +352,7 @@ def main(argv):
                 ))
                 if not messages[i].endswith("\n"):
                     sys.stdout.write("\n")
+            print_stale_mentions(commits, messages, changed[0])
             print(f"dry run: {len(changed)} commit message(s) would change; nothing was written")
             return 0
 
@@ -381,6 +414,7 @@ def main(argv):
         for c, new, m in zip(commits, new_shas, messages):
             mark = "*" if m != c["message"] else " "
             print(f"  {mark} {short(c['sha'])} -> {short(new)}  {subject(m)}")
+        print_stale_mentions(commits, messages, first, new_shas)
         print("push with:")
         lease = args.remote_tip or "<remote-tip>"
         print(f"  git push --force-with-lease={branch}:{lease} <remote> HEAD:{branch}")

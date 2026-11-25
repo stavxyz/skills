@@ -55,7 +55,7 @@ Verify in order, exiting on the first failure:
 
    - Exit `0` (`CURRENT`): continue. A `note:` line (a feature branch behind the default branch, with the document unchanged there) goes in the final report.
    - Exit `1` (`STALE`): report `⛔ validate: this checkout is out of date.` followed by the script's reasons, tell the operator to pull or rebase and re-run, and exit. Do not dispatch reviewers.
-   - Exit `2` (`UNVERIFIED`): currency could not be established. There is no remote, a fetch failed, a remote's default branch could not be found, there is no common history, or the document may have been moved and rewritten beyond what git recognizes as a rename. The script prints which. Continue, set `CURRENCY_UNVERIFIED=1`, and say so in the final report. It is a caveat on the bless (see "Define clean bless"), never a pass.
+   - Exit `2` (`UNVERIFIED`): currency could not be established. (A remote that should never count, such as a mirror or an unrelated project, is excluded with `git config --add validate.ignoreRemote <name>`; say so to the operator when the reason names a remote.) There is no remote, a fetch failed, a remote's default branch could not be found, there is no common history, or the document may have been moved and rewritten beyond what git recognizes as a rename. The script prints which. Continue, set `CURRENCY_UNVERIFIED=1`, and say so in the final report. It is a caveat on the bless (see "Define clean bless"), never a pass.
    - Exit `3`, or any other exit code: report the script's message and exit.
    - The Bash call timing out (a fetch waiting on a network or an approval nobody answered): treat as exit `2`.
 
@@ -519,7 +519,7 @@ bash "$SKILL_DIR/check-currency.sh" "$ARGUMENTS" --since "$HEAD_SHA"
 
 On exit `1`, the run is not a bless, whatever the findings were. Report `⛔ validate: the base moved before the bless could be recorded.` with the script's reasons in place of the banner this run would otherwise print (blessed or blocked), do not write the `validated:` block, skip "Persist the spec file" (do not stage or commit anything), and skip "Auto-continue on clean bless". The edits already applied stay uncommitted in the working copy for the operator to carry across a pull. Exit `2`, or the Bash call timing out, sets `CURRENCY_UNVERIFIED=1`: a timeout is "could not tell", the same at all three calls, and never "the base moved". Any other result, including exit `3`, is handled as exit `1` with the script's own message. Only `0`, `2`, and a timeout may reach the banner and the block, and only `0` may write `base_current: true`.
 
-On exit `0`, keep the number from the script's `behind_default=<n>` line as `BEHIND_DEFAULT`. On every other path `BEHIND_DEFAULT` is unset, and nothing below prints or records a number for it.
+On exit `0`, keep the number from the script's `behind_default=<n>` line as `BEHIND_DEFAULT`, and clear `CURRENCY_UNVERIFIED` if an earlier call set it: this call shows `HEAD` is still the commit the run started on and that nothing on any remote is ahead of it now, so nothing was ahead of it earlier either. The flag stays set only when this last call is itself exit `2` or a timeout. On every other path `BEHIND_DEFAULT` is unset, and nothing below prints or records a number for it.
 
 ### Print the structured banner
 
@@ -559,7 +559,7 @@ Findings:
                STALE (<the script's reasons>) — not a bless
 ```
 
-Take the `Base:` line from `check-currency.sh`: `UNVERIFIED` if `CURRENCY_UNVERIFIED` was set at any of its three calls, with the reason it printed. If any call printed a `note:` line, print it under the table. A non-zero count means the document is unchanged on the default branch, but the reviewers verified its claims against code that many commits behind it; the script does not check whether the files the document cites changed there. It is recorded, and it is not a caveat.
+Take the `Base:` line from `check-currency.sh`: `UNVERIFIED` if `CURRENCY_UNVERIFIED` is still set after the last call, with the reason that call printed. If any call printed a `note:` line, print it under the table. A non-zero count means the document is unchanged on the default branch, but the reviewers verified its claims against code that many commits behind it; the script does not check whether the files the document cites changed there. It is recorded, and it is not a caveat.
 
 Take the `Citations:` numbers from the `<!-- citations: … -->` comment on the first line of `CITATION_RAW`. Print the line even when all four numbers are zero: a run that found no citations and a run where the check never happened produce the same empty findings list, and only this line distinguishes them.
 

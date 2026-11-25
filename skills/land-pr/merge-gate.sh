@@ -12,8 +12,9 @@
 # Exit codes, one per action the caller takes:
 #   0  READY: open, not a draft, head is still the blessed sha, not behind the
 #      base (or behind only by commits that leave the merge result equal to
-#      the head's tree, as after a merge-commit promotion), GitHub reports it mergeable and not blocked. Checks are
-#      not read: run the CI watcher first.
+#      the head's tree, as after a merge-commit promotion), GitHub reports it
+#      mergeable and not blocked. Checks are not read: run the CI watcher
+#      first.
 #   1  NOT READY: one line per reason on stdout; the bless is void or the PR
 #      needs work before it can merge
 #   2  UNKNOWN: GitHub had not computed mergeability after every retry, or a

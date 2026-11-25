@@ -111,6 +111,7 @@ case "$sub" in
         jq -n --argjson behind "$GH_STUB_BEHIND" '{status:"diverged", ahead_by:7, behind_by:$behind}' | jq -r "$jq_prog" ;;
       */git/ref/heads/main|*/git/ref/heads/release/1.x)
         [ "${GH_STUB_MERGE-differs}" = "error" ] && { echo "HTTP 500" >&2; exit 1; }
+        [ "${GH_STUB_MERGE-differs}" = "badbasetip" ] && { echo "not-a-sha"; exit 0; }
         jq -n --arg s "$BASE_TIP" '{object:{sha:$s}}' | jq -r "$jq_prog" ;;
       */git/commits/"$TEST_MERGE")
         head=$(cat "$GH_STUB_STATE.head")
@@ -122,6 +123,8 @@ case "$sub" in
           failmerge) echo "HTTP 502" >&2; exit 1 ;;
           garbage) echo "not json at all"; exit 0 ;;
           badtree) echo "not-a-sha|$BASE_TIP,$head"; exit 0 ;;
+          noparents) echo "$TREE_HEAD|"; exit 0 ;;
+          extrafield) echo "$TREE_HEAD|$BASE_TIP,$head|surplus"; exit 0 ;;
           *)       tree=$TREE_OTHER; first=$BASE_TIP ;;
         esac
         jq -n --arg t "$tree" --arg a "$first" --arg b "$head" '{tree:{sha:$t}, parents: ([$a] + ($b | split(",")) | map({sha: .}))}' | jq -r "$jq_prog" ;;
@@ -299,6 +302,15 @@ check "an unreadable test merge is UNKNOWN, never READY" 2 "unreadable test merg
 
 GH_STUB_MERGE=badtree gate 10 "$ready" -- 7 --sha "$SHA" --interval 0
 check "a test merge whose tree is not a sha is UNKNOWN, never READY" 2 "unreadable test merge"
+
+GH_STUB_MERGE=noparents gate 10 "$ready" -- 7 --sha "$SHA" --interval 0
+check "a test merge with no parents listed is UNKNOWN, not a stale test merge" 2 "unreadable test merge"
+
+GH_STUB_MERGE=extrafield gate 10 "$ready" -- 7 --sha "$SHA" --interval 0
+check "a test merge answer with a surplus field is UNKNOWN" 2 "unreadable test merge"
+
+GH_STUB_MERGE=badbasetip gate 10 "$ready" -- 7 --sha "$SHA" --interval 0
+check "a base tip that is not a sha is UNKNOWN, not a stale test merge" 2 "unreadable tip of main"
 
 GH_STUB_MERGE=error gate 10 "$ready" -- 7 --sha "$SHA" --interval 0
 check "gh failing while reading the base tip exits 3, never READY" 3 "failed"

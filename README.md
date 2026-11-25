@@ -157,7 +157,9 @@ Installed this way they are **user skills**, which are not namespaced — so you
 │       ├── SKILL.md
 │       └── census.sh
 └── tests/                 # dev-only, not part of the installed plugin
-    ├── validate/          # automated tests for check-citations.py and check-currency.sh
+    ├── validate/          # automated tests for check-citations.py and check-currency.sh, and probe-currency-live.sh,
+    │                      #   which runs check-currency.sh against the real remote (run it after changing the script,
+    │                      #   and with --script <installed copy> after a plugin update)
     ├── validate-fixtures/ # sample specs for exercising validate by hand
     ├── polish-pr/         # automated tests for resolve-pr-remotes.sh, reword-commits.py, and wait-for-pr-checks.sh
     ├── land-pr/           # automated tests for merge-gate.sh and tick-test-plan.py

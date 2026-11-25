@@ -896,13 +896,15 @@ echo 1 > "$O/src/t1.py"; git -C "$O" add -A; git -C "$O" commit -q -m "first of 
 echo 2 > "$O/src/t2.py"; git -C "$O" add -A
 tree="$(git -C "$O" write-tree)"
 # hash-object stores the bytes as given; commit-tree would re-encode them.
-bad="$(printf 'tree %s\nparent %s\nauthor t <t@example.com> 1700000000 +0000\ncommitter t <t@example.com> 1700000000 +0000\n\nfix caf\351 thing \302\302\233\233[1A nested %s\n' "$tree" "$(git -C "$O" rev-parse HEAD)" "$(perl -e 'print "\xc2" x 40000, "\x9b" x 40000' 2>/dev/null)" | git -C "$O" hash-object -t commit -w --stdin)"
+bad="$(printf 'tree %s\nparent %s\nauthor t <t@example.com> 1700000000 +0000\ncommitter t <t@example.com> 1700000000 +0000\n\nfix caf\351 thing \302\302\233\233[1A nested %s\n' "$tree" "$(git -C "$O" rev-parse HEAD)" "$(printf '%*s' 80000 '' | LC_ALL=C tr ' ' '\302'; printf '%*s' 80000 '' | LC_ALL=C tr ' ' '\233')" | git -C "$O" hash-object -t commit -w --stdin)"
 if git -C "$O" cat-file commit "$bad" | LC_ALL=C grep -q "$(printf 'caf\351')"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL: the fixture commit holds a raw Latin-1 byte"; fi
 git -C "$O" reset -q --hard "$bad"
 echo 3 > "$O/src/t3.py"; git -C "$O" add -A; git -C "$O" commit -q -m "third of three"
 git -C "$O" push -q origin feature
 echo g > "$W/src/g.py"; git -C "$W" add -A; git -C "$W" commit -q -m g
-# The subject also ends in 40,000 nested pairs: filtering it must stay fast.
+# The subject also ends in 80,000 c2 bytes and then 80,000 9b bytes. This pins
+# the bound on the filter's input: a filter that rescans the whole subject
+# takes far longer than the limit.
 started=$SECONDS
 out="$(LC_ALL=en_US.UTF-8 "$CHECK" "$W/docs/plan.md" 2>&1)"
 if [ $((SECONDS - started)) -le 8 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL: a huge hostile subject does not slow the check (took $((SECONDS - started))s)"; fi

@@ -86,6 +86,7 @@ every run; `--strict` and `--no-strict` override it for one invocation.
 
 Usage:
     check-citations.py <document.md> [--repo-root DIR] [--strict|--no-strict]
+    check-citations.py <document.md> [--repo-root DIR] --paths
 """
 
 from __future__ import annotations
@@ -543,8 +544,10 @@ def main() -> int:
         "--paths",
         action="store_true",
         help="print the tracked files the document cites, one repository-relative "
-             "path per line, and check nothing. A citation whose path does not "
-             "resolve to exactly one tracked file is left out. check-currency.sh "
+             "path per line, and check nothing. A citation whose path resolves "
+             "to no tracked file is left out, an ambiguous bare filename lists "
+             "every file it could mean, and a file inside a "
+             "submodule is listed as the submodule's mount point. check-currency.sh "
              "uses this to see whether a cited file changed on the default branch.",
     )
     args = ap.parse_args()
@@ -581,11 +584,21 @@ def main() -> int:
         return 2
 
     if args.paths:
+        # A file inside a submodule is listed as the submodule's mount point:
+        # the superproject's history records the submodule only as that one
+        # entry, so a diff of the superproject can see the mount point move
+        # and can never see a path beneath it.
+        mounts = gitlinks(repo)
         cited: set[str] = set()
         for cite in citations(doc):
-            target, _ = resolve(cite.path, repo)
-            if target is not None:
-                cited.add(target.relative_to(repo).as_posix())
+            # An ambiguous bare filename names one of several files and the
+            # checker cannot say which, so all of them are listed: a change to
+            # any is a change to what the document may be citing.
+            target, candidates = resolve(cite.path, repo)
+            names = [target.relative_to(repo).as_posix()] if target is not None else candidates
+            for name in names:
+                inside = [m for m in mounts if name == m or name.startswith(m + "/")]
+                cited.add(max(inside, key=len) if inside else name)
         for name in sorted(cited):
             print(name)
         return 0

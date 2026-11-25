@@ -5,6 +5,7 @@
 # Usage:
 #   check-currency.sh <path-to-doc.md>
 #   check-currency.sh <path-to-doc.md> --since <sha>   # re-check later in a run
+#   check-currency.sh <path-to-doc.md> --no-cited      # do not compare the files the document cites
 #
 # Exit codes:
 #   0  CURRENT: nothing below applies. Also prints behind_default=<n>, the
@@ -29,8 +30,8 @@
 #   2  UNVERIFIED: currency could not be established: no remote, a remote did
 #      not answer within CHECK_CURRENCY_NET_TIMEOUT seconds (default 25) or
 #      failed, a remote's default branch could not be found, a count failed,
-#      there is no common history, or the document may have been renamed
-#      beyond recognition. Never a pass: the caller records it as a caveat.
+#      there is no common history, the document may have been renamed
+#      beyond recognition, or the files it cites could not be listed. Never a pass: the caller records it as a caveat.
 #   3  usage error, not a git repository, or the document is not in the repo
 #
 # Why this exists: validate's reviewers read the working copy. If that copy is
@@ -45,8 +46,9 @@
 #
 # On a feature branch, being behind the default branch is ordinary and does not
 # stop the run; it is reported as a count. It stops the run only when the
-# document itself changed on the default branch since the branch point, because
-# then validate would be editing an outdated copy of it.
+# document, or a file the document cites, changed on the default branch since
+# the branch point: then validate would be editing an outdated copy of the
+# document, or checking it against code that has moved.
 
 set -uo pipefail
 
@@ -462,16 +464,22 @@ doc_changed() {
 # is no common history. The cited files are listed once, by the sibling
 # check-citations.py, from the document as it is in this checkout.
 cited_state=""   # "", ok, or failed
+cited_err=""
 cited=()
 cited_changed() {
-  local ref=$1 bases mb out p listed
+  local ref=$1 bases mb out p listed specs status a b
   cited_hit=""
   if [[ -z "$cited_state" ]]; then
     cited_state=failed
-    if command -v python3 >/dev/null 2>&1 && [[ -f "$here/check-citations.py" ]] \
-       && listed="$(python3 "$here/check-citations.py" "$doc" --repo-root "$root" --paths 2>/dev/null)"; then
+    if ! command -v python3 >/dev/null 2>&1; then
+      cited_err="python3 is not installed"
+    elif [[ ! -f "$here/check-citations.py" ]]; then
+      cited_err="check-citations.py is not beside this script"
+    elif listed="$(python3 "$here/check-citations.py" "$doc" --repo-root "$root" --paths 2>/dev/null)"; then
       cited_state=ok
-      while IFS= read -r p; do [[ -n "$p" ]] && cited+=(":(literal)$p"); done <<<"$listed"
+      while IFS= read -r p; do [[ -n "$p" ]] && cited+=("$p"); done <<<"$listed"
+    else
+      cited_err="$(python3 "$here/check-citations.py" "$doc" --repo-root "$root" --paths 2>&1 >/dev/null | tail -n 1 | plain)"
     fi
   fi
   [[ "$cited_state" == ok ]] || return 2
@@ -479,10 +487,38 @@ cited_changed() {
   bases="$(g merge-base --all HEAD "$ref" 2>/dev/null)" || return 2
   [[ -n "$bases" ]] || return 2
   for mb in $bases; do
-    out="$(g diff --name-only "$mb" "$ref" -- "${cited[@]}" 2>/dev/null)" || return 2
-    [[ -n "$out" ]] && cited_hit="${cited_hit:+$cited_hit"$'\n'"}$out"
+    specs=()
+    for p in "${cited[@]}"; do specs+=(":(literal)$p"); done
+    # A cited file this branch renamed is still under its old name on the
+    # other side, so the old name is compared too (as doc_changed does for
+    # the document).
+    while IFS= read -r -d '' status; do
+      case "$status" in
+        R*|C*) IFS= read -r -d '' a || break; IFS= read -r -d '' b || break
+               if [[ "$status" == R* ]]; then
+                 for p in "${cited[@]}"; do [[ "$p" == "$b" ]] && specs+=(":(literal)$a"); done
+               fi ;;
+        *)     IFS= read -r -d '' a || break ;;
+      esac
+    done < <(g diff -M -z --name-status "$mb" HEAD 2>/dev/null)
+    out="$(g -c core.quotePath=false diff --name-only "$mb" "$ref" -- "${specs[@]}" 2>/dev/null)" || return 2
+    [[ -n "$out" ]] && cited_hit+="${cited_hit:+$'\n'}$out"
   done
   [[ -n "$cited_hit" ]] && cited_hit="$(sort -u <<<"$cited_hit" | plain)"
+  return 0
+}
+
+# cited_stale <ref> <display name> <commits behind>: 0 when a cited file
+# changed there (the reason is added), 1 when none did, 2 when it could not be
+# told.
+cited_stale() {
+  local k shown
+  cited_changed "$1" || return 2
+  [[ -n "$cited_hit" ]] || return 1
+  k="$(grep -c . <<<"$cited_hit")"
+  shown="$(head -n 5 <<<"$cited_hit" | awk '{ printf "%s%s", (NR > 1 ? ", " : ""), $0 }')"
+  [[ "$k" -gt 5 ]] && shown="$shown, and $((k - 5)) more"
+  reasons+=("$k file(s) the document cites changed on $2 after this branch left it ($3 commit(s) behind): $shown (fetch, then rebase onto $2 or merge it, so the reviewers read the code the document will land on)")
   return 0
 }
 
@@ -563,17 +599,17 @@ while [[ $i -lt ${#t_ref[@]} ]]; do
         0) reasons+=("the document changed on $disp after this branch left it ($n commit(s) behind): $rel") ;;
         1) if [[ -z "$use_cited" ]]; then
              notes+=("$n commit(s) behind $disp; the document is unchanged there (files it cites were not compared)")
-           elif ! cited_changed "$ref"; then
-             unknowns+=("could not tell whether a file the document cites changed on $disp ($n commit(s) behind): the citation lister (check-citations.py, python3) did not run")
-           elif [[ -n "$cited_hit" ]]; then
-             k="$(grep -c . <<<"$cited_hit")"
-             shown="$(head -n 5 <<<"$cited_hit" | awk '{ printf "%s%s", (NR > 1 ? ", " : ""), $0 }')"
-             [[ "$k" -gt 5 ]] && shown="$shown, and $((k - 5)) more"
-             reasons+=("$k file(s) the document cites changed on $disp after this branch left it ($n commit(s) behind): $shown (rebase onto $disp, or merge it, so the reviewers read the code the document will land on)")
            else
-             notes+=("$n commit(s) behind $disp; the document is unchanged there, and so are the files it cites")
+             cited_stale "$ref" "$disp" "$n"
+             case $? in
+               1) notes+=("$n commit(s) behind $disp; the document is unchanged there, and so are the files it cites") ;;
+               2) unknowns+=("could not tell whether a file the document cites changed on $disp ($n commit(s) behind): the citation lister (check-citations.py, which needs python3) did not run or failed${cited_err:+: $cited_err}") ;;
+             esac
            fi ;;
-        *) unknowns+=("could not tell whether the document changed on $disp (no common history, or this branch deleted a file that $disp then changed and the document is new here; rebasing onto $disp settles it)") ;;
+        *) unknowns+=("could not tell whether the document changed on $disp (no common history, or this branch deleted a file that $disp then changed and the document is new here; rebasing onto $disp settles it)")
+           # Not knowing about the document does not excuse the cited files: a
+           # change found there is still a reason to stop.
+           [[ -n "$use_cited" ]] && cited_stale "$ref" "$disp" "$n" ;;
       esac
       ;;
   esac

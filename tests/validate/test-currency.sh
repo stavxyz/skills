@@ -1261,6 +1261,63 @@ echo other > "$O/src/other.py"; git -C "$O" checkout -q main; git -C "$O" pull -
 check "an uncited file changing on the default branch is CURRENT" \
   0 "the document is unchanged there, and so are the files it cites" "$CHECK" "$W/docs/plan.md"
 
+# This branch renamed the cited file: on the default branch it still has its
+# old name, and a change to it there counts.
+fresh
+printf 'The plan.\n\nSee `src/code.py:1`.\n' > "$W/docs/plan.md"
+git -C "$W" add -A; git -C "$W" commit -q -m "plan cites code"; git -C "$W" push -q origin main
+git -C "$W" checkout -q -b feature
+git -C "$W" mv src/code.py src/renamed.py
+printf 'The plan.\n\nSee `src/renamed.py:1`.\n' > "$W/docs/plan.md"
+git -C "$W" add -A; git -C "$W" commit -q -m "rename the cited file"
+other_pushes main src/code.py "code v2"
+check "a cited file this branch renamed, changed on the default branch under its old name, is STALE" \
+  1 "file(s) the document cites changed on origin/main" "$CHECK" "$W/docs/plan.md"
+
+# Two merge bases: a cited file that changed is named once, and counted once.
+fresh
+printf 'The plan.\n\nSee `src/code.py:1`.\n' > "$O/docs/plan.md"; git -C "$O" add -A; git -C "$O" commit -q -m "plan cites code"; git -C "$O" push -q origin main
+git -C "$O" checkout -q -b m1 main; echo "code m1" > "$O/src/m1.py"; git -C "$O" add -A; git -C "$O" commit -q -m m1
+git -C "$O" checkout -q -b m2 main; echo "code m2" > "$O/src/m2.py"; git -C "$O" add -A; git -C "$O" commit -q -m m2
+git -C "$O" push -q origin m1 m2
+git -C "$W" fetch -q origin
+git -C "$W" checkout -q -b feature origin/m1 --no-track
+git -C "$W" merge -q origin/m2 -m "feature merges m2"
+git -C "$O" checkout -q main; git -C "$O" merge -q --no-ff m2 -m "main merges m2"; git -C "$O" merge -q --no-ff m1 -m "main merges m1"
+echo "code v2" > "$O/src/code.py"; git -C "$O" add -A; git -C "$O" commit -q -m "main changes the cited file"
+git -C "$O" push -q origin main
+if [ "$(git -C "$W" fetch -q origin; git -C "$W" merge-base --all HEAD origin/main | wc -l | tr -d ' ')" = "2" ]; then
+  check "with two merge bases, a changed cited file is named and counted once" \
+    1 "1 file(s) the document cites changed on origin/main after this branch left it (3 commit(s) behind): src/code.py (fetch" "$CHECK" "$W/docs/plan.md"
+else
+  fail=$((fail + 1)); echo "FAIL: the cited-file criss-cross fixture did not produce two merge bases"
+fi
+
+# More than five cited files changed: five are named and the rest counted.
+fresh
+{ printf 'The plan.\n\n'; for i in 1 2 3 4 5 6 7; do printf 'See `src/c%s.py:1`.\n' "$i"; done; } > "$W/docs/plan.md"
+for i in 1 2 3 4 5 6 7; do echo "$i" > "$W/src/c$i.py"; done
+git -C "$W" add -A; git -C "$W" commit -q -m "plan cites seven"; git -C "$W" push -q origin main
+git -C "$W" checkout -q -b feature; echo f > "$W/src/f.py"; git -C "$W" add -A; git -C "$W" commit -q -m f
+git -C "$O" checkout -q main; git -C "$O" pull -q --ff-only origin main
+for i in 1 2 3 4 5 6 7; do echo "v2 $i" > "$O/src/c$i.py"; done; git -C "$O" add -A; git -C "$O" commit -q -m "change all seven"; git -C "$O" push -q origin main
+check "seven changed cited files: five named, two counted" \
+  1 "7 file(s) the document cites changed on origin/main after this branch left it (1 commit(s) behind): src/c1.py, src/c2.py, src/c3.py, src/c4.py, src/c5.py, and 2 more" "$CHECK" "$W/docs/plan.md"
+
+# Not knowing whether the document changed (it was moved and rewritten here,
+# and its old path changed there) does not excuse the cited files: one that
+# changed is still a reason to stop.
+fresh
+printf 'one\ntwo\nthree\nfour\n' > "$O/docs/plan.md"; git -C "$O" add -A; git -C "$O" commit -q -m long; git -C "$O" push -q origin main
+git -C "$W" pull -q --ff-only origin main
+git -C "$W" checkout -q -b feature
+git -C "$W" rm -q docs/plan.md; mkdir -p "$W/docs"; printf 'uno\ndos\nSee `src/code.py:1`.\nfour\n' > "$W/docs/plan-v2.md"
+git -C "$W" add -A; git -C "$W" commit -q -m "move and rewrite"
+other_pushes main docs/plan.md "$(printf 'one\ntwo\nthree\nfour\nfive')"
+other_pushes main src/code.py "code v2"
+check "when the document's own change cannot be told, a changed cited file is still STALE" \
+  1 "1 file(s) the document cites changed on origin/main" "$CHECK" "$W/docs/plan-v2.md"
+
 # The lister cannot run: the answer is not known, so it is not CURRENT.
 cite_fixture
 other_pushes main src/code.py "code v2"

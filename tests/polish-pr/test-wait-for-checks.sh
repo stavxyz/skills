@@ -576,6 +576,8 @@ case "$2" in
       *)    rows "${line%%;*}" ;;
     esac ;;
   repos/*/status\?per_page=100)
+    # Without --paginate only the first page of contexts would be read.
+    case " $* " in *" --paginate "*) ;; *) echo "stub: the status read must paginate" >&2; exit 9 ;; esac
     case "$line" in
       *";"*) rows "${line#*;}" ;;
       *) ;;
@@ -637,10 +639,22 @@ run_rest "an unknown transport is a usage error"      3 "must be auto, graphql o
 # and a pin to graphql still forbids it.
 run_rest "pr checks alone refused: the checks read falls back" 0 "reading check runs over the REST API" GH_STUB_VIEW_OK=1 -- "$RP"
 run_rest "pr checks alone refused, pinned to graphql: no fallback" 3 "HTTP 403" GH_STUB_VIEW_OK=1 WAIT_FOR_PR_CHECKS_TRANSPORT=graphql -- "$RP"
-if grep -q 'check-runs' "$tmp/calls"; then
+if grep -q '^api ' "$tmp/calls"; then
   fail=$((fail + 1)); echo "FAIL: pinned to graphql, no REST call may be made"
 else
   pass=$((pass + 1))
+fi
+
+# A switch made in the checks read is held too: two polls, one `pr checks`
+# call, one announcement.
+: > "$tmp/state"; : > "$tmp/calls"
+printf '%s\n' "$RW" "$RP" > "$tmp/script.txt"
+out=$(GH_STUB_STATE="$tmp/state" GH_STUB_SCRIPT="$tmp/script.txt" GH_STUB_CALLS="$tmp/calls" GH_STUB_VIEW_OK=1 \
+  WAIT_FOR_PR_CHECKS_GH="$tmp/gh-rest" "$WATCHER" 1 --interval 0 --settle 0 --timeout 5 2>&1)
+if [ "$(grep -c '^pr checks$' "$tmp/calls")" = 1 ] && [ "$(grep -c 'reading check runs over the REST API' <<<"$out")" = 1 ]; then
+  pass=$((pass + 1))
+else
+  fail=$((fail + 1)); printf 'FAIL: a switch made in the checks read is held: one pr checks call and one announcement, got %s calls:\n%s\n' "$(grep -c '^pr checks$' "$tmp/calls")" "$out"
 fi
 
 # On REST the head is read with the pull-request endpoint. Calls in order: the

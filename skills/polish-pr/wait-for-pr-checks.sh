@@ -80,7 +80,7 @@
 # CI there at all and falls back to hand-rolled polling, which is the thing the
 # script exists to replace. So when `gh pr view` fails, or `gh pr checks` fails
 # for any reason other than "no checks reported", the same facts are read over
-# REST (the head read comes first, so that is usually where the switch happens): the head sha
+# REST (the head read comes first, so the switch usually happens there): the head sha
 # from the pull request, then its check runs and commit statuses, mapped onto
 # the same five buckets gh uses. The switch is announced once on stderr and
 # held for the rest of the run. WAIT_FOR_PR_CHECKS_TRANSPORT=rest skips the
@@ -168,7 +168,7 @@ read_head() {
       return 1
     fi
     if [[ "$transport" != "rest" ]]; then
-      echo "[wait-for-pr-checks] gh pr view failed (${graphql_err:-unknown error}); reading the PR over the REST API from here on" >&2
+      echo "[wait-for-pr-checks] gh pr view failed (${graphql_err:-it answered with no head sha}); reading the PR over the REST API from here on" >&2
       transport=rest
     fi
   fi

@@ -97,10 +97,13 @@ whatever the token). The switch is announced once on stderr, and the
 scripts behave the same (REST can list a check run gh leaves out, and is never
 less strict), so run the scripts there rather than replacing them with
 hand-rolled `git` and `gh api` polling. Pass `--repo <owner>/<repo>` to the
-resolver and set `GH_REPO` for the watcher there: the REST calls need a
-repository, and a cloud session's remote may not be a github.com URL. This was
-checked against live PRs with GraphQL refused by a wrapper; it has not yet
-been run inside a cloud session.
+resolver and set `GH_REPO` for the watcher there, so the REST calls know the
+repository. The resolver still needs a local remote whose URL is the
+repository's github.com address: where there is none it exits 1 ("no remote
+hosts the base repo"), and adding one (`git remote add`) is the remedy. The watcher's two
+transports are compared on live PRs by
+`tests/polish-pr/probe-rest-fallback-live.sh`, which refuses GraphQL with a
+wrapper; neither script has yet been run inside a cloud session.
 
 **Why a script and not inline shell:** exactly the reason given below for
 `wait-for-pr-checks.sh`. `git remote -v` is human-formatted output, not a

@@ -236,11 +236,9 @@ git -C "$W" update-ref -d refs/remotes/origin/main
 git -C "$W" config remote.origin.fetch '+refs/heads/trunk:refs/remotes/origin/trunk'
 check "a default branch this clone does not have is learned from the remote and fetched" \
   0 "the document is unchanged on origin/main" "$CHECK" "$W/docs/plan.md"
-git -C "$W" update-ref -d refs/remotes/origin/main
 other_pushes main docs/plan.md "plan v2"
 check "and a document change on that learned default branch is STALE" \
   1 "the document changed on origin/main" "$CHECK" "$W/docs/plan.md"
-git -C "$W" update-ref -d refs/remotes/origin/main
 git -C "$TMP/origin.git" symbolic-ref HEAD refs/heads/gone
 check "a remote whose default branch cannot be found is UNVERIFIED, not current" \
   2 "no remote default branch could be found" "$CHECK" "$W/docs/plan.md"
@@ -256,6 +254,97 @@ git clone -q --single-branch --branch feature "$TMP/origin.git" "$TMP/single"
 other_pushes main docs/plan.md "plan v2"
 check "a single-branch clone still compares the document with the default branch" \
   1 "the document changed on origin/main" "$CHECK" "$TMP/single/docs/plan.md"
+
+# The same clone, run twice. The first run must not leave behind a snapshot of
+# the default branch that the second run then trusts: validate's own first
+# call would freeze what its later re-checks compare with.
+fresh
+git -C "$W" checkout -q -b feature
+echo "f" > "$W/src/f.py"; git -C "$W" add -A; git -C "$W" commit -q -m f
+git -C "$W" push -q -u origin feature
+rm -rf "$TMP/single"
+git clone -q --single-branch --branch feature "$TMP/origin.git" "$TMP/single"
+check "single-branch clone, first run, nothing has moved" 0 "CURRENT" "$CHECK" "$TMP/single/docs/plan.md"
+start=$(git -C "$TMP/single" rev-parse HEAD)
+other_pushes main docs/plan.md "plan v2"
+check "single-branch clone, second run sees the default branch move after the first" \
+  1 "the document changed on origin/main" "$CHECK" "$TMP/single/docs/plan.md" --since "$start"
+
+# The branch tracks a branch that the clone's fetch refspec leaves out, so git
+# reports no upstream ref at all. The configured upstream still counts.
+fresh
+rm -rf "$TMP/single"
+git clone -q --single-branch --branch main "$TMP/origin.git" "$TMP/single"
+git -C "$TMP/single" checkout -q -b feature
+echo "f" > "$TMP/single/src/f.py"; git -C "$TMP/single" add -A; git -C "$TMP/single" commit -q -m f
+git -C "$TMP/single" push -q -u origin feature
+git -C "$O" fetch -q origin; git -C "$O" checkout -q -b feature origin/feature
+other_pushes feature docs/plan.md "plan from a teammate"
+check "an upstream outside the fetch refspec is still compared" \
+  1 "behind origin/feature" "$CHECK" "$TMP/single/docs/plan.md"
+
+# A local branch that tracks a remote branch with a different name.
+fresh
+git -C "$O" checkout -q -b shared main; git -C "$O" push -q origin shared
+git -C "$W" fetch -q origin
+git -C "$W" checkout -q -b mine --track origin/shared
+other_pushes shared src/code.py "code from a teammate"
+check "a branch tracking a differently named remote branch is compared with it" \
+  1 "this branch is 1 commit(s) behind origin/shared" "$CHECK" "$W/docs/plan.md"
+
+# The branch was pushed without -u, or tracks the default branch: its own copy
+# on the remote is where another session pushes, and it is not the upstream.
+fresh
+git -C "$W" checkout -q -b feature
+echo "f" > "$W/src/f.py"; git -C "$W" add -A; git -C "$W" commit -q -m f
+git -C "$W" push -q origin feature
+git -C "$O" fetch -q origin; git -C "$O" checkout -q -b feature origin/feature
+other_pushes feature docs/plan.md "plan from a teammate"
+check "a branch pushed without -u is compared with its own copy on the remote" \
+  1 "branch feature is 1 commit(s) behind origin/feature" "$CHECK" "$W/docs/plan.md"
+
+fresh
+git -C "$W" checkout -q -b feature origin/main
+echo "f" > "$W/src/f.py"; git -C "$W" add -A; git -C "$W" commit -q -m f
+git -C "$W" push -q origin feature
+git -C "$O" fetch -q origin; git -C "$O" checkout -q -b feature origin/feature
+other_pushes feature src/code.py "code from a teammate"
+check "a branch tracking the default branch is still compared with its own copy on the remote" \
+  1 "branch feature is 1 commit(s) behind origin/feature" "$CHECK" "$W/docs/plan.md"
+
+# A remote that accepts the connection and then says nothing. Without a time
+# limit the whole check hangs; with one it is a single "could not tell", and
+# the other remotes still decide.
+if command -v python3 >/dev/null 2>&1 && command -v perl >/dev/null 2>&1; then
+  fresh
+  python3 - "$TMP/port" <<'PY' &
+import socket, sys, time
+s = socket.socket(); s.bind(("127.0.0.1", 0)); s.listen(8)
+open(sys.argv[1], "w").write(str(s.getsockname()[1]))
+conns = []
+end = time.time() + 120
+s.settimeout(1)
+while time.time() < end:
+    try: conns.append(s.accept()[0])
+    except OSError: pass
+PY
+  listener=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$TMP/port" ] && break; perl -e 'select(undef,undef,undef,0.2)'; done
+  git -C "$W" remote add silent "http://127.0.0.1:$(cat "$TMP/port")/x.git"
+  git -C "$W" checkout -q -b feature
+  began=$(date +%s)
+  check "a remote that never answers is UNVERIFIED within the time limit" \
+    2 "could not fetch silent" env CHECK_CURRENCY_NET_TIMEOUT=3 "$CHECK" "$W/docs/plan.md"
+  took=$(( $(date +%s) - began ))
+  if [ "$took" -le 12 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL: the silent remote took ${took}s with a 3s limit per call"; fi
+  other_pushes main docs/plan.md "plan v2"
+  check "a remote that never answers does not hide a document change on origin" \
+    1 "the document changed on origin/main" env CHECK_CURRENCY_NET_TIMEOUT=3 "$CHECK" "$W/docs/plan.md"
+  kill "$listener" 2>/dev/null; wait "$listener" 2>/dev/null
+  rm -f "$TMP/port"
+else
+  echo "skip: silent-remote fixture (needs python3 and perl)"
+fi
 
 # A branch named like the default branch is not a feature branch, whatever it tracks.
 fresh
@@ -486,6 +575,42 @@ other_pushes main src/code.py "code v2"
 check "a brand-new document on a branch that deleted nothing is current" \
   0 "the document is unchanged there" "$CHECK" "$W/docs/new.md"
 
+# This branch deleted an unrelated file that the default branch then edited.
+# The document existed at the branch point, so it is not a rename candidate.
+fresh
+git -C "$W" checkout -q -b feature
+git -C "$W" rm -q src/code.py; git -C "$W" commit -q -m "delete code"
+other_pushes main src/code.py "code v2"
+check "deleting an unrelated file does not make a tracked document unverifiable" \
+  0 "the document is unchanged there" "$CHECK" "$W/docs/plan.md"
+
+# A fork whose main runs ahead of the canonical main blocks a checkout of
+# main, and pulling cannot clear it. Naming the remote as ignored does.
+fresh
+git init -q --bare -b main "$TMP/fork.git"
+git -C "$W" remote add fork "$TMP/fork.git"
+git -C "$W" push -q fork main
+git clone -q "$TMP/fork.git" "$TMP/forkclone"
+echo "fork only" > "$TMP/forkclone/src/forkonly.py"; git -C "$TMP/forkclone" add -A
+git -C "$TMP/forkclone" commit -q -m "fork runs ahead"; git -C "$TMP/forkclone" push -q origin main
+check "a fork whose main runs ahead blocks main, and the message names the remedy" \
+  1 "git config --add validate.ignoreRemote fork" "$CHECK" "$W/docs/plan.md"
+git -C "$W" config --add validate.ignoreRemote fork
+check "an ignored remote is not compared, and the note says so" \
+  0 "remote fork is ignored" "$CHECK" "$W/docs/plan.md"
+other_pushes main docs/plan.md "plan v2"
+check "ignoring one remote does not stop the others from deciding" \
+  1 "behind origin/main" "$CHECK" "$W/docs/plan.md"
+rm -rf "$TMP/fork.git" "$TMP/forkclone"
+
+# A document that is a symlink into another repository.
+fresh
+rm -rf "$TMP/otherrepo"; git init -q -b main "$TMP/otherrepo"
+ln -s "$W/docs/plan.md" "$TMP/otherrepo/linked.md"
+check "a symlink into another repository is refused" \
+  3 "symlink into another repository" "$CHECK" "$TMP/otherrepo/linked.md"
+rm -rf "$TMP/otherrepo"
+
 # --- --since ------------------------------------------------------------------
 fresh
 start=$(git -C "$W" rev-parse HEAD)
@@ -493,7 +618,7 @@ check "--since the current HEAD is current" 0 "CURRENT" "$CHECK" "$W/docs/plan.m
 echo "x" > "$W/src/x.py"; git -C "$W" add -A; git -C "$W" commit -q -m x
 check "--since an earlier HEAD reports that HEAD moved" \
   1 "HEAD moved during the run" "$CHECK" "$W/docs/plan.md" --since "$start"
-check "--since something that is not a commit is a usage error" 3 "" "$CHECK" "$W/docs/plan.md" --since nonsense
+check "--since something that is not a commit is a usage error" 3 "--since is not a commit" "$CHECK" "$W/docs/plan.md" --since nonsense
 
 fresh
 start=$(git -C "$W" rev-parse HEAD)

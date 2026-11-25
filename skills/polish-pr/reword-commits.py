@@ -159,9 +159,9 @@ def stale_sha_mentions(commits, messages, first):
     replaced = [(i, c["sha"]) for i, c in enumerate(commits) if i >= first]
     found = []
     for i, m in enumerate(messages):
-        for word in set(re.findall(r"\b[0-9a-f]{7,40}\b", m)):
+        for word in set(re.findall(r"\b[0-9a-fA-F]{7,40}\b", m)):
             for j, sha in replaced:
-                if sha.startswith(word):
+                if sha.startswith(word.lower()):
                     found.append((i, word, j))
     return sorted(found)
 

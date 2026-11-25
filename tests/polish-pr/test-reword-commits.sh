@@ -575,6 +575,60 @@ rw --base base --replace "$tmp/replace.json"
 check "the rewrite lists the stale mention" 0 "mention(s) of a sha this rewrite replaces"
 new2=$(git -C "$R" rev-parse --short HEAD~2)
 check "and says what the cited commit is now" 0 "cites $s2 (now $new2)"
+# The citing commit was recreated too, so it is named by its new sha.
+if grep -q "^  $(git -C "$R" rev-parse --short HEAD) \"polish: follow-up\" cites" <<<"$out"; then
+  ok
+else
+  bad "the citing commit is named by its new sha" "$out"
+fi
+
+# The scan reads the messages as they will be: a citation that the same run
+# removes is not listed.
+mkrepo
+read -r c1 c2 c3 < <(shas | tr '\n' ' ')
+s2=$(git -C "$R" rev-parse --short "$c2")
+commit "$R" 05 d.txt "polish: follow-up
+
+Fixes the retry count added in $s2.
+"
+json "[{\"old\": \"retries twice\", \"new\": \"retries three times\"}, {\"old\": \"added in $s2\", \"new\": \"added earlier\"}]"
+rw --base base --replace "$tmp/replace.json"
+check "a run that also removes the citation rewrites" 0
+if grep -qF "mention(s) of a sha" <<<"$out"; then
+  bad "a citation removed by the same run is not listed" "$out"
+else
+  ok
+fi
+
+# A sha is cited as git accepts it: uppercase counts. A hex run glued inside a
+# longer word, or shorter than git's seven characters, is not a citation.
+mkrepo
+read -r c1 c2 c3 < <(shas | tr '\n' ' ')
+s2=$(git -C "$R" rev-parse --short=7 "$c2")
+upper=$(printf '%s' "$s2" | tr 'a-f' 'A-F')
+commit "$R" 05 d.txt "polish: follow-up
+
+See $upper.
+"
+json '[{"old": "retries twice", "new": "retries three times"}]'
+rw --base base --replace "$tmp/replace.json" --dry-run
+check "an uppercase sha is listed" 0 "cites $upper"
+
+mkrepo
+read -r c1 c2 c3 < <(shas | tr '\n' ' ')
+s2=$(git -C "$R" rev-parse --short=7 "$c2")
+commit "$R" 05 d.txt "polish: follow-up
+
+See x${s2}z and ${c2:0:5} for more.
+"
+json '[{"old": "retries twice", "new": "retries three times"}]'
+rw --base base --replace "$tmp/replace.json" --dry-run
+check "the dry run still exits 0" 0
+if grep -qF "mention(s) of a sha" <<<"$out"; then
+  bad "a glued hex run and a five-character prefix are not citations" "$out"
+else
+  ok
+fi
 
 mkrepo
 json '[{"old": "retries twice", "new": "retries three times"}]'

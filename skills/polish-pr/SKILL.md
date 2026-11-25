@@ -151,7 +151,7 @@ look-alike checks that do NOT detect staleness — do not substitute them.
 
 Before dispatching the reviewers, re-derive every number in the PR description from its source (a count, a rate, a duration, a test total): re-run the query or command that produced it, and correct or remove any figure you cannot reproduce. A reviewer reads the diff and takes the description's numbers on trust. Do it again before the verdict: the fix loop changes test totals and counts.
 
-Run **two reviews in parallel** — one from each system — then address **ALL** findings at every severity level: critical, important, medium, low, nitpicks, test gaps, and suggestions.
+Run **two reviews in parallel**, one from each system (two reviewers per system when the change is large; see below), then address **ALL** findings at every severity level: critical, important, medium, low, nitpicks, test gaps, and suggestions.
 
 **Reviewer A — pr-review-toolkit:**
 - Prefer the `pr-review-toolkit:code-reviewer` subagent (Task tool, subagent_type=`pr-review-toolkit:code-reviewer`).
@@ -161,9 +161,11 @@ Run **two reviews in parallel** — one from each system — then address **ALL*
 - On superpowers 5.1.0+: invoke the `superpowers:requesting-code-review` skill via the Skill tool. The skill's content directs you to dispatch a `general-purpose` subagent using the prompt template at `code-reviewer.md` inside that skill's directory. Fill in the template's placeholders with PR-specific context and dispatch the subagent in parallel with Reviewer A.
 - On superpowers ≤ 5.0.7 (deprecated): use the `superpowers:code-reviewer` subagent directly via the Task tool.
 
-The two reviews must be dispatched **in parallel** (single message, multiple Task tool uses) so they run concurrently.
+All reviews must be dispatched **in parallel** (single message, multiple Task tool uses) so they run concurrently.
 
-Give each reviewer the change once: the git range, or the files, not both, and never a patch file that repeats code it can read from the repository. A reviewer handed the same code twice over has gone silent on it. When the change is over about 2,000 lines, give each system two reviewers split by question (for example, state and exit paths; reporting and tests), each with the whole range to read. A reviewer that has written nothing for 15 minutes is stuck: check its transcript file's modification time, not its content, stop it, and dispatch it again with a narrower brief.
+Give each reviewer the change once: the git range, or the files, not both, and never a patch file that repeats code it can read from the repository. A reviewer handed the same code twice over has gone silent on it. When the change is large (over about 2,000 changed lines by `git diff --shortstat <BASE_REMOTE>/<BASE_BRANCH>...HEAD`, or files of that length that must be read whole), give each system two reviewers split by question (for example, state and exit paths; reporting and tests), each with the whole range to read. Every reviewer counts toward its system's review, and all of them report before the fix loop ends.
+
+A reviewer that has written nothing for 15 minutes is stuck, and nothing notifies you of that. So when you dispatch, also start one background `sleep 900`. When it finishes, and whenever another reviewer reports, look at the modification time of each running reviewer's output file (the dispatch result names it), not at its content. This one look is not the polling the CI section forbids; that rule is about the checks watcher. Stop a reviewer whose file is more than 15 minutes old (the `TaskStop` tool in Claude Code, or your harness's equivalent), and split its brief between two new reviewers of the same system that together cover everything the stopped one was given, so no part of the change loses that system's review.
 
 ### Append these two blocks to every reviewer dispatch
 
@@ -230,7 +232,7 @@ python3 "$CLAUDE_PLUGIN_ROOT/skills/polish-pr/reword-commits.py" \
   --replace <file.json> --dry-run
 ```
 
-When a later message in the range cites one of the rewritten commits by sha, the helper lists it ("cites 1a2b3c4 (now 5d6e7f8)"): every commit from the first changed one onward gets a new sha, so fix each listed mention with a second `--replace` pass before pushing.
+When a later message in the range cites one of the rewritten commits by sha, the helper lists it ("cites 1a2b3c4 (now 5d6e7f8)"): every commit from the first changed one onward gets a new sha, so before pushing, run the helper again with `--replace` entries for the listed mentions, and repeat until it lists none (a message that cites a commit fixed in the second pass needs a third).
 
 The helper changes messages, not content: every commit keeps its tree, author, and author date, the committer becomes whoever runs it, and signatures are made again only when `commit.gpgsign` is set. Push with the command it prints, as in Step 3 of the attribution sweep below, which also says what a refused push means.
 
@@ -272,7 +274,7 @@ about 100s at the default 20s interval. A repo that genuinely has no CI pays
 that wait on every run, this one included, since it has no CI of its own.
 `tests/polish-pr/test-wait-for-checks.sh` locks the verdicts in.
 
-Run it with `run_in_background: true` so the harness notifies you on completion instead of blocking the conversation. Do not poll, do not chain sleeps: wait for the completion notification, then read the output file. When it exits 0, proceed to the verdict; on non-zero, surface the failed-check list to the user before doing anything else. **When no step ran.** If the failed run's jobs have no steps at all, or the run lists no jobs, nothing was tested and there is no log to read (`--log-failed` prints "log not found"). Elapsed time does not tell this apart from a setup step that failed at once, which has a log and is an ordinary failure. Look: `GH_REPO=<owner>/<repo> gh run view <run-id> --json jobs --jq '.jobs[] | [.databaseId, .name, .conclusion, (.steps | length)] | @tsv'`. For a job with zero steps, the reason is in its check run's annotations: `GH_REPO=<owner>/<repo> gh api "repos/{owner}/{repo}/check-runs/<databaseId>/annotations" --jq '.[].message'`. For a run with no jobs, `GH_REPO=<owner>/<repo> gh run view <run-id>` prints the reason (a workflow file error, for example). A job the host refused to start (a billing or spending limit is the case this was written for) is not a failing test, and no change to the PR fixes it. Re-run once in case it was momentary: `GH_REPO=<owner>/<repo> gh run rerun <run-id> --failed`, then the watcher again. If the jobs start this time, judge that run like any other. If they are refused again, report the annotation's words and stop, because it is the owner's to fix.
+Run it with `run_in_background: true` so the harness notifies you on completion instead of blocking the conversation. Do not poll, do not chain sleeps: wait for the completion notification, then read the output file. When it exits 0, proceed to the verdict; on non-zero, surface the failed-check list to the user before doing anything else. **When no step ran.** If a failed job has no steps at all, or the failed run lists no jobs, nothing was tested and there is no log to read (`gh run view <run-id> --log-failed` prints "log not found"). Elapsed time does not tell this apart from a setup step that failed at once, which has a log and is an ordinary failure. Look: `GH_REPO=<owner>/<repo> gh run list --commit <head sha> --json databaseId,name,conclusion` lists the head's runs with their ids, and `GH_REPO=<owner>/<repo> gh run view <run-id> --json jobs --jq '.jobs[] | [.databaseId, .name, .conclusion, (.steps | length)] | @tsv'` lists one run's jobs with their step counts. For a failed job with zero steps, the reason is in its check run's annotations: `GH_REPO=<owner>/<repo> gh api "repos/{owner}/{repo}/check-runs/<databaseId>/annotations" --jq '.[].message'`. A job the host refused to start (a billing or spending limit is the case this was written for) is not a failing test, and no change to the PR fixes it. Re-run once in case it was momentary: `GH_REPO=<owner>/<repo> gh run rerun <run-id> --failed`, then the watcher again. If the jobs start this time, judge that run like any other. If they are refused again, report the annotation's words and stop, because it is the owner's to fix. For a run with no jobs there is no annotation: `GH_REPO=<owner>/<repo> gh run view <run-id>` prints gh's guess at the reason (a workflow file error, for example). If this PR's diff touches a workflow file, treat it as a bug in the PR and fix it. Otherwise re-run it once the same way (if gh will not re-run a run that has no jobs, skip the re-run), and if the new run is jobless too, report gh's line, as a guess, and stop.
 
 ## Mandatory attribution sweep — DO THIS, do not skip
 
@@ -392,8 +394,9 @@ polish-pr verdict: NOT BLESSED: <each unmet condition, by number>
 The verdict is BLESSED only when all six hold. Check each one; do not infer any
 of them from the others.
 
-1. Both reviewers ran to completion and each said what it ran and what it
-   stubbed, and every finding is fixed in the PR. A
+1. Every reviewer dispatched, or its replacement, ran to completion and said
+   what it ran and what it stubbed; both systems covered the whole change; and
+   every finding is fixed in the PR. A
    deferral the user approved (with its TODO and issue) counts as handled. A
    deferral or a question still waiting on the user does not.
 2. Every commit made after the reviewers ran is a fix for a named finding, a

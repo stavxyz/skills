@@ -460,7 +460,7 @@ doc_changed() {
 # cited_changed <ref>: sets $cited_hit to the files the document cites that
 # differ between where this branch left <ref> and <ref> itself, newline
 # separated. Returns 0 when the question was answered (the list may be empty),
-# 2 when it could not be: the citation lister is missing or failed, or there
+# 2 when it could not be, with the reason in $cited_err: the citation lister is missing or failed, or there
 # is no common history. The cited files are listed once, by the sibling
 # check-citations.py, from the document as it is in this checkout.
 cited_state=""   # "", ok, or failed
@@ -472,23 +472,27 @@ cited_changed() {
   if [[ -z "$cited_state" ]]; then
     cited_state=failed
     if ! command -v python3 >/dev/null 2>&1; then
-      cited_err="python3 is not installed"
+      cited_err="python3, which the citation lister needs, is not installed"
     elif [[ ! -f "$here/check-citations.py" ]]; then
-      cited_err="check-citations.py is not beside this script"
+      cited_err="check-citations.py, which lists them, is not beside this script"
     elif listed="$(python3 "$here/check-citations.py" "$doc" --repo-root "$root" --paths 2>/dev/null)"; then
       cited_state=ok
       while IFS= read -r p; do [[ -n "$p" ]] && cited+=("$p"); done <<<"$listed"
     else
-      cited_err="$(python3 "$here/check-citations.py" "$doc" --repo-root "$root" --paths 2>&1 >/dev/null | tail -n 1 | plain)"
+      cited_err="check-citations.py failed: $(python3 "$here/check-citations.py" "$doc" --repo-root "$root" --paths 2>&1 >/dev/null | tail -n 1 | plain)"
     fi
   fi
   [[ "$cited_state" == ok ]] || return 2
   [[ ${#cited[@]} -gt 0 ]] || return 0
-  bases="$(g merge-base --all HEAD "$ref" 2>/dev/null)" || return 2
-  [[ -n "$bases" ]] || return 2
+  bases="$(g merge-base --all HEAD "$ref" 2>/dev/null)" || { cited_err="no common history"; return 2; }
+  [[ -n "$bases" ]] || { cited_err="no common history"; return 2; }
+  local deleted
   for mb in $bases; do
     specs=()
+    deleted=()
     for p in "${cited[@]}"; do specs+=(":(literal)$p"); done
+    # (--ignore-submodules=none below: a repository may be configured to hide
+    # submodule changes from diff, and a cited submodule's bump must show.)
     # A cited file this branch renamed is still under its old name on the
     # other side, so the old name is compared too (as doc_changed does for
     # the document).
@@ -498,10 +502,22 @@ cited_changed() {
                if [[ "$status" == R* ]]; then
                  for p in "${cited[@]}"; do [[ "$p" == "$b" ]] && specs+=(":(literal)$a"); done
                fi ;;
+        D)     IFS= read -r -d '' a || break; deleted+=(":(literal)$a") ;;
         *)     IFS= read -r -d '' a || break ;;
       esac
     done < <(g diff -M -z --name-status "$mb" HEAD 2>/dev/null)
-    out="$(g -c core.quotePath=false diff --name-only "$mb" "$ref" -- "${specs[@]}" 2>/dev/null)" || return 2
+    # A cited file that is new on this branch, while a file this branch
+    # deleted changed on the other side: it may be that file, moved and
+    # rewritten past what git calls a rename. Not known, so not "unchanged".
+    if [[ ${#deleted[@]} -gt 0 ]]; then
+      for p in "${cited[@]}"; do
+        if ! g cat-file -e "$mb:$p" 2>/dev/null && ! g diff --quiet "$mb" "$ref" -- "${deleted[@]}" 2>/dev/null; then
+          cited_err="$p is new on this branch, and a file this branch deleted changed there; it may be the same file, moved and rewritten (rebasing settles it)"
+          return 2
+        fi
+      done
+    fi
+    out="$(g -c core.quotePath=false diff --ignore-submodules=none --name-only "$mb" "$ref" -- "${specs[@]}" 2>/dev/null)" || { cited_err="git diff failed"; return 2; }
     [[ -n "$out" ]] && cited_hit+="${cited_hit:+$'\n'}$out"
   done
   [[ -n "$cited_hit" ]] && cited_hit="$(sort -u <<<"$cited_hit" | plain)"
@@ -518,7 +534,7 @@ cited_stale() {
   k="$(grep -c . <<<"$cited_hit")"
   shown="$(head -n 5 <<<"$cited_hit" | awk '{ printf "%s%s", (NR > 1 ? ", " : ""), $0 }')"
   [[ "$k" -gt 5 ]] && shown="$shown, and $((k - 5)) more"
-  reasons+=("$k file(s) the document cites changed on $2 after this branch left it ($3 commit(s) behind): $shown (fetch, then rebase onto $2 or merge it, so the reviewers read the code the document will land on)")
+  reasons+=("$k file(s) the document cites changed on $2 after this branch left it ($3 commit(s) behind): $shown (fetch, then rebase onto $2 or merge it, so the reviewers read the code the document will land on). A path the document does not spell out is a submodule that holds a cited file, or one of the files an ambiguous bare name could mean (write the full path to narrow it)")
   return 0
 }
 
@@ -603,13 +619,16 @@ while [[ $i -lt ${#t_ref[@]} ]]; do
              cited_stale "$ref" "$disp" "$n"
              case $? in
                1) notes+=("$n commit(s) behind $disp; the document is unchanged there, and so are the files it cites") ;;
-               2) unknowns+=("could not tell whether a file the document cites changed on $disp ($n commit(s) behind): the citation lister (check-citations.py, which needs python3) did not run or failed${cited_err:+: $cited_err}") ;;
+               2) unknowns+=("could not tell whether a file the document cites changed on $disp ($n commit(s) behind): ${cited_err:-unknown reason}") ;;
              esac
            fi ;;
         *) unknowns+=("could not tell whether the document changed on $disp (no common history, or this branch deleted a file that $disp then changed and the document is new here; rebasing onto $disp settles it)")
            # Not knowing about the document does not excuse the cited files: a
            # change found there is still a reason to stop.
-           [[ -n "$use_cited" ]] && cited_stale "$ref" "$disp" "$n" ;;
+           if [[ -n "$use_cited" ]]; then
+             cited_stale "$ref" "$disp" "$n"
+             [[ $? -eq 2 ]] && unknowns+=("could not tell whether a file the document cites changed on $disp ($n commit(s) behind): ${cited_err:-unknown reason}")
+           fi ;;
       esac
       ;;
   esac

@@ -545,7 +545,7 @@ def main() -> int:
         action="store_true",
         help="print the tracked files the document cites, one repository-relative "
              "path per line, and check nothing. A citation whose path resolves "
-             "to no tracked file is left out, an ambiguous bare filename lists "
+             "to no tracked file is listed as written when it has a directory part (a bare name is left out), an ambiguous bare filename lists "
              "every file it could mean, and a file inside a "
              "submodule is listed as the submodule's mount point. check-currency.sh "
              "uses this to see whether a cited file changed on the default branch.",
@@ -588,6 +588,15 @@ def main() -> int:
         # the superproject's history records the submodule only as that one
         # entry, so a diff of the superproject can see the mount point move
         # and can never see a path beneath it.
+        staged = subprocess.run(
+            ["git", "-C", str(repo), "ls-files", "--stage", "-z"],
+            capture_output=True, text=True, check=False,
+        )
+        if staged.returncode != 0:
+            # gitlinks() answers "none" when this fails, and submodule files
+            # would then be listed by paths the superproject can never show.
+            print("check-citations: git ls-files --stage failed", file=sys.stderr)
+            return 2
         mounts = gitlinks(repo)
         cited: set[str] = set()
         for cite in citations(doc):
@@ -596,6 +605,18 @@ def main() -> int:
             # any is a change to what the document may be citing.
             target, candidates = resolve(cite.path, repo)
             names = [target.relative_to(repo).as_posix()] if target is not None else candidates
+            if not names:
+                # No tracked file, but the path may point into a submodule
+                # that is not checked out here: the mount point still stands
+                # for it.
+                # Otherwise a path with a directory in it is listed as
+                # written: it may be a file the default branch has added,
+                # which a diff of that path will show. A bare name that
+                # matches nothing says too little to compare.
+                names = [normalise(cite.path, repo)[0]]
+                under = any(names[0] == m or names[0].startswith(m + "/") for m in mounts)
+                if not under and "/" not in names[0]:
+                    continue
             for name in names:
                 inside = [m for m in mounts if name == m or name.startswith(m + "/")]
                 cited.add(max(inside, key=len) if inside else name)

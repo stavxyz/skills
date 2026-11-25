@@ -1318,12 +1318,61 @@ other_pushes main src/code.py "code v2"
 check "when the document's own change cannot be told, a changed cited file is still STALE" \
   1 "1 file(s) the document cites changed on origin/main" "$CHECK" "$W/docs/plan-v2.md"
 
+# Moved and rewritten past what git calls a rename: the old name changed on
+# the default branch, and whether that is the cited file is not known.
+fresh
+printf 'a\nb\nc\nd\n' > "$W/src/code.py"
+printf 'The plan.\n\nSee `src/code.py:1`.\n' > "$W/docs/plan.md"
+git -C "$W" add -A; git -C "$W" commit -q -m "plan cites code"; git -C "$W" push -q origin main
+git -C "$W" checkout -q -b feature
+git -C "$W" rm -q src/code.py; mkdir -p "$W/src"; printf 'entirely\ndifferent\ncontents\nhere\n' > "$W/src/renamed.py"
+printf 'The plan.\n\nSee `src/renamed.py:1`.\n' > "$W/docs/plan.md"
+git -C "$W" add -A; git -C "$W" commit -q -m "move and rewrite the cited file"
+other_pushes main src/code.py "$(printf 'a\nb\nc\nd\ne')"
+check "a cited file moved and rewritten here, with its old name changed there, is UNVERIFIED" \
+  2 "src/renamed.py is new on this branch, and a file this branch deleted changed there" "$CHECK" "$W/docs/plan.md"
+
+# A cited file that exists only on the default branch (added there after this
+# branch left): its arrival is a change to what the document cites.
+fresh
+git -C "$W" checkout -q -b feature
+printf 'The plan.\n\nSee `src/later.py:1`.\n' > "$W/docs/plan.md"; git -C "$W" add -A; git -C "$W" commit -q -m "plan cites a file to come"
+other_pushes main src/later.py "added on main"
+check "a cited file added on the default branch is STALE" \
+  1 "file(s) the document cites changed on origin/main after this branch left it (1 commit(s) behind): src/later.py" "$CHECK" "$W/docs/plan.md"
+
+# Submodules: a cited file inside one counts when that submodule's pointer
+# moved on the default branch, also when the repository hides submodule
+# changes from diff; another submodule's bump does not count.
+fresh
+for s in a b; do
+  git init -q "$TMP/sub-$s"; echo x > "$TMP/sub-$s/x.py"; git -C "$TMP/sub-$s" add -A; git -C "$TMP/sub-$s" commit -q -m sub
+  git -C "$W" -c protocol.file.allow=always submodule --quiet add "$TMP/sub-$s" "vendor/$s" 2>/dev/null
+done
+printf 'The plan.\n\nSee `vendor/a/x.py:1`.\n' > "$W/docs/plan.md"
+git -C "$W" add -A; git -C "$W" commit -q -m "submodules, and a plan citing one"; git -C "$W" push -q origin main
+git -C "$W" checkout -q -b feature; echo f > "$W/src/f.py"; git -C "$W" add -A; git -C "$W" commit -q -m f
+bump() {  # bump <a|b>: the submodule gains a commit, and main points at it
+  echo "y $1" >> "$TMP/sub-$1/x.py"; git -C "$TMP/sub-$1" commit -q -am bump
+  git -C "$O" checkout -q main; git -C "$O" pull -q --ff-only origin main
+  git -C "$O" update-index --cacheinfo "160000,$(git -C "$TMP/sub-$1" rev-parse HEAD),vendor/$1"
+  git -C "$O" commit -q -m "bump vendor/$1"; git -C "$O" push -q origin main
+}
+bump b
+check "another submodule's bump on the default branch is CURRENT" 0 "and so are the files it cites" "$CHECK" "$W/docs/plan.md"
+bump a
+check "a bump of the submodule holding a cited file is STALE" \
+  1 "file(s) the document cites changed on origin/main after this branch left it (2 commit(s) behind): vendor/a" "$CHECK" "$W/docs/plan.md"
+git -C "$W" config diff.ignoreSubmodules all
+check "and still STALE when the repository hides submodule changes from diff" \
+  1 "vendor/a" "$CHECK" "$W/docs/plan.md"
+
 # The lister cannot run: the answer is not known, so it is not CURRENT.
 cite_fixture
 other_pushes main src/code.py "code v2"
 mkdir -p "$TMP/nopy"; for t in git bash sh awk sed grep head sort tr cut cat dirname basename perl mktemp rm date wc comm env sleep; do p="$(command -v "$t" 2>/dev/null)" && ln -sf "$p" "$TMP/nopy/$t"; done
 check "without python3 the cited-file question is UNVERIFIED, not CURRENT" \
-  2 "could not tell whether a file the document cites changed" env PATH="$TMP/nopy" "$CHECK" "$W/docs/plan.md"
+  2 "could not tell whether a file the document cites changed on origin/main (1 commit(s) behind): python3, which the citation lister needs, is not installed" env PATH="$TMP/nopy" "$CHECK" "$W/docs/plan.md"
 
 # The check leaves no refs behind, and a leftover from a run that died does not
 # block a later branch whose name nests under it (feat, then feat/x).

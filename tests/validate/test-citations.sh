@@ -740,7 +740,8 @@ printf 'a\nb\n' > "$PR/src/one.py"; printf 'x\n' > "$PR/src/deep/two.py"
 printf 'r\n' > "$PR/README.md"; printf 'r\n' > "$PR/src/README.md"
 cat > "$PR/docs/plan.md" <<'DOC'
 See `src/one.py:1` and `src/one.py:2`, then `two.py:1`.
-An ambiguous `README.md:1` lists both files; a missing `gone.py:3` is left out.
+An ambiguous `README.md:1` lists both files; a missing `gone.py:3` is left out,
+and a missing `src/later.py:1` is listed as written.
 DOC
 git -C "$PR" add -A
 git -C "$PR" -c user.name=t -c user.email=t@example.com commit -q -m init
@@ -749,6 +750,7 @@ report "--paths exits 0" 0 "$paths_rc"
 report "--paths lists each file once, every candidate of an ambiguous name, sorted" "README.md
 src/README.md
 src/deep/two.py
+src/later.py
 src/one.py" "$paths_out"
 lacks "--paths prints no findings" "$paths_out" "###"
 # A file inside a submodule is listed as the submodule's mount point.
@@ -758,6 +760,9 @@ git -C "$PR" -c protocol.file.allow=always submodule --quiet add "$SM" vendor/su
 git -C "$PR" -c user.name=t -c user.email=t@example.com commit -q -m "add submodule"
 printf 'See `vendor/sub/x.py:1`.\n' > "$PR/docs/sub.md"
 report "--paths lists a file inside a submodule as the mount point" "vendor/sub" \
+  "$(python3 "$CHECKER" "$PR/docs/sub.md" --repo-root "$PR" --paths)"
+git -C "$PR" submodule --quiet deinit -f vendor/sub
+report "--paths lists the mount point when the submodule is not checked out" "vendor/sub" \
   "$(python3 "$CHECKER" "$PR/docs/sub.md" --repo-root "$PR" --paths)"
 
 # --- the checker's own docs are not exempt --------------------------------
@@ -777,7 +782,7 @@ report "skills/validate/*.md carry no broken citations" \
 # A conditional case (the submodule one) means "0 failed" could otherwise hide
 # a silently smaller run. Counted outside `report` so this check cannot count
 # itself; bump it deliberately when you add an assertion.
-EXPECTED_ASSERTIONS=124
+EXPECTED_ASSERTIONS=125
 ran=$((pass + fail))
 if [ "$ran" -ne "$EXPECTED_ASSERTIONS" ]; then
   fail=$((fail + 1))

@@ -18,6 +18,11 @@
 #          decides, and behind_default reports the distance
 #        - the document changed on a remote's default branch after this branch
 #          left it
+#        - a file the document cites (`path:NN`, as check-citations.py reads
+#          them) changed on a remote's default branch after this branch left
+#          it: the reviewers would check the document's claims against code
+#          that is no longer what the default branch holds. --no-cited turns
+#          this rule off
 #        - with --since, HEAD is no longer that commit
 #      A remote that should not count is excluded with
 #        git config --add validate.ignoreRemote <name>
@@ -49,16 +54,20 @@ set -uo pipefail
 # hook, `git rebase --exec`) would override that and point them all elsewhere.
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_NAMESPACE
 
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 usage() {
-  echo "usage: check-currency.sh <path-to-doc.md> [--since SHA]" >&2
+  echo "usage: check-currency.sh <path-to-doc.md> [--since SHA] [--no-cited]" >&2
   exit 3
 }
 
 doc=""
 since=""
+use_cited=1
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --since) [[ $# -ge 2 ]] || usage; since="$2"; shift 2 ;;
+    --no-cited) use_cited=""; shift ;;
     --*) echo "unknown arg: $1" >&2; exit 3 ;;
     *) [[ -z "$doc" ]] || usage; doc="$1"; shift ;;
   esac
@@ -446,6 +455,37 @@ doc_changed() {
   return 1
 }
 
+# cited_changed <ref>: sets $cited_hit to the files the document cites that
+# differ between where this branch left <ref> and <ref> itself, newline
+# separated. Returns 0 when the question was answered (the list may be empty),
+# 2 when it could not be: the citation lister is missing or failed, or there
+# is no common history. The cited files are listed once, by the sibling
+# check-citations.py, from the document as it is in this checkout.
+cited_state=""   # "", ok, or failed
+cited=()
+cited_changed() {
+  local ref=$1 bases mb out p listed
+  cited_hit=""
+  if [[ -z "$cited_state" ]]; then
+    cited_state=failed
+    if command -v python3 >/dev/null 2>&1 && [[ -f "$here/check-citations.py" ]] \
+       && listed="$(python3 "$here/check-citations.py" "$doc" --repo-root "$root" --paths 2>/dev/null)"; then
+      cited_state=ok
+      while IFS= read -r p; do [[ -n "$p" ]] && cited+=(":(literal)$p"); done <<<"$listed"
+    fi
+  fi
+  [[ "$cited_state" == ok ]] || return 2
+  [[ ${#cited[@]} -gt 0 ]] || return 0
+  bases="$(g merge-base --all HEAD "$ref" 2>/dev/null)" || return 2
+  [[ -n "$bases" ]] || return 2
+  for mb in $bases; do
+    out="$(g diff --name-only "$mb" "$ref" -- "${cited[@]}" 2>/dev/null)" || return 2
+    [[ -n "$out" ]] && cited_hit="${cited_hit:+$cited_hit"$'\n'"}$out"
+  done
+  [[ -n "$cited_hit" ]] && cited_hit="$(sort -u <<<"$cited_hit" | plain)"
+  return 0
+}
+
 # Every target is compared before the verdict.
 behind_default=0
 upstream_disp=""
@@ -521,7 +561,18 @@ while [[ $i -lt ${#t_ref[@]} ]]; do
       doc_changed "$ref"; rc=$?
       case "$rc" in
         0) reasons+=("the document changed on $disp after this branch left it ($n commit(s) behind): $rel") ;;
-        1) notes+=("$n commit(s) behind $disp; the document is unchanged there") ;;
+        1) if [[ -z "$use_cited" ]]; then
+             notes+=("$n commit(s) behind $disp; the document is unchanged there (files it cites were not compared)")
+           elif ! cited_changed "$ref"; then
+             unknowns+=("could not tell whether a file the document cites changed on $disp ($n commit(s) behind): the citation lister (check-citations.py, python3) did not run")
+           elif [[ -n "$cited_hit" ]]; then
+             k="$(grep -c . <<<"$cited_hit")"
+             shown="$(head -n 5 <<<"$cited_hit" | awk '{ printf "%s%s", (NR > 1 ? ", " : ""), $0 }')"
+             [[ "$k" -gt 5 ]] && shown="$shown, and $((k - 5)) more"
+             reasons+=("$k file(s) the document cites changed on $disp after this branch left it ($n commit(s) behind): $shown (rebase onto $disp, or merge it, so the reviewers read the code the document will land on)")
+           else
+             notes+=("$n commit(s) behind $disp; the document is unchanged there, and so are the files it cites")
+           fi ;;
         *) unknowns+=("could not tell whether the document changed on $disp (no common history, or this branch deleted a file that $disp then changed and the document is new here; rebasing onto $disp settles it)") ;;
       esac
       ;;

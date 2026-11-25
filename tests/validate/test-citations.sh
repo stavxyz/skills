@@ -732,6 +732,24 @@ report "the [manual] guard is numbered before claim verification" \
   "yes" \
   "$([ -n "$guard" ] && [ -n "$verify" ] && [ "$guard" -lt "$verify" ] && echo yes || echo no)"
 
+# --- --paths: the files a document cites, for check-currency.sh -------------
+PR="$TMP/paths-repo"
+mkdir -p "$PR/src/deep" "$PR/docs"
+git -C "$PR" init -q
+printf 'a\nb\n' > "$PR/src/one.py"; printf 'x\n' > "$PR/src/deep/two.py"
+printf 'r\n' > "$PR/README.md"; printf 'r\n' > "$PR/src/README.md"
+cat > "$PR/docs/plan.md" <<'DOC'
+See `src/one.py:1` and `src/one.py:2`, then `two.py:1`.
+An ambiguous `README.md:1` and a missing `gone.py:3` are left out.
+DOC
+git -C "$PR" add -A
+git -C "$PR" -c user.name=t -c user.email=t@example.com commit -q -m init
+paths_out="$(python3 "$CHECKER" "$PR/docs/plan.md" --repo-root "$PR" --paths)"; paths_rc=$?
+report "--paths exits 0" 0 "$paths_rc"
+report "--paths lists each resolved file once, repository-relative, sorted" "src/deep/two.py
+src/one.py" "$paths_out"
+lacks "--paths prints no findings" "$paths_out" "###"
+
 # --- the checker's own docs are not exempt --------------------------------
 # Counts the per-document tally lines as well as summing them: a crashing
 # checker prints nothing, `sed` matches nothing, and `awk` would sum an empty
@@ -749,7 +767,7 @@ report "skills/validate/*.md carry no broken citations" \
 # A conditional case (the submodule one) means "0 failed" could otherwise hide
 # a silently smaller run. Counted outside `report` so this check cannot count
 # itself; bump it deliberately when you add an assertion.
-EXPECTED_ASSERTIONS=120
+EXPECTED_ASSERTIONS=123
 ran=$((pass + fail))
 if [ "$ran" -ne "$EXPECTED_ASSERTIONS" ]; then
   fail=$((fail + 1))

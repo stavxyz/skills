@@ -1236,6 +1236,38 @@ other_pushes main docs/plan.md "plan v2"
 check "an inherited GIT_DIR is ignored" \
   1 "behind" env GIT_DIR="$TMP/elsewhere/.git" "$CHECK" "$W/docs/plan.md"
 
+# A feature branch behind the default branch: a file the document cites
+# changed there, so the reviewers would check the document against stale code.
+cite_fixture() {
+  fresh
+  printf 'The plan.\n\nSee `src/code.py:1` for the entry point.\n' > "$W/docs/plan.md"
+  git -C "$W" add -A; git -C "$W" commit -q -m "plan cites code"; git -C "$W" push -q origin main
+  git -C "$W" checkout -q -b feature
+  echo f > "$W/src/f.py"; git -C "$W" add -A; git -C "$W" commit -q -m f
+}
+cite_fixture
+other_pushes main src/code.py "code v2"
+check "a cited file that changed on the default branch is STALE" \
+  1 "1 file(s) the document cites changed on origin/main after this branch left it (1 commit(s) behind): src/code.py" "$CHECK" "$W/docs/plan.md"
+check "--no-cited turns that rule off, and the note says so" \
+  0 "files it cites were not compared" "$CHECK" "$W/docs/plan.md" --no-cited
+git -C "$W" fetch -q origin; git -C "$W" rebase -q origin/main
+check "after a rebase onto the default branch it is CURRENT" 0 "CURRENT" "$CHECK" "$W/docs/plan.md"
+
+# A file the document does not cite changes there: still CURRENT, and the note
+# says the cited files were compared.
+cite_fixture
+echo other > "$O/src/other.py"; git -C "$O" checkout -q main; git -C "$O" pull -q --ff-only origin main; git -C "$O" add -A; git -C "$O" commit -q -m other; git -C "$O" push -q origin main
+check "an uncited file changing on the default branch is CURRENT" \
+  0 "the document is unchanged there, and so are the files it cites" "$CHECK" "$W/docs/plan.md"
+
+# The lister cannot run: the answer is not known, so it is not CURRENT.
+cite_fixture
+other_pushes main src/code.py "code v2"
+mkdir -p "$TMP/nopy"; for t in git bash sh awk sed grep head sort tr cut cat dirname basename perl mktemp rm date wc comm env sleep; do p="$(command -v "$t" 2>/dev/null)" && ln -sf "$p" "$TMP/nopy/$t"; done
+check "without python3 the cited-file question is UNVERIFIED, not CURRENT" \
+  2 "could not tell whether a file the document cites changed" env PATH="$TMP/nopy" "$CHECK" "$W/docs/plan.md"
+
 # The check leaves no refs behind, and a leftover from a run that died does not
 # block a later branch whose name nests under it (feat, then feat/x).
 fresh

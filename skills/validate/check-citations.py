@@ -539,6 +539,14 @@ def main() -> int:
                        # arguments keeps that from turning the gate on.
         help="force non-strict for this run, overriding CHECK_CITATIONS_STRICT",
     )
+    ap.add_argument(
+        "--paths",
+        action="store_true",
+        help="print the tracked files the document cites, one repository-relative "
+             "path per line, and check nothing. A citation whose path does not "
+             "resolve to exactly one tracked file is left out. check-currency.sh "
+             "uses this to see whether a cited file changed on the default branch.",
+    )
     args = ap.parse_args()
 
     # Precedence: an explicit flag, else the environment, else off. The env var
@@ -571,6 +579,16 @@ def main() -> int:
     except RuntimeError as exc:
         print(f"check-citations: {exc}", file=sys.stderr)
         return 2
+
+    if args.paths:
+        cited: set[str] = set()
+        for cite in citations(doc):
+            target, _ = resolve(cite.path, repo)
+            if target is not None:
+                cited.add(target.relative_to(repo).as_posix())
+        for name in sorted(cited):
+            print(name)
+        return 0
 
     tally = {"ok": 0, "unverifiable": 0, "broken": 0}
     blocks: list[str] = []

@@ -45,13 +45,16 @@ script="$ROOT/skills/land-pr/merge-gate.sh"
 search=""
 limit=10
 targets=()
-usage() { sed -n '/^# Usage:/,/^#   --search/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2; exit 3; }
+# The header from "Usage:" to its end; usage errors print the part before
+# "It only reads", -h prints all of it.
+help_text() { awk '/^# Usage:/{on=1} on && !/^#/{exit} on' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { help_text | awk '/^It only reads/{exit} {print}' >&2; exit 3; }
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --script) [[ $# -ge 2 ]] || usage; script="$2"; shift 2 ;;
     --limit)  [[ $# -ge 2 ]] || usage; limit="$2"; shift 2 ;;
     --search) search=1; shift ;;
-    -h|--help) sed -n '/^# Usage:/,/^# Exit:/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) help_text; exit 0 ;;
     -*) usage ;;
     *) targets+=("$1"); shift ;;
   esac
@@ -74,16 +77,16 @@ fi
 [[ ${#targets[@]} -gt 0 ]] || usage
 
 bad=0
-checked=0
+for t in "${targets[@]}"; do
+  if [[ ! "$t" =~ ^[^#/]+/[^#/]+#[0-9]+$ ]]; then echo "not owner/repo#N: $t" >&2; usage; fi
+done
 seen=" "
 for t in "${targets[@]}"; do
   case "$seen" in *" $t "*) continue ;; esac   # the searches overlap
   seen="$seen$t "
   repo="${t%%#*}"; n="${t##*#}"
-  if [[ "$repo" == "$t" || ! "$n" =~ ^[0-9]+$ ]]; then echo "not owner/repo#N: $t" >&2; usage; fi
   head="$(GH_REPO="$repo" gh pr view "$n" --json headRefOid --jq .headRefOid 2>/dev/null)" || head=""
   if [[ -z "$head" ]]; then bad=1; echo "FAIL: cannot read $t"; continue; fi
-  checked=$((checked + 1))
   out="$(GH_REPO="$repo" bash "$script" "$n" --sha "$head" --retries 1 --interval 5 2>&1)"; rc=$?
   line="$(grep -m1 -E '^(READY|NOT READY|UNKNOWN|ALREADY MERGED|CLOSED)' <<<"$out" || head -n 1 <<<"$out")"
   case "$rc" in
@@ -96,6 +99,10 @@ for t in "${targets[@]}"; do
         want="$(GH_REPO="$repo" gh api "repos/$repo/git/commits/$head" --jq .tree.sha 2>/dev/null) $tip,$head"
         if [[ -n "$tm" && "$got" == "$want" ]]; then
           echo "ok   $t: READY while behind; the test merge has the head's tree"
+        elif [[ "$(GH_REPO="$repo" gh pr view "$n" --json state,headRefOid --jq '.state + " " + .headRefOid')" != "OPEN $head" ]]; then
+          # Merged, closed, or pushed to between the gate's read and this one:
+          # the second read describes a different PR state, so it proves nothing.
+          echo "ok   $t: READY, then the PR changed during the probe; run it again for this PR"
         else
           bad=1; echo "FAIL $t: READY while behind, but the test merge is '$got', wanted '$want'"
         fi
@@ -108,5 +115,4 @@ for t in "${targets[@]}"; do
     *)     bad=1; echo "FAIL $t: exit $rc: $line" ;;
   esac
 done
-[[ "$checked" -gt 0 ]] || { echo "nothing was probed" >&2; exit 1; }
 exit "$bad"

@@ -927,6 +927,18 @@ else
   echo "skip: credentials fixture (needs python3)"
 fi
 
+# An ssh remote that hangs (an agent waiting on an approval nobody gives): the
+# message says what that usually is, since the stopped call left no output.
+if command -v perl >/dev/null 2>&1; then
+  fresh
+  printf '#!/bin/sh\nsleep 60\n' > "$TMP/hang-ssh"; chmod +x "$TMP/hang-ssh"
+  git -C "$W" remote add slow "ssh://git@example.invalid/x.git"
+  git -C "$W" config core.sshCommand "$TMP/hang-ssh"
+  git -C "$W" remote set-url origin "ssh://git@example.invalid$TMP/origin.git"
+  check "an ssh remote that hangs is UNVERIFIED, and the message names the usual cause" \
+    2 "an ssh agent waiting on an approval" env CHECK_CURRENCY_NET_TIMEOUT=2 "$CHECK" "$W/docs/plan.md"
+fi
+
 # The check leaves no refs behind, and a leftover from a run that died does not
 # block a later branch whose name nests under it (feat, then feat/x).
 fresh

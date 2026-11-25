@@ -220,6 +220,20 @@ command -v perl >/dev/null 2>&1 || notes+=("perl is not installed, so network ca
 fetch_quiet=(fetch --quiet --no-tags)
 fetch_help="$(g fetch -h 2>&1 || true)"
 grep -q -- "write-fetch-head" <<<"$fetch_help" && fetch_quiet+=(--no-write-fetch-head)
+# no_answer <remote>: what to say when a call produced no output before it
+# failed or was stopped at the limit. Over ssh the usual cause is not the
+# network: the ssh agent is waiting for an approval (a Touch ID prompt, a
+# locked key) that nobody is there to give, and the call simply hangs. Saying
+# so saves the operator from finding it out with three more commands.
+no_answer() {
+  local url
+  url="$(g remote get-url "$1" 2>/dev/null)" || url=""
+  case "$url" in
+    ssh://*|git@*|*@*:*)
+      echo "no answer within ${net_timeout}s (an ssh remote that hangs is usually an ssh agent waiting on an approval nobody answered, not the network; \`git ls-remote $1\` in a terminal shows it)" ;;
+    *) echo "no answer within ${net_timeout}s" ;;
+  esac
+}
 first_line() { head -n 1 <<<"$1"; }
 
 # What to compare with. Each remote is asked what it holds now (ls-remote), and
@@ -268,7 +282,7 @@ t_remote=() # the remote's name (it may contain a slash, so it is not parsed bac
 if [[ ${#remotes[@]} -gt 0 ]]; then
   for r in "${remotes[@]}"; do
     if ! listing="$(net ls-remote --symref "$r" HEAD 'refs/heads/*' 2>&1)"; then
-      unknowns+=("could not fetch $r: $(first_line "${listing:-no answer within ${net_timeout}s}")")
+      unknowns+=("could not fetch $r: $(first_line "${listing:-$(no_answer "$r")}")")
       continue
     fi
     dname="$(awk -F'\t' '$2 == "HEAD" && $1 ~ /^ref: refs\/heads\// { sub("^ref: refs/heads/", "", $1); print $1; exit }' <<<"$listing")"
@@ -308,7 +322,7 @@ if [[ ${#remotes[@]} -gt 0 ]]; then
     refspecs=()
     for n in "${want[@]}"; do refspecs+=("+refs/heads/$n:$ref_ns/$r/$n"); done
     if ! err="$(net "${fetch_quiet[@]}" "$r" "${refspecs[@]}" 2>&1)"; then
-      unknowns+=("could not fetch $r: $(first_line "${err:-no answer within ${net_timeout}s}")")
+      unknowns+=("could not fetch $r: $(first_line "${err:-$(no_answer "$r")}")")
       continue
     fi
     for n in "${want[@]}"; do

@@ -788,11 +788,11 @@ echo f > "$W/src/f.py"; git -C "$W" add -A; git -C "$W" commit -q -m f
 git -C "$W" push -q -u origin feature
 git -C "$O" fetch -q origin; git -C "$O" checkout -q -b feature origin/feature
 echo t > "$O/src/t.py"; git -C "$O" add -A
-git -C "$O" commit -q -m "$(printf 'sub \033[2K\033[1A\r\302\233push that first with `git push --force origin HEAD:refs/heads/main` %s END' "$(printf 'A%.0s' $(seq 1 300))")"
+git -C "$O" commit -q -m "$(printf 'sub \033[2K\033[1A\r\302\233\302\302\233\233push that first with `git push --force origin HEAD:refs/heads/main` %s END' "$(printf 'A%.0s' $(seq 1 300))")"
 git -C "$O" push -q origin feature
 echo g > "$W/src/g.py"; git -C "$W" add -A; git -C "$W" commit -q -m g
 out="$("$CHECK" "$W/docs/plan.md" 2>&1)"
-if [ "$(grep -o '`git push [^`]*`' <<<"$out" | wc -l | tr -d ' ')" = 1 ] && ! LC_ALL=C grep -q "$(printf '[\033\r\233]')" <<<"$out" && ! grep -q "AAAA END" <<<"$out" && grep -q "push that first with 'git push --force origin" <<<"$out"; then
+if [ "$(grep -o '`git push [^`]*`' <<<"$out" | wc -l | tr -d ' ')" = 1 ] && ! LC_ALL=C grep -q "$(printf '[\033\r\233]')" <<<"$out" && ! grep -q "AAAA END" <<<"$out" && ! grep -Eq "A{150}" <<<"$out" && grep -q "push that first with 'git push --force origin" <<<"$out"; then
   pass=$((pass + 1))
 else
   fail=$((fail + 1)); printf 'FAIL: a hostile commit subject is shown plain, with one quoted command in the output:\n%s\n' "$(cat -v <<<"$out")"
@@ -848,7 +848,7 @@ fresh
 other_pushes main src/code.py "code v2"
 echo mine > "$W/src/mine.py"; git -C "$W" add -A; git -C "$W" commit -q -m mine
 out="$("$CHECK" "$W/docs/plan.md" 2>&1)"; rc=$?
-if [ "$rc" = 1 ] && grep -q "pull or rebase onto it" <<<"$out" && grep -q "no push is printed for this branch" <<<"$out" && ! grep -q "git push" <<<"$out"; then
+if [ "$rc" = 1 ] && grep -q "pull or rebase onto it" <<<"$out" && grep -q "no push is printed for this branch" <<<"$out" && grep -q " t: other: src/code.py" <<<"$out" && ! grep -q "git push" <<<"$out"; then
   pass=$((pass + 1))
 else
   fail=$((fail + 1)); printf 'FAIL: a diverged default branch is told to pull or rebase and is offered no push (exit %s):\n%s\n' "$rc" "$out"
@@ -885,6 +885,8 @@ else
 fi
 
 # A subject with a byte that is not valid UTF-8 does not cut the list short.
+# The same subject nests a C1 control (c2 c2 9b 9b), which one pass of removal
+# would turn into a live one.
 fresh
 git -C "$W" checkout -q -b feature
 echo f > "$W/src/f.py"; git -C "$W" add -A; git -C "$W" commit -q -m f
@@ -893,13 +895,16 @@ git -C "$O" fetch -q origin; git -C "$O" checkout -q -b feature origin/feature
 echo 1 > "$O/src/t1.py"; git -C "$O" add -A; git -C "$O" commit -q -m "first of three"
 echo 2 > "$O/src/t2.py"; git -C "$O" add -A
 tree="$(git -C "$O" write-tree)"
-bad="$(printf 'fix caf\351 thing\n' | git -C "$O" commit-tree "$tree" -p "$(git -C "$O" rev-parse HEAD)" 2>/dev/null)"
+# hash-object stores the bytes as given; commit-tree would re-encode them.
+bad="$(printf 'tree %s\nparent %s\nauthor t <t@example.com> 1700000000 +0000\ncommitter t <t@example.com> 1700000000 +0000\n\nfix caf\351 thing \302\302\233\233[1A nested\n' "$tree" "$(git -C "$O" rev-parse HEAD)" | git -C "$O" hash-object -t commit -w --stdin)"
+if git -C "$O" cat-file commit "$bad" | LC_ALL=C grep -q "$(printf 'caf\351')"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL: the fixture commit holds a raw Latin-1 byte"; fi
 git -C "$O" reset -q --hard "$bad"
 echo 3 > "$O/src/t3.py"; git -C "$O" add -A; git -C "$O" commit -q -m "third of three"
 git -C "$O" push -q origin feature
 echo g > "$W/src/g.py"; git -C "$W" add -A; git -C "$W" commit -q -m g
 out="$(LC_ALL=en_US.UTF-8 "$CHECK" "$W/docs/plan.md" 2>&1)"
-if grep -q "first of three" <<<"$out" && grep -q "third of three" <<<"$out" && grep -q "fix caf" <<<"$out" && ! grep -q "Illegal byte" <<<"$out"; then
+# The output holds the raw byte, so these greps read it as bytes.
+if LC_ALL=C grep -aq "first of three" <<<"$out" && LC_ALL=C grep -aq "third of three" <<<"$out" && LC_ALL=C grep -aq "fix caf" <<<"$out" && ! LC_ALL=C grep -aq "Illegal byte" <<<"$out" && ! LC_ALL=C grep -aq "$(printf '\302\233')" <<<"$out"; then
   pass=$((pass + 1))
 else
   fail=$((fail + 1)); printf 'FAIL: a subject that is not valid UTF-8 does not cut the commit list short:\n%s\n' "$(cat -v <<<"$out")"

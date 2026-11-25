@@ -34,7 +34,7 @@
 # says behind 0, the compare API must agree.
 #
 # Exit: 0 every answer checked out; 1 a READY could not be confirmed on a PR
-# that stayed open on the same head, the gate
+# that stayed open on the same head and base, the gate
 # returned 2 or 3 for some PR, a target could not be read, or nothing was
 # probed; 3 usage.
 
@@ -81,14 +81,24 @@ bad=0
 for t in "${targets[@]}"; do
   if [[ ! "$t" =~ ^[^#/]+/[^#/]+#[0-9]+$ ]]; then echo "not owner/repo#N: $t" >&2; usage; fi
 done
-# changed <repo> <n> <head>: true when the PR is no longer open on that head.
-# Merged, closed, or pushed to between the gate's read and the second read:
-# the second read then describes a different PR state and proves nothing.
-# A re-read that fails is not a change: the caller then reports the mismatch.
+# base_tip <repo> <n>: the PR's base branch and that branch's tip, read now.
+base_tip() {
+  local b
+  b="$(GH_REPO="$1" gh pr view "$2" --json baseRefName --jq .baseRefName 2>/dev/null)" || return 1
+  printf '%s %s' "$b" "$(GH_REPO="$1" gh api "repos/$1/git/ref/heads/$b" --jq .object.sha 2>/dev/null)"
+}
+# changed <repo> <n> <head> <base and tip before the gate>: true when the PR is
+# no longer open on that head, or its base moved. Merged, closed, pushed to, or
+# a base that took a commit between the gate's read and the second read: the
+# second read then describes a different state and proves nothing. A re-read
+# that fails is not a change: the caller then reports the mismatch.
 changed() {
-  local now
+  local now base_now
   now="$(GH_REPO="$1" gh pr view "$2" --json state,headRefOid --jq '.state + " " + .headRefOid' 2>/dev/null)" || return 1
-  [[ -n "$now" && "$now" != "OPEN $3" ]]
+  [[ -n "$now" ]] || return 1
+  [[ "$now" != "OPEN $3" ]] && return 0
+  base_now="$(base_tip "$1" "$2")" || return 1
+  [[ "$base_now" != *" " && "$base_now" != "$4" ]]
 }
 seen=" "
 for t in "${targets[@]}"; do
@@ -97,6 +107,7 @@ for t in "${targets[@]}"; do
   repo="${t%%#*}"; n="${t##*#}"
   head="$(GH_REPO="$repo" gh pr view "$n" --json headRefOid --jq .headRefOid 2>/dev/null)" || head=""
   if [[ -z "$head" ]]; then bad=1; echo "FAIL: cannot read $t"; continue; fi
+  before="$(base_tip "$repo" "$n")" || before=""
   out="$(GH_REPO="$repo" bash "$script" "$n" --sha "$head" --retries 1 --interval 5 2>&1)"; rc=$?
   line="$(grep -m1 -E '^(READY|NOT READY|UNKNOWN|ALREADY MERGED|CLOSED)' <<<"$out" || head -n 1 <<<"$out")"
   case "$rc" in
@@ -109,7 +120,7 @@ for t in "${targets[@]}"; do
         want="$(GH_REPO="$repo" gh api "repos/$repo/git/commits/$head" --jq .tree.sha 2>/dev/null) $tip,$head"
         if [[ -n "$tm" && "$got" == "$want" ]]; then
           echo "ok   $t: READY while behind; the test merge has the head's tree"
-        elif changed "$repo" "$n" "$head"; then
+        elif changed "$repo" "$n" "$head" "$before"; then
           echo "ok   $t: READY, then the PR changed during the probe; run it again for this PR"
         else
           bad=1; echo "FAIL $t: READY while behind, but the test merge is '$got', wanted '$want'"
@@ -118,7 +129,7 @@ for t in "${targets[@]}"; do
         behind="$(GH_REPO="$repo" gh api "repos/$repo/compare/$base...$head" --jq .behind_by 2>/dev/null)"
         if [[ "$behind" == "0" ]]; then
           echo "ok   $t: READY, behind 0"
-        elif changed "$repo" "$n" "$head"; then
+        elif changed "$repo" "$n" "$head" "$before"; then
           echo "ok   $t: READY, then the PR changed during the probe; run it again for this PR"
         else
           bad=1; echo "FAIL $t: READY, but the compare API says behind '$behind'"

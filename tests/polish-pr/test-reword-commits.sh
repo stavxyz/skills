@@ -593,6 +593,7 @@ Fixes the retry count added in $s2.
 "
 json "[{\"old\": \"retries twice\", \"new\": \"retries three times\"}, {\"old\": \"added in $s2\", \"new\": \"added earlier\"}]"
 rw --base base --replace "$tmp/replace.json" --dry-run
+check "the dry run of a run that removes the citation runs" 0 "dry run:"
 if grep -qF "mention(s) of a sha" <<<"$out"; then
   bad "the dry run does not list a citation the run would remove" "$out"
 else

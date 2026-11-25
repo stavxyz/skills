@@ -38,8 +38,10 @@ The user's standing rule: polish-pr is non-optional before merge AND requires BO
 
 ### A promotion PR is not polished here — check this before anything else
 
-A PR is a promotion PR when its head is a long-lived branch: the repo's default branch, or a branch the repo's docs name as an integration or environment branch (`dev`, `staging`, or a release branch); a feature branch that happens to have another PR stacked on it is not one. Read the
-head branch with `GH_REPO=<owner>/<repo> gh pr view <PR_NUMBER> --json headRefName,baseRefName`.
+A PR is a promotion PR when its head is a long-lived branch of the base repository: the repo's default branch, or a branch the repo's docs name as an integration or environment branch (`dev`, `staging`, or a release branch). A PR from a fork is never one, whatever its branch is called, and neither is a feature branch that happens to have another PR stacked on it. Read the
+head with `GH_REPO=<owner>/<repo> gh pr view <PR_NUMBER> --json headRefName,baseRefName,isCrossRepository` and the default branch with `GH_REPO=<owner>/<repo> gh repo view --json defaultBranchRef --jq .defaultBranchRef.name`.
+
+If the head is in the base repository, is not the default branch, and the docs do not name it, but pull requests have been merged into it (`GH_REPO=<owner>/<repo> gh pr list --base <head branch> --state merged --limit 1` prints one), it may be an integration branch nobody wrote down: stop and ask the user which it is before anything rebases it.
 
 If it is one, stop now, before the base-currency gate and before dispatching
 reviewers. This skill's fix loop and its attribution sweep commit and push to

@@ -267,9 +267,12 @@ net_failure() {
 # Every stage runs in the C locale: in a UTF-8 locale tr and cut stop at the
 # first byte that is not valid UTF-8 and drop the rest of the input.
 # The sed removes the UTF-8 form of the C1 controls (U+0080 to U+009F), which
-# some terminals act on like an escape. It loops, since removing one pair
-# can leave another behind (c2 c2 9b 9b).
-plain() { LC_ALL=C tr -d '\000-\010\013-\037\177' | LC_ALL=C sed -e :a -e $'s/\xc2[\x80-\x9f]//' -e ta | LC_ALL=C tr '`' "'" | LC_ALL=C cut -c1-160; }
+# some terminals act on like an escape. It takes a whole run of c2 bytes and
+# the run of C1 bytes after it in one match, since removing a single pair can
+# leave another behind (c2 c2 9b 9b), and one pass keeps it linear: a remote
+# commit must not be able to make this check slow. The first cut bounds the
+# work for the same reason.
+plain() { LC_ALL=C tr -d '\000-\010\013-\037\177' | LC_ALL=C cut -c1-4096 | LC_ALL=C sed -E $'s/\xc2+[\x80-\x9f]+//g' | LC_ALL=C tr '`' "'" | LC_ALL=C cut -c1-160; }
 first_line() { head -n 1 <<<"$1" | plain; }
 # lost_list <ref> <count>: the commits <ref> holds that HEAD lacks, newest
 # first, at most five, with date and author: the evidence for whose they are.

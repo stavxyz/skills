@@ -11,14 +11,18 @@
 #      number of commits the checkout is behind the remote default branch
 #   1  STALE: one line per reason on stdout. Any of:
 #        - the branch is behind the branch it tracks, or behind a branch of
-#          the same name on any remote (another session pushed to it)
+#          the same name on any remote (another session pushed to it). One
+#          carve-out: a branch of another name that tracks a remote's default
+#          branch (git checkout -b x origin/main) is not held to it commit for
+#          commit, since code-only drift there is ordinary; the next rule
+#          decides, and behind_default reports the distance
 #        - the document changed on a remote's default branch after this branch
 #          left it
 #        - with --since, HEAD is no longer that commit
 #      A remote that should not count is excluded with
 #        git config --add validate.ignoreRemote <name>
 #   2  UNVERIFIED: currency could not be established: no remote, a remote did
-#      not answer within CHECK_CURRENCY_NET_TIMEOUT seconds (default 60) or
+#      not answer within CHECK_CURRENCY_NET_TIMEOUT seconds (default 25) or
 #      failed, a remote's default branch could not be found, a count failed,
 #      there is no common history, or the document may have been renamed
 #      beyond recognition. Never a pass: the caller records it as a caveat.
@@ -40,6 +44,10 @@
 # then validate would be editing an outdated copy of it.
 
 set -uo pipefail
+
+# Every git call below names its repository with -C. An inherited GIT_DIR (a
+# hook, `git rebase --exec`) would override that and point them all elsewhere.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_NAMESPACE
 
 usage() {
   echo "usage: check-currency.sh <path-to-doc.md> [--since SHA]" >&2
@@ -216,7 +224,63 @@ command -v perl >/dev/null 2>&1 || notes+=("perl is not installed, so network ca
 fetch_quiet=(fetch --quiet --no-tags)
 fetch_help="$(g fetch -h 2>&1 || true)"
 grep -q -- "write-fetch-head" <<<"$fetch_help" && fetch_quiet+=(--no-write-fetch-head)
-first_line() { head -n 1 <<<"$1"; }
+# net_failure <remote> <exit> <output>: one line saying why a network call
+# failed. The exit status decides, not whether there was output: a call
+# stopped at the limit (124) may have printed a warning first, and that
+# warning alone would hide that the call hung. Over ssh a hang is usually not
+# the network: the ssh agent is waiting for an approval (a Touch ID prompt, a
+# locked key) that nobody is there to give. Saying so saves the operator from
+# finding it out with three more commands.
+net_failure() {
+  local r="$1" rc="$2" text="$3" url ssh="" line
+  line="$(first_line "$text")"
+  if [[ "$rc" != 124 ]]; then
+    echo "${line:-failed with no output (exit $rc)}"
+    return
+  fi
+  url="$(g remote get-url "$r" 2>/dev/null)" || url=""
+  # ssh is a scheme, or the scp form host:path (a colon before any slash). A
+  # URL with another scheme, or a local path, is not ssh even when it holds
+  # an @ and a colon (https://user:pw@host:8443/x).
+  # A remote helper address (ext::..., name::...) is a helper name, then two
+  # colons. An IPv6 scp address ([::1]:path) also holds "::" but starts with a
+  # bracket, so the name is required.
+  if [[ ! "$url" =~ ^[A-Za-z0-9][A-Za-z0-9+.-]*:: ]]; then
+    case "$url" in
+      ssh://*|git+ssh://*|ssh+git://*) ssh=1 ;;
+      *://*|/*|./*|../*) ;;
+      *:*) [[ "${url%%:*}" != */* ]] && ssh=1 ;;
+    esac
+  fi
+  if [[ -n "$ssh" ]]; then
+    line="no answer within ${net_timeout}s (an ssh remote that hangs is usually an ssh agent waiting on an approval nobody answered, not the network; the first line \`git ls-remote $r\` prints in a terminal names it)${line:+; it had printed: $line}"
+  else
+    line="no answer within ${net_timeout}s${line:+; it had printed: $line}"
+  fi
+  echo "$line"
+}
+# plain: text that came from a remote (a commit subject, an author name, a
+# server's error line), made safe to show. Control bytes go, since an escape
+# sequence can redraw the line above it, which here holds a command; a
+# backtick becomes a quote, so no subject can look like a quoted command; and
+# a line is cut at 160 bytes (a multibyte character at the cut may be split).
+# Every stage runs in the C locale: in a UTF-8 locale tr and cut stop at the
+# first byte that is not valid UTF-8 and drop the rest of the input.
+# The sed removes the UTF-8 form of the C1 controls (U+0080 to U+009F), which
+# some terminals act on like an escape. It takes a whole run of c2 bytes and
+# the run of C1 bytes after it in one match, since removing a single pair can
+# leave another behind (c2 c2 9b 9b), and one pass keeps it linear: a remote
+# commit must not be able to make this check slow. The first cut bounds the
+# work for the same reason.
+plain() { LC_ALL=C tr -d '\000-\010\013-\037\177' | LC_ALL=C cut -c1-4096 | LC_ALL=C sed -E $'s/\xc2+[\x80-\x9f]+//g' | LC_ALL=C tr '`' "'" | LC_ALL=C cut -c1-160; }
+first_line() { head -n 1 <<<"$1" | plain; }
+# lost_list <ref> <count>: the commits <ref> holds that HEAD lacks, newest
+# first, at most five, with date and author: the evidence for whose they are.
+lost_list() {
+  g log -n 5 --date=format-local:'%Y-%m-%d %H:%M' --format='      %h %cd %an: %s' "HEAD..$1" 2>/dev/null | plain
+  if [[ "$2" -gt 5 ]]; then echo "      and $(($2 - 5)) more"; fi
+  return 0
+}
 
 # What to compare with. Each remote is asked what it holds now (ls-remote), and
 # the branches that matter are fetched by name into refs/check-currency/<pid>/,
@@ -259,12 +323,13 @@ trap cleanup_refs EXIT
 t_disp=()   # how the target is named in messages, e.g. origin/main
 t_ref=()    # the private ref holding what was fetched
 t_kind=()   # upstream | same | default
-t_isdef=()  # 1 when it is its remote's default branch
+t_isdef=()  # 1 when it is its remote's default branch, ? when that remote's default could not be found
 t_remote=() # the remote's name (it may contain a slash, so it is not parsed back out)
 if [[ ${#remotes[@]} -gt 0 ]]; then
   for r in "${remotes[@]}"; do
-    if ! listing="$(net ls-remote --symref "$r" HEAD 'refs/heads/*' 2>&1)"; then
-      unknowns+=("could not fetch $r: $(first_line "${listing:-no answer within ${net_timeout}s}")")
+    listing="$(net ls-remote --symref "$r" HEAD 'refs/heads/*' 2>&1)"; net_rc=$?
+    if [[ "$net_rc" -ne 0 ]]; then
+      unknowns+=("could not fetch $r: $(net_failure "$r" "$net_rc" "$listing")")
       continue
     fi
     dname="$(awk -F'\t' '$2 == "HEAD" && $1 ~ /^ref: refs\/heads\// { sub("^ref: refs/heads/", "", $1); print $1; exit }' <<<"$listing")"
@@ -303,8 +368,9 @@ if [[ ${#remotes[@]} -gt 0 ]]; then
     [[ ${#want[@]} -gt 0 ]] || continue
     refspecs=()
     for n in "${want[@]}"; do refspecs+=("+refs/heads/$n:$ref_ns/$r/$n"); done
-    if ! err="$(net "${fetch_quiet[@]}" "$r" "${refspecs[@]}" 2>&1)"; then
-      unknowns+=("could not fetch $r: $(first_line "${err:-no answer within ${net_timeout}s}")")
+    err="$(net "${fetch_quiet[@]}" "$r" "${refspecs[@]}" 2>&1)"; net_rc=$?
+    if [[ "$net_rc" -ne 0 ]]; then
+      unknowns+=("could not fetch $r: $(net_failure "$r" "$net_rc" "$err")")
       continue
     fi
     for n in "${want[@]}"; do
@@ -322,7 +388,7 @@ if [[ ${#remotes[@]} -gt 0 ]]; then
       t_ref+=("$ref_ns/$r/$n")
       t_remote+=("$r")
       t_kind+=("$kind")
-      if [[ "$n" == "$dname" ]]; then t_isdef+=(1); else t_isdef+=(0); fi
+      if [[ -z "$dname" ]]; then t_isdef+=("?"); elif [[ "$n" == "$dname" ]]; then t_isdef+=(1); else t_isdef+=(0); fi
     done
   done
 fi
@@ -397,30 +463,55 @@ while [[ $i -lt ${#t_ref[@]} ]]; do
   fi
   [[ "$isdef" == "1" && "$n" -gt "$behind_default" ]] && behind_default="$n"
   [[ "$n" -gt 0 ]] || continue
-  if [[ "$kind" != "default" && -n "$branch_short" ]]; then
-    # The remote's copy of this branch is an earlier state of this very
-    # checkout when its tip appears in the local branch's reflog: it was
-    # pushed from here and then amended or rebased here. Nobody else has
-    # pushed anything newer, so that is not staleness.
-    tip="$(g rev-parse --verify --quiet "$ref^{commit}")" || tip=""
-    # Captured first, not piped: with pipefail, grep -q leaving early would make
-    # the pipeline read as a failure.
-    seen="$(g reflog show --format=%H "refs/heads/$branch_short" 2>/dev/null || true)"
-    if [[ -n "$tip" ]] && grep -qxF -- "$tip" <<<"$seen"; then
-      notes+=("$disp holds an earlier push of this branch, since rewritten here ($n commit(s) not in this checkout)")
-      continue
-    fi
-  fi
+  # No exception is made for a branch that was pushed from here and then
+  # amended or rebased here, although that checkout is "behind" only its own
+  # earlier push. Telling that case apart needs proof that every commit missing
+  # here was pushed from this checkout, and git does not keep it: the branch's
+  # reflog holds pulled and cloned commits exactly like local ones, a clone
+  # leaves no entry in the tracking ref's reflog, and another worktree's push
+  # is logged like this one's. Each rule tried on that evidence called some
+  # checkout current that had dropped another session's commit. So the answer
+  # is STALE, and the message gives both remedies and what the push would delete.
   case "$kind" in
     upstream|same)
       if [[ "$kind" == "upstream" ]]; then
-        reasons+=("behind: this branch is $n commit(s) behind $disp")
+        what="this branch is $n commit(s) behind $disp"
       else
-        if [[ "$isdef" == "1" ]]; then
-          reasons+=("behind: branch $branch_short is $n commit(s) behind $disp, that remote's default branch (if it should not count, run: git config --add validate.ignoreRemote $rname)")
+        what="branch $branch_short is $n commit(s) behind $disp, its own copy on that remote"
+      fi
+      if [[ "$kind" == "same" && "$isdef" == "1" ]]; then
+        reasons+=("behind: branch $branch_short is $n commit(s) behind $disp, that remote's default branch (if it should not count, run: git config --add validate.ignoreRemote $rname)")
+      elif g merge-base --is-ancestor HEAD "$ref" 2>/dev/null; then
+        # Nothing here that the remote lacks, so no amend or rebase made this:
+        # the only remedy is a pull, and no push is offered.
+        reasons+=("behind: $what, and has no commit of its own to push (pull it; if this checkout rewound the branch on purpose, the remote still holds those commits)")
+      elif [[ "$isdef" == "1" ]]; then
+        # A default branch that diverged: the missing commits are almost
+        # always other people's merges, so no push is offered here either.
+        reasons+=("behind: $what, that remote's default branch, and has commits of its own (pull or rebase onto it). If this checkout amended or rebased commits it had already pushed there, a pull brings the old ones back and a rebase can drop the new ones; no push is printed for this branch, so that choice is yours. The commits it lacks are:"$'\n'"$(lost_list "$ref" "$n")")
+      elif [[ "$isdef" == "?" ]]; then
+        # The remote's HEAD names no branch it holds, so this may be its
+        # default branch: treated as one.
+        reasons+=("behind: $what, and has commits of its own; $rname names no default branch, so this may be it (pull or rebase onto it). If this checkout amended or rebased commits it had already pushed there, a pull brings the old ones back and a rebase can drop the new ones; no push is printed for this branch, so that choice is yours. The commits it lacks are:"$'\n'"$(lost_list "$ref" "$n")")
+      else
+        # Diverged. Two cases look alike and need opposite remedies: someone
+        # else pushed (pull), or this checkout rewrote its own pushed commits
+        # (force-push). The push deletes the listed commits, so the message
+        # shows them with their authors and leaves the choice to the reader.
+        ahead="$(g rev-list --count "$ref..HEAD" 2>/dev/null)" || ahead="?"
+        rb="${disp#"$rname/"}"
+        # A command is printed only for names that are safe to paste into a
+        # shell; a branch name may legally hold ; or $( ). Full ref names,
+        # since a tag of the same name makes the short one ambiguous, and the
+        # full sha, since an abbreviation needs the object to still be here.
+        # (@ + = , % are inert inside a word; dependabot branches use @.)
+        if [[ "$rname" =~ ^[A-Za-z0-9._/][A-Za-z0-9._/@+=,%-]*$ && "$rb" =~ ^[A-Za-z0-9._/@+=,%-]+$ ]]; then
+          how="with \`git push --force-with-lease=refs/heads/$rb:$(g rev-parse "$ref" 2>/dev/null) $rname HEAD:refs/heads/$rb\`"
         else
-          reasons+=("behind: branch $branch_short is $n commit(s) behind $disp, its own copy on that remote (pull it; if you rewrote the branch elsewhere, push it)")
+          how="by force-pushing HEAD to that branch with a lease on $(g rev-parse "$ref" 2>/dev/null)"
         fi
+        lost="$(lost_list "$ref" "$n")"
+        reasons+=("behind: $what, and $ahead ahead of it. If anyone else, or another session of yours, pushed any of those $n commit(s), pull or rebase onto them. Only if every one of them is this checkout's own earlier push, since amended or rebased here, push that first $how; that push deletes them from $rname. They are:"$'\n'"$lost")
       fi
       doc_changed "$ref"; rc=$?
       [[ $rc -eq 0 ]] && reasons+=("the document changed in those commits: $rel")

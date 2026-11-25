@@ -507,6 +507,199 @@ else
   fail=$((fail + 1)); printf 'FAIL: piped through tail, the last line should be the verdict, got: %s\n' "$piped"
 fi
 
+
+# ---- The REST fallback. --------------------------------------------------
+#
+# `gh pr checks --json` is GraphQL. Where a proxy refuses GraphQL and passes
+# REST (Claude Code's cloud sessions), the watcher reads the head sha, the check
+# runs and the commit statuses over REST and maps them onto gh's buckets. This
+# stub refuses `pr checks` and `pr view` the way the proxy does and answers the
+# three `api` calls from a scripted sequence, one reading per poll. The watcher
+# reads the PR's head first, so that is the call on which it meets the refusal
+# and switches.
+#
+# The stub stands in for gh INCLUDING its --jq, so for check-runs and status it
+# prints the rows gh prints after the script's filters have run; the filters
+# themselves are exercised against a live PR, not here (no jq on every dev
+# machine, and gh's jq is built in). What these cases hold is the transport:
+# the switch, its announcement, that it happens once, the pinning knob, both
+# transports failing, and that the two REST sources are read together.
+#
+# A REST reading is `name=bucket` check runs joined by `|`, optionally followed
+# by `;` and `context=bucket` commit statuses joined by `|`. NONE is a head with
+# no runs and no statuses. API_ERROR makes every api call fail. RAW is a
+# reading gh did not filter (a JSON body on stdout), which must not be green.
+cat > "$tmp/gh-rest" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$1 $2" >> "$GH_STUB_CALLS"
+case "$1 $2" in
+  "pr view")
+    # GH_STUB_VIEW_OK: only `pr checks` is refused, so the watcher meets the
+    # refusal in its checks read and not in its head read.
+    [ "${GH_STUB_VIEW_OK:-}" = empty ] && exit 0
+    if [ -n "${GH_STUB_VIEW_OK:-}" ]; then printf '%s\n' deadbeefdeadbeefdeadbeefdeadbeefdeadbeef; exit 0; fi
+    echo "GraphQL: Error: HTTP 403: Forbidden (https://api.github.com/graphql)" >&2
+    exit 1 ;;
+  "pr checks")
+    echo "GraphQL: Error: HTTP 403: Forbidden (https://api.github.com/graphql)" >&2
+    exit 1 ;;
+  "run list")
+    # `gh run list` is REST. Every run completed and passed: the watcher's
+    # filter prints nothing for those.
+    exit 0 ;;
+esac
+state="$GH_STUB_STATE"; script="$GH_STUB_SCRIPT"
+n=$(cat "$state" 2>/dev/null || echo 0)
+line=$(sed -n "$((n + 1))p" "$script")
+[ -z "$line" ] && line=$(tail -n 1 "$script")
+[ "$line" = "API_ERROR" ] && { echo "HTTP 502: Bad Gateway" >&2; exit 1; }
+rows() {  # name=bucket|name=bucket -> one "name<TAB>bucket" per line
+  [ -n "$1" ] || return 0
+  printf '%s\n' "$1" | tr '|' '\n' | sed 's/=/\t/'
+}
+case "$2" in
+  repos/*/pulls/*)
+    # GH_STUB_PULLS: one head per call (the last repeats); ERROR fails the call.
+    h=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef
+    if [ -n "${GH_STUB_PULLS:-}" ]; then
+      k=$(cat "$GH_STUB_PULLS.n" 2>/dev/null || echo 0); k=$((k + 1)); echo "$k" > "$GH_STUB_PULLS.n"
+      h=$(sed -n "${k}p" "$GH_STUB_PULLS"); [ -z "$h" ] && h=$(tail -n 1 "$GH_STUB_PULLS")
+    fi
+    [ "$h" = "ERROR" ] && { echo "HTTP 502: Bad Gateway" >&2; exit 1; }
+    printf '%s\n' "$h" ;;
+  repos/*/check-runs*)
+    # a poll is complete when its check-runs are read; advance the script then
+    echo "$((n + 1))" > "$state"
+    case "$line" in
+      NONE) ;;
+      RAW)  printf '{"total_count":1,"check_runs":[{"name":"build","status":"completed","conclusion":"failure"}]}\n' ;;
+      *)    rows "${line%%;*}" ;;
+    esac ;;
+  repos/*/status\?per_page=100)
+    # Without --paginate only the first page of contexts would be read.
+    case " $* " in *" --paginate "*) ;; *) echo "stub: the status read must paginate" >&2; exit 9 ;; esac
+    case "$line" in
+      *";"*) rows "${line#*;}" ;;
+      *) ;;
+    esac ;;
+  *) echo "stub: unexpected call: $*" >&2; exit 9 ;;
+esac
+STUB
+chmod +x "$tmp/gh-rest"
+
+# run_rest <desc> <want-exit> <want-substring|-> <env...> -- <readings...>
+run_rest() {
+  local desc=$1 want=$2 want_out=$3; shift 3
+  local envs=()
+  while [ "$1" != "--" ]; do envs+=("$1"); shift; done
+  shift
+  local script="$tmp/script.txt"
+  printf '%s\n' "$@" > "$script"
+  : > "$tmp/state"; : > "$tmp/calls"
+  local out got
+  out=$(env GH_STUB_STATE="$tmp/state" GH_STUB_SCRIPT="$script" GH_STUB_CALLS="$tmp/calls" \
+        WAIT_FOR_PR_CHECKS_GH="$tmp/gh-rest" "${envs[@]+"${envs[@]}"}" \
+        "$WATCHER" 1 --interval 0 --settle 0 --timeout 5 2>&1)
+  got=$?
+  if [ "$got" = "$want" ] && { [ "$want_out" = "-" ] || grep -qF "$want_out" <<<"$out"; }; then
+    pass=$((pass + 1))
+  else
+    fail=$((fail + 1))
+    printf 'FAIL: %s\n  want exit %s and output containing %s\n  got exit %s, output:\n%s\n' \
+      "$desc" "$want" "$want_out" "$got" "$out"
+  fi
+}
+
+RP="build=pass"
+RF="build=fail"
+RW="build=pending"
+RC="build=cancel"
+RS="build=skipping"
+RMULTI="E2E (Playwright)=pending|Code Quality - Python=pass"
+
+run_rest "GraphQL refused, REST all pass"             0 "CI GREEN"  -- "$RP"
+run_rest "the switch to REST is announced"            0 "reading the PR over the REST API from here on" -- "$RP"
+run_rest "REST fail is a fail"                        1 "CI FAILED" -- "$RF"
+run_rest "REST cancel is a fail"                      1 -           -- "$RC"
+run_rest "REST skipping is not a fail"                0 -           -- "$RS"
+run_rest "REST pending then pass"                     0 "CI GREEN"  -- "$RW" "$RP"
+run_rest "REST pending then fail"                     1 -           -- "$RW" "$RF"
+run_rest "REST multi-word name blocks settling"       1 -           -- "$RMULTI" "$RF"
+run_rest "a failing commit status counts"             1 "CI FAILED" -- "$RP;deploy/preview=fail"
+run_rest "a pending commit status holds the gate"     0 "CI GREEN"  -- "$RP;deploy/preview=pending" "$RP;deploy/preview=pass"
+run_rest "no runs and no statuses settles as no CI"   0 "no checks on this PR" -- "NONE"
+run_rest "an unfiltered body on stdout is not green"  3 "does not understand" -- "RAW"
+run_rest "both transports failing is exit 3"          3 "HTTP 403"  -- "API_ERROR"
+run_rest "...and names the REST failure too"          3 "HTTP 502"  -- "API_ERROR"
+run_rest "transport pinned to graphql never falls back" 3 "HTTP 403" WAIT_FOR_PR_CHECKS_TRANSPORT=graphql -- "$RP"
+run_rest "transport pinned to rest skips gh pr checks"  0 "transport pinned to rest" WAIT_FOR_PR_CHECKS_TRANSPORT=rest -- "$RP"
+run_rest "an unknown transport is a usage error"      3 "must be auto, graphql or rest" WAIT_FOR_PR_CHECKS_TRANSPORT=soap -- "$RP"
+
+# The refusal met in the checks read (the head read answered): the same switch,
+# and a pin to graphql still forbids it.
+run_rest "pr checks alone refused: the checks read falls back" 0 "reading check runs over the REST API" GH_STUB_VIEW_OK=1 -- "$RP"
+run_rest "pr checks alone refused, pinned to graphql: no fallback" 3 "HTTP 403" GH_STUB_VIEW_OK=1 WAIT_FOR_PR_CHECKS_TRANSPORT=graphql -- "$RP"
+if grep -q '^api ' "$tmp/calls"; then
+  fail=$((fail + 1)); echo "FAIL: pinned to graphql, no REST call may be made"
+else
+  pass=$((pass + 1))
+fi
+
+# A switch made in the checks read is held too: two polls, one `pr checks`
+# call, one announcement.
+: > "$tmp/state"; : > "$tmp/calls"
+printf '%s\n' "$RW" "$RP" > "$tmp/script.txt"
+out=$(GH_STUB_STATE="$tmp/state" GH_STUB_SCRIPT="$tmp/script.txt" GH_STUB_CALLS="$tmp/calls" GH_STUB_VIEW_OK=1 \
+  WAIT_FOR_PR_CHECKS_GH="$tmp/gh-rest" "$WATCHER" 1 --interval 0 --settle 0 --timeout 5 2>&1)
+if [ "$(grep -c '^pr checks$' "$tmp/calls")" = 1 ] && [ "$(grep -c 'reading check runs over the REST API' <<<"$out")" = 1 ]; then
+  pass=$((pass + 1))
+else
+  fail=$((fail + 1)); printf 'FAIL: a switch made in the checks read is held: one pr checks call and one announcement, got %s calls:\n%s\n' "$(grep -c '^pr checks$' "$tmp/calls")" "$out"
+fi
+
+# On REST the head is read with the pull-request endpoint. Calls in order: the
+# startup read, then per poll the rows' own read and the read that confirms
+# the head before green.
+HA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+HB=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+printf '%s\n' "$HA" "$HA" "$HB" > "$tmp/pulls"; rm -f "$tmp/pulls.n"
+run_rest "a head that moves while on REST starts the window over, then settles" 0 "head moved to bbbbbbbbbbbb" GH_STUB_PULLS="$tmp/pulls" -- "$RP"
+printf '%s\n' "$HA" "$HA" "ERROR" > "$tmp/pulls"; rm -f "$tmp/pulls.n"
+run_rest "a head read that fails mid-watch on REST is exit 3, not green" 3 "gh failed while confirming workflow runs" GH_STUB_PULLS="$tmp/pulls" -- "$RP"
+# A pin to graphql holds even when gh pr view answers with nothing.
+run_rest "pinned to graphql, an empty head answer does not fall back" 3 "unreadable head sha" GH_STUB_VIEW_OK=empty WAIT_FOR_PR_CHECKS_TRANSPORT=graphql -- "$RP"
+
+# Once REST has answered, GraphQL is not retried on every poll: three polls
+# make exactly one GraphQL call (the first head reading) and no `pr checks`.
+: > "$tmp/state"; : > "$tmp/calls"
+printf '%s\n' "$RW" "$RW" "$RP" > "$tmp/script.txt"
+GH_STUB_STATE="$tmp/state" GH_STUB_SCRIPT="$tmp/script.txt" GH_STUB_CALLS="$tmp/calls" \
+  WAIT_FOR_PR_CHECKS_GH="$tmp/gh-rest" "$WATCHER" 1 --interval 0 --settle 0 --timeout 5 >/dev/null 2>&1
+n_graphql=$(grep -cE '^pr (checks|view)$' "$tmp/calls")
+if [ "$n_graphql" = 1 ] && ! grep -q '^pr checks$' "$tmp/calls"; then
+  pass=$((pass + 1))
+else
+  fail=$((fail + 1))
+  printf 'FAIL: after the switch, GraphQL should have been tried once (the head reading), was tried %s times\n' "$n_graphql"
+fi
+
+# With the transport pinned to rest, gh pr checks is never called at all.
+: > "$tmp/state"; : > "$tmp/calls"
+printf '%s\n' "$RP" > "$tmp/script.txt"
+GH_STUB_STATE="$tmp/state" GH_STUB_SCRIPT="$tmp/script.txt" GH_STUB_CALLS="$tmp/calls" \
+  WAIT_FOR_PR_CHECKS_GH="$tmp/gh-rest" WAIT_FOR_PR_CHECKS_TRANSPORT=rest \
+  "$WATCHER" 1 --interval 0 --settle 0 --timeout 5 >/dev/null 2>&1
+if ! grep -qE '^pr (checks|view)$' "$tmp/calls"; then
+  pass=$((pass + 1))
+else
+  fail=$((fail + 1))
+  printf 'FAIL: transport=rest must not call gh pr checks\n'
+fi
+
+# The enum guard also covers the GraphQL path: a row with no bucket column is
+# a reading error, not a settled check.
+run "a GraphQL row without a bucket is not green" 3 "build"
+
 if [ "$fail" -eq 0 ]; then
   printf 'ok: %d verdict cases passed\n' "$pass"
   exit 0

@@ -71,6 +71,20 @@
 # run that exists but has no jobs yet; and (3) a `cancel` seen inside the settle
 # window is re-polled rather than called a failure, because a push cancels the
 # superseded run and the list can briefly still describe it.
+#
+# Why a REST fallback: `gh pr checks --json` is answered over GitHub's GraphQL
+# API. Some sandboxed sessions sit behind a proxy that passes GitHub's REST
+# endpoints and refuses GraphQL outright (observed 2026-11-01 in Claude Code's
+# cloud sessions: every `gh pr view --json` and `gh pr checks --json` failed,
+# while `gh api repos/...` went through). Without this the skill cannot watch
+# CI there at all and falls back to hand-rolled polling, which is the thing the
+# script exists to replace. So when `gh pr view` fails, or `gh pr checks` fails
+# for any reason other than "no checks reported", the same facts are read over
+# REST (the head read comes first, so the switch usually happens there): the head sha
+# from the pull request, then its check runs and commit statuses, mapped onto
+# the same five buckets gh uses. The switch is announced once on stderr and
+# held for the rest of the run. WAIT_FOR_PR_CHECKS_TRANSPORT=rest skips the
+# GraphQL attempt; =graphql forbids the fallback. The default is auto.
 
 set -euo pipefail
 
@@ -94,6 +108,12 @@ usage() {
 GH_BIN="${WAIT_FOR_PR_CHECKS_GH:-gh}"
 
 command -v "$GH_BIN" >/dev/null 2>&1 || { echo "gh is not installed or not on PATH" >&2; finish 3 error; }
+
+transport="${WAIT_FOR_PR_CHECKS_TRANSPORT:-auto}"
+case "$transport" in
+  auto|graphql|rest) ;;
+  *) echo "WAIT_FOR_PR_CHECKS_TRANSPORT must be auto, graphql or rest, got: $transport" >&2; finish 3 error ;;
+esac
 
 [[ $# -ge 1 ]] || usage
 pr="$1"; shift
@@ -120,6 +140,7 @@ done
 # An inherited or stray override silently redirects the merge-gate verdict to
 # another binary, so say which one is answering.
 [[ "$GH_BIN" != "gh" ]] && echo "[wait-for-pr-checks] using gh binary: $GH_BIN" >&2
+[[ "$transport" != "auto" ]] && echo "[wait-for-pr-checks] transport pinned to $transport" >&2
 
 started=$(date +%s)
 deadline=$(( started + timeout ))
@@ -128,23 +149,43 @@ errfile="$(mktemp)"
 # Emit the final name<TAB>bucket rows for the caller.
 print_rows() { printf '%s\n' "$rows"; }
 
-# read_head: print the PR's current head sha; non-zero if gh fails or the
-# answer is not a sha.
+# read_head: set $head_sha to the PR's current head sha; non-zero if gh fails
+# or the answer is not a sha. Call it directly, never in $(...): a switch to
+# REST made here must hold for the rest of the run.
 read_head() {
-  local h
-  h="$("$GH_BIN" pr view "$pr" --json headRefOid --jq '.headRefOid' 2>"$errfile")" || return 1
+  local h="" graphql_err=""
+  if [[ "$transport" != "rest" ]]; then
+    if ! h="$("$GH_BIN" pr view "$pr" --json headRefOid --jq '.headRefOid' 2>"$errfile")"; then
+      [[ "$transport" == "graphql" ]] && return 1
+      graphql_err="$(cat "$errfile")"
+      h=""
+    fi
+  fi
+  if [[ -z "$h" && "$transport" != "graphql" ]]; then
+    # `gh pr view --json` is GraphQL; the pull-request endpoint is REST.
+    if ! h="$("$GH_BIN" api "repos/{owner}/{repo}/pulls/$pr" --jq '.head.sha' 2>"$errfile")"; then
+      [[ -n "$graphql_err" ]] && echo "$graphql_err; and over REST: $(cat "$errfile")" >"$errfile"
+      return 1
+    fi
+    if [[ "$transport" != "rest" ]]; then
+      echo "[wait-for-pr-checks] gh pr view failed (${graphql_err:-it answered with no head sha}); reading the PR over the REST API from here on" >&2
+      transport=rest
+    fi
+  fi
   [[ "$h" =~ ^[0-9a-f]{40}$ ]] || { echo "unreadable head sha: '$h'" >"$errfile"; return 1; }
-  echo "$h"
+  head_sha="$h"
 }
 
 # The head this watch is about. The check rows and the head come from separate
 # calls, so a push landing between them could pair the old head's passing rows
 # with the new head's not-yet-registered runs. runs_blocking compares against
 # this and starts the wait over when the head has moved.
-if ! watch_head="$(read_head)"; then
-  echo "gh pr view failed: $(cat "$errfile")" >&2
+head_sha=""
+if ! read_head; then
+  echo "reading the PR's head failed: $(cat "$errfile")" >&2
   finish 3 error
 fi
+watch_head="$head_sha"
 
 # runs_blocking: sets $blocking to the reason green must wait, or to empty when
 # every workflow run for the head commit is completed, and sets $run_failures
@@ -159,7 +200,8 @@ runs_blocking() {
   local head listed unfinished n
   blocking=""
   run_failures=""
-  head="$(read_head)" || return 1
+  read_head || return 1
+  head="$head_sha"
   if [[ "$head" != "$watch_head" ]]; then
     watch_head="$head"
     started=$(date +%s)
@@ -183,17 +225,85 @@ runs_blocking() {
   blocking="$n workflow run(s) for the head commit not completed: $(awk -F'\t' '{ printf "%s%s (%s)", (NR > 1 ? ", " : ""), $1, $2 }' <<<"$unfinished")"
 }
 
-while :; do
-  # One structured call per poll. With --json, gh exits 0 whenever it
-  # retrieved data (regardless of pass/fail/pending); it exits non-zero
-  # mainly when the query itself can't run (no checks, auth, bad PR). jq
-  # @tsv escapes any tab/newline inside a name, so field splitting is safe.
-  if rows="$("$GH_BIN" pr checks "$pr" --json name,bucket --jq '.[] | [.name, .bucket] | @tsv' 2>"$errfile")"; then
-    rc=0
+# The rows `gh pr checks --json name,bucket` gives, read over REST: the head
+# sha from the pull request, then that commit's check runs (one per name, the
+# endpoint's default `filter=latest`) and its commit statuses. REST is never
+# less strict than gh, and differs in two ways. It can list a check run gh's
+# rollup leaves out (seen: a Copilot review run). And the bucket mapping
+# follows gh's (pkg/cmd/pr/checks/aggregate.go) with one deliberate change: a
+# run that has not completed is pending; success is pass; neutral and skipped
+# are skipping; cancelled is cancel; every other conclusion is fail, including
+# startup_failure and stale, which gh calls pending. A status context is pass,
+# pending or fail. `{owner}/{repo}` resolve the way `gh pr checks` does without
+# `--repo`: from GH_REPO, else from the repository in the current directory.
+# Any failure returns non-zero with gh's own message on stderr.
+read_rest() {
+  local sha runs statuses
+  sha="$("$GH_BIN" api "repos/{owner}/{repo}/pulls/$pr" --jq '.head.sha')" || return 1
+  [[ -n "$sha" ]] || { echo "REST: pull request $pr has no head sha" >&2; return 1; }
+  runs="$("$GH_BIN" api "repos/{owner}/{repo}/commits/$sha/check-runs?per_page=100" --paginate --jq '
+    .check_runs[] | [.name, (
+      if .status != "completed" then "pending"
+      elif .conclusion == "success" then "pass"
+      elif .conclusion == "neutral" or .conclusion == "skipped" then "skipping"
+      elif .conclusion == "cancelled" then "cancel"
+      else "fail" end)] | @tsv')" || return 1
+  # Paginated: the endpoint returns 30 contexts a page, and a pending or
+  # failing one on a later page must not be missed.
+  statuses="$("$GH_BIN" api "repos/{owner}/{repo}/commits/$sha/status?per_page=100" --paginate --jq '
+    .statuses[] | [.context, (
+      if .state == "success" then "pass"
+      elif .state == "pending" then "pending"
+      else "fail" end)] | @tsv')" || return 1
+  printf '%s\n%s\n' "$runs" "$statuses" | sed '/^$/d'
+}
+
+# One reading. Sets rows, rc and err exactly as the inline `gh pr checks` call
+# did, so the settle logic below is untouched: rows empty with rc 0, or with
+# "no checks reported" in err, means "no checks (yet)"; rows empty with any
+# other failure means gh could not answer. GraphQL is tried first unless the
+# transport is pinned to rest; a failure that is not "no checks reported" is
+# retried over REST once, and a REST answer pins the transport for the run.
+read_checks() {
+  rows=""; rc=0; err=""
+  local graphql_err=""
+  if [[ "$transport" != "rest" ]]; then
+    if rows="$("$GH_BIN" pr checks "$pr" --json name,bucket --jq '.[] | [.name, .bucket] | @tsv' 2>"$errfile")"; then
+      return 0
+    else
+      rc=$?
+    fi
+    err="$(cat "$errfile")"
+    if grep -qi 'no checks reported' <<<"$err" || [[ "$transport" == "graphql" ]]; then
+      return 0
+    fi
+    graphql_err="$err"
+  fi
+  local rest_rows
+  if rest_rows="$(read_rest 2>"$errfile")"; then
+    if [[ "$transport" != "rest" ]]; then
+      echo "[wait-for-pr-checks] gh pr checks failed (${graphql_err:-unknown error}); reading check runs over the REST API from here on" >&2
+      transport=rest
+    fi
+    rows="$rest_rows"; rc=0; err=""
+    return 0
   else
     rc=$?
   fi
   err="$(cat "$errfile")"
+  if [[ -n "$graphql_err" ]]; then
+    err="$graphql_err; and over REST: ${err:-unknown error}"
+  fi
+  rows=""
+  return 0
+}
+
+while :; do
+  # One structured reading per poll (see read_checks). With --json, gh exits 0
+  # whenever it retrieved data (regardless of pass/fail/pending); it exits
+  # non-zero mainly when the query itself can't run (no checks, auth, bad PR).
+  # jq @tsv escapes any tab/newline inside a name, so field splitting is safe.
+  read_checks
 
   # No rows came back. The PR genuinely has no checks, the head was pushed so
   # recently that none are registered yet, or gh actually failed. The first two
@@ -247,7 +357,7 @@ while :; do
       sleep "$interval"
       continue
     fi
-    echo "gh pr checks failed (rc=$rc): ${err:-unknown error}" >&2
+    echo "reading the PR's checks failed (rc=$rc): ${err:-unknown error}" >&2
     finish 3 error
   fi
   # Checks appeared, so any earlier empty readings were the registration lag and
@@ -261,6 +371,16 @@ while :; do
   # Rows present, so decide from the bucket column regardless of gh's exit code.
   now=$(date +%s)
   watched=$(( now - started ))
+  # First, every row must be a name and one of gh's five buckets. Anything else
+  # (a jq filter that did not apply, a changed output shape, an error body on
+  # stdout) would fall through both tests below and read as green, which is the
+  # one verdict this script must never reach by accident.
+  odd="$(awk -F'\t' 'NF != 2 || ($2 != "pass" && $2 != "fail" && $2 != "pending" && $2 != "skipping" && $2 != "cancel")' <<<"$rows" || true)"
+  if [[ -n "$odd" ]]; then
+    echo "reading the PR's checks returned rows this script does not understand (not a verdict):" >&2
+    echo "$odd" >&2
+    finish 3 error
+  fi
   failed="$(awk -F'\t' '$2 == "fail" || $2 == "cancel"' <<<"$rows" || true)"
   if [[ -n "$failed" ]]; then
     hard_failed="$(awk -F'\t' '$2 == "fail"' <<<"$rows" || true)"

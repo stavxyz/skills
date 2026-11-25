@@ -668,14 +668,18 @@ check "a fetch that fails after ls-remote answered is UNVERIFIED" \
   2 "could not fetch origin" "$CHECK" "$W/docs/plan.md"
 
 # Pushed from here, then amended here: the remote holds this checkout's own
-# earlier push. That is not staleness, and the document rule still applies.
+# earlier push. Git keeps no proof of that (see the comment in the script), so
+# it is STALE until the rewrite is pushed, and the message says so.
 fresh
 git -C "$W" checkout -q -b feature
 echo "f" > "$W/src/f.py"; git -C "$W" add -A; git -C "$W" commit -q -m f
 git -C "$W" push -q -u origin feature
 git -C "$W" commit -q --amend -m "f, reworded"
-check "a branch amended after its own push is current, with a note" \
-  0 "holds an earlier push of this branch" "$CHECK" "$W/docs/plan.md"
+check "a branch amended after its own push is STALE, and the message says to push first" \
+  1 "if this checkout amended or rebased the branch after pushing it, push that first" "$CHECK" "$W/docs/plan.md"
+git -C "$W" push -q -f origin feature
+check "and current once the rewrite has been pushed" 0 "is not behind origin/feature" "$CHECK" "$W/docs/plan.md"
+git -C "$W" commit -q --amend -m "f, reworded again"
 git -C "$O" fetch -q origin; git -C "$O" checkout -q -b feature origin/feature
 other_pushes feature src/code.py "code from a teammate"
 check "but another session's push on top of it is STALE" \
@@ -717,15 +721,14 @@ echo "mine" > "$W/src/mine.py"; git -C "$W" add -A; git -C "$W" commit -q -m min
 check "a rewrite that dropped a teammate's change to the document is STALE" \
   1 "the document changed in those commits" "$CHECK" "$W/docs/plan.md"
 
-# Amending a commit that itself edited the document, after pushing it: the
-# document here and there is the same file content, so it is still current.
+# Amending a commit that itself edited the document, after pushing it.
 fresh
 git -C "$W" checkout -q -b feature
 echo "plan, my edit" > "$W/docs/plan.md"; git -C "$W" add -A; git -C "$W" commit -q -m "edit plan"
 git -C "$W" push -q -u origin feature
 git -C "$W" commit -q --amend -m "edit plan, reworded"
-check "amending a pushed commit that edited the document is still current" \
-  0 "holds an earlier push of this branch" "$CHECK" "$W/docs/plan.md"
+check "amending a pushed commit that edited the document is STALE until it is pushed" \
+  1 "push that first" "$CHECK" "$W/docs/plan.md"
 
 # A teammate's CODE-only commit, pulled and then dropped by a local rewrite.
 # The document is untouched, and the checkout has diverged, but the commit it
@@ -777,15 +780,14 @@ echo "again" > "$W/src/again.py"; git -C "$W" add -A; git -C "$W" commit -q -m a
 check "dropping a teammate's commit from under one's own push is STALE" \
   1 "behind origin/feature" "$CHECK" "$W/docs/plan.md"
 
-# Pushed a code commit, then amended it to also edit the document: still this
-# checkout's own push, whatever the document now says.
+# Pushed a code commit, then amended it to also edit the document.
 fresh
 git -C "$W" checkout -q -b feature
 echo "f" > "$W/src/f.py"; git -C "$W" add -A; git -C "$W" commit -q -m f
 git -C "$W" push -q -u origin feature
 echo "plan, edited after the push" > "$W/docs/plan.md"; git -C "$W" add -A; git -C "$W" commit -q --amend --no-edit
-check "amending a pushed commit to also edit the document is still current" \
-  0 "all pushed from it" "$CHECK" "$W/docs/plan.md"
+check "amending a pushed commit to also edit the document is STALE until it is pushed" \
+  1 "push that first" "$CHECK" "$W/docs/plan.md"
 
 # Pushed from here, then reset back: behind this checkout's own push. The
 # document it would edit is older than the one it pushed, so that is stale.
@@ -809,9 +811,37 @@ git -C "$W" fetch -q origin
 git -C "$W" checkout -q -b theirs origin/theirs
 git -C "$W" rebase -q origin/main
 check "a teammate's branch rebased here but not yet pushed is STALE" \
-  1 "push first if you rewrote commits that came from there" "$CHECK" "$W/docs/plan.md"
+  1 "push that first" "$CHECK" "$W/docs/plan.md"
 git -C "$W" push -q -f origin theirs
 check "and current once it has been pushed" 0 "CURRENT" "$CHECK" "$W/docs/plan.md"
+
+# A fresh clone leaves no entry in the tracking ref's reflog, so "nothing here
+# arrived by a pull" proves nothing: a teammate's commit that came with the
+# clone, pushed along under one's own commit and then dropped.
+fresh
+git -C "$O" checkout -q -b feature main; echo "t" > "$O/src/t.py"; git -C "$O" add -A; git -C "$O" commit -q -m "teammate"
+git -C "$O" push -q origin feature
+rm -rf "$TMP/single"; git clone -q -b feature "$TMP/origin.git" "$TMP/single"
+echo "m" > "$TMP/single/src/m.py"; git -C "$TMP/single" add -A; git -C "$TMP/single" commit -q -m mine
+git -C "$TMP/single" push -q origin feature
+git -C "$TMP/single" reset -q --hard HEAD~2
+echo "again" > "$TMP/single/src/again.py"; git -C "$TMP/single" add -A; git -C "$TMP/single" commit -q -m again
+check "a cloned teammate commit, pushed along and then dropped, is STALE" \
+  1 "behind origin/feature" "$CHECK" "$TMP/single/docs/plan.md"
+
+# Another worktree of the same clone pushed a change to the document; this
+# worktree then amended its own commit.
+fresh
+git -C "$W" checkout -q -b feature
+echo "f" > "$W/src/f.py"; git -C "$W" add -A; git -C "$W" commit -q -m f
+git -C "$W" push -q -u origin feature
+rm -rf "$TMP/wt2"; git -C "$W" worktree add -q --detach "$TMP/wt2" feature
+echo "plan from the other worktree" > "$TMP/wt2/docs/plan.md"
+git -C "$TMP/wt2" add -A; git -C "$TMP/wt2" commit -q -m "other worktree"; git -C "$TMP/wt2" push -q origin HEAD:feature
+git -C "$W" commit -q --amend -m "f, reworded"
+check "another worktree's push to this branch is not this checkout's own rewrite" \
+  1 "the document changed in those commits" "$CHECK" "$W/docs/plan.md"
+git -C "$W" worktree remove --force "$TMP/wt2" 2>/dev/null
 
 # The upstream's remote is not a configured remote.
 fresh

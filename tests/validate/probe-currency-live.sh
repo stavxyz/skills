@@ -18,8 +18,8 @@
 # It clones into a temp directory, which it deletes, and writes nowhere else.
 # It needs network access to the remote, and may raise an ssh approval prompt.
 #
-# Exit: 0 all three states gave the expected verdict, 1 otherwise, 3 usage or
-# clone failure.
+# Exit: 0 all three states gave the expected verdict, 1 otherwise, 3 usage, a
+# clone failure, or a remote whose default branch has a single commit.
 
 set -uo pipefail
 
@@ -48,6 +48,7 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 git clone -q "$remote" "$tmp/c" || { echo "could not clone $remote" >&2; exit 3; }
 cd "$tmp/c" || exit 3
+case "$doc" in /*|*..*) echo "--doc is a path inside the clone, not $doc" >&2; exit 3 ;; esac
 [[ -f "$doc" ]] || { echo "no such file in the clone: $doc" >&2; exit 3; }
 default="$(git symbolic-ref --short HEAD)"
 
@@ -66,7 +67,7 @@ expect() {
 
 expect "a fresh clone of $default is current" 0 "CURRENT"
 
-git reset -q --hard HEAD~1 || { echo "the remote's $default has a single commit; the probe needs two" >&2; exit 3; }
+git reset -q --hard HEAD~1 2>/dev/null || { echo "the remote's $default has a single commit; the probe needs two" >&2; exit 3; }
 expect "$default reset one commit back is stale" 1 "behind origin/$default"
 
 git checkout -q -b probe-feature

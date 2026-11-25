@@ -386,7 +386,6 @@ doc_changed() {
 
 # Every target is compared before the verdict.
 behind_default=0
-rewritten=""
 upstream_disp=""
 default_disps=""
 i=0
@@ -402,62 +401,24 @@ while [[ $i -lt ${#t_ref[@]} ]]; do
   fi
   [[ "$isdef" == "1" && "$n" -gt "$behind_default" ]] && behind_default="$n"
   [[ "$n" -gt 0 ]] || continue
-  if [[ "$kind" != "default" && -n "$branch_short" ]]; then
-    # A branch pushed from here and then amended or rebased here is "behind"
-    # its own earlier push. That is not staleness. It is excused only on
-    # evidence that every commit missing here was PUSHED from this checkout:
-    #  - the checkout has diverged from the remote's tip. One that is merely
-    #    behind it is stale, whoever pushed it;
-    #  - the remote-tracking ref's reflog, which records how each value
-    #    arrived ("update by push" for a push; clone, fetch, and pull say so
-    #    too), shows the remote's tip arriving by a push from here;
-    #  - none of the missing commits is reachable from a value that arrived
-    #    any other way. A teammate's commit that was pulled, and then dropped
-    #    by a local reset, rebase, or amend, fails this.
-    # The local branch's own reflog is not evidence: a commit that was pulled
-    # sits in it exactly like one that was made here. With no tracking ref or
-    # no reflog for it, nothing is excused.
-    tip="$(g rev-parse --verify --quiet "$ref^{commit}")" || tip=""
-    track="refs/remotes/$rname/${disp#"$rname"/}"
-    diverged=""
-    if [[ -n "$tip" ]]; then
-      # Exit 1 is "not an ancestor". Anything else is an error, not a divergence.
-      g merge-base --is-ancestor HEAD "$tip" 2>/dev/null; [[ $? -eq 1 ]] && diverged=1
-    fi
-    if [[ -n "$diverged" ]]; then
-      pushed_tip=""
-      others=()
-      while IFS=$'\t' read -r sha subject; do
-        [[ -n "$sha" ]] || continue
-        if [[ "$subject" == "update by push"* ]]; then
-          [[ "$sha" == "$tip" ]] && pushed_tip=1
-        else
-          others+=("$sha")
-        fi
-      done < <(g reflog show --format='%H%x09%gs' "$track" 2>/dev/null)
-      if [[ -n "$pushed_tip" ]]; then
-        if [[ ${#others[@]} -gt 0 ]]; then
-          mine="$(g rev-list --count "HEAD..$tip" --not "${others[@]}" 2>/dev/null)"
-        else
-          mine="$n"
-        fi
-        if [[ "$mine" == "$n" ]]; then
-          notes+=("$disp holds an earlier push of this branch, since rewritten here ($n commit(s) not in this checkout, all pushed from it)")
-          rewritten="$disp"
-          continue
-        fi
-      fi
-    fi
-  fi
+  # No exception is made for a branch that was pushed from here and then
+  # amended or rebased here, although that checkout is "behind" only its own
+  # earlier push. Telling that case apart needs proof that every commit missing
+  # here was pushed from this checkout, and git does not keep it: the branch's
+  # reflog holds pulled and cloned commits exactly like local ones, a clone
+  # leaves no entry in the tracking ref's reflog, and another worktree's push
+  # is logged like this one's. Each rule tried on that evidence called some
+  # checkout current that had dropped another session's commit. So the answer
+  # is STALE, and the remedy is in the message: push the rewrite first.
   case "$kind" in
     upstream|same)
       if [[ "$kind" == "upstream" ]]; then
-        reasons+=("behind: this branch is $n commit(s) behind $disp (pull it, or push first if you rewrote commits that came from there)")
+        reasons+=("behind: this branch is $n commit(s) behind $disp (pull it; or, if this checkout amended or rebased the branch after pushing it, push that first)")
       else
         if [[ "$isdef" == "1" ]]; then
           reasons+=("behind: branch $branch_short is $n commit(s) behind $disp, that remote's default branch (if it should not count, run: git config --add validate.ignoreRemote $rname)")
         else
-          reasons+=("behind: branch $branch_short is $n commit(s) behind $disp, its own copy on that remote (pull it, or push first if you rewrote commits that came from there)")
+          reasons+=("behind: branch $branch_short is $n commit(s) behind $disp, its own copy on that remote (pull it; or, if this checkout amended or rebased the branch after pushing it, push that first)")
         fi
       fi
       doc_changed "$ref"; rc=$?
@@ -489,9 +450,7 @@ if [[ ${#unknowns[@]} -gt 0 ]]; then
   exit 2
 fi
 
-if [[ -n "$rewritten" ]]; then
-  echo "CURRENT: HEAD ${head_sha:0:12} differs from $rewritten only by a rewrite made here"
-elif [[ -n "$upstream_disp" ]]; then
+if [[ -n "$upstream_disp" ]]; then
   echo "CURRENT: HEAD ${head_sha:0:12} is not behind $upstream_disp"
 else
   echo "CURRENT: HEAD ${head_sha:0:12}; the document is unchanged on $default_disps"

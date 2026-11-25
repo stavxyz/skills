@@ -676,9 +676,18 @@ echo "f" > "$W/src/f.py"; git -C "$W" add -A; git -C "$W" commit -q -m f
 git -C "$W" push -q -u origin feature
 git -C "$W" commit -q --amend -m "f, reworded"
 check "a branch amended after its own push is STALE, and the message says to push first" \
-  1 "if this checkout amended or rebased the branch after pushing it, push that first with \`git push --force-with-lease\`" "$CHECK" "$W/docs/plan.md"
-git -C "$W" push -q -f origin feature
-check "and current once the rewrite has been pushed" 0 "is not behind origin/feature" "$CHECK" "$W/docs/plan.md"
+  1 "if this checkout amended or rebased the branch after pushing it, push that first with \`git push --force-with-lease=" "$CHECK" "$W/docs/plan.md"
+# The command the message prints is the remedy: run as printed, it pushes the
+# rewrite and the check then passes. Also for a branch pushed without -u, where
+# a bare `git push --force-with-lease` has no upstream to push to.
+run_printed_push() {
+  local cmd
+  cmd="$("$CHECK" "$W/docs/plan.md" 2>&1 | sed -n 's/.*push that first with `\(git push [^`]*\)`.*/\1/p' | head -n 1)"
+  [ -n "$cmd" ] || { echo "no push command printed"; return 1; }
+  (cd "$W" && eval "$cmd") >/dev/null 2>&1 || { echo "the printed command failed: $cmd"; return 1; }
+}
+if msg="$(run_printed_push)"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL: the printed push command works with an upstream: $msg"; fi
+check "after the printed push the branch is CURRENT" 0 "is not behind origin/feature" "$CHECK" "$W/docs/plan.md"
 git -C "$W" commit -q --amend -m "f, reworded again"
 git -C "$O" fetch -q origin; git -C "$O" checkout -q -b feature origin/feature
 other_pushes feature src/code.py "code from a teammate"
@@ -720,6 +729,15 @@ git -C "$W" reset -q --hard HEAD~1
 echo "mine" > "$W/src/mine.py"; git -C "$W" add -A; git -C "$W" commit -q -m mine
 check "a rewrite that dropped a teammate's change to the document is STALE" \
   1 "the document changed in those commits" "$CHECK" "$W/docs/plan.md"
+
+# The same remedy for a branch pushed without -u.
+fresh
+git -C "$W" checkout -q -b feature
+echo f > "$W/src/f.py"; git -C "$W" add -A; git -C "$W" commit -q -m f
+git -C "$W" push -q origin feature
+git -C "$W" commit -q --amend -m "f, reworded"
+if msg="$(run_printed_push)"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL: the printed push command works without an upstream: $msg"; fi
+check "after the printed push a branch with no upstream is CURRENT" 0 "CURRENT" "$CHECK" "$W/docs/plan.md"
 
 # Amending a commit that itself edited the document, after pushing it.
 fresh
@@ -952,6 +970,9 @@ SSH
   chmod +x "$TMP/hang-later-ssh"
   git -C "$W" remote set-url origin "example.invalid:$TMP/origin.git"
   git -C "$W" config core.sshCommand "$TMP/hang-later-ssh"
+  # Without this git first runs the command with -G to learn what kind of ssh
+  # it is, and that call would use up the turn that answers.
+  git -C "$W" config ssh.variant ssh
   other_pushes main docs/plan.md "plan v2"
   rm -f "$TMP/hang.mark"
   check "a fetch that hangs over an scp-style address names the usual cause too" \
@@ -981,6 +1002,7 @@ open(sys.argv[1],"w").write(str(s.getsockname()[1]))
 time.sleep(60)' "$TMP/port" &
     listener=$!
     for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$TMP/port" ] && break; sleep 0.2; done
+    [ -s "$TMP/port" ] || { fail=$((fail + 1)); echo "FAIL: the test listener did not start"; echo 1 > "$TMP/port"; }
     git -C "$W" remote set-url origin "http://user:pw@127.0.0.1:$(cat "$TMP/port")/x.git"
     got_out="$(CHECK_CURRENCY_NET_TIMEOUT=2 "$CHECK" "$W/docs/plan.md" 2>&1)"; got_rc=$?
     kill "$listener" 2>/dev/null; wait "$listener" 2>/dev/null

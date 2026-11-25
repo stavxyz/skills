@@ -244,7 +244,7 @@ net_failure() {
   # an @ and a colon (https://user:pw@host:8443/x).
   case "$url" in
     ssh://*|git+ssh://*|ssh+git://*) ssh=1 ;;
-    *://*|/*|./*|../*) ;;
+    *://*|/*|./*|../*|*::*) ;;   # *::* is a remote helper (ext::, a custom one)
     *:*) [[ "${url%%:*}" != */* ]] && ssh=1 ;;
   esac
   if [[ -n "$ssh" ]]; then
@@ -448,13 +448,18 @@ while [[ $i -lt ${#t_ref[@]} ]]; do
   # is STALE, and the remedy is in the message: push the rewrite first.
   case "$kind" in
     upstream|same)
+      # The whole command, since a bare `git push --force-with-lease` fails
+      # when the branch has no upstream or one of another name, and protects
+      # nothing after a fetch. The lease names what this check saw there.
+      rb="${disp#"$rname/"}"
+      push_cmd="git push --force-with-lease=$rb:$(g rev-parse --short=12 "$ref" 2>/dev/null) $rname HEAD:$rb"
       if [[ "$kind" == "upstream" ]]; then
-        reasons+=("behind: this branch is $n commit(s) behind $disp (pull it; or, if this checkout amended or rebased the branch after pushing it, push that first with \`git push --force-with-lease\`)")
+        reasons+=("behind: this branch is $n commit(s) behind $disp (pull it; or, if this checkout amended or rebased the branch after pushing it, push that first with \`$push_cmd\`)")
       else
         if [[ "$isdef" == "1" ]]; then
           reasons+=("behind: branch $branch_short is $n commit(s) behind $disp, that remote's default branch (if it should not count, run: git config --add validate.ignoreRemote $rname)")
         else
-          reasons+=("behind: branch $branch_short is $n commit(s) behind $disp, its own copy on that remote (pull it; or, if this checkout amended or rebased the branch after pushing it, push that first with \`git push --force-with-lease\`)")
+          reasons+=("behind: branch $branch_short is $n commit(s) behind $disp, its own copy on that remote (pull it; or, if this checkout amended or rebased the branch after pushing it, push that first with \`$push_cmd\`)")
         fi
       fi
       doc_changed "$ref"; rc=$?

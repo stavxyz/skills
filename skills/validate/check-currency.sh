@@ -11,7 +11,11 @@
 #      number of commits the checkout is behind the remote default branch
 #   1  STALE: one line per reason on stdout. Any of:
 #        - the branch is behind the branch it tracks, or behind a branch of
-#          the same name on any remote (another session pushed to it)
+#          the same name on any remote (another session pushed to it). One
+#          carve-out: a branch of another name that tracks a remote's default
+#          branch (git checkout -b x origin/main) is not held to it commit for
+#          commit, since code-only drift there is ordinary; the next rule
+#          decides, and behind_default reports the distance
 #        - the document changed on a remote's default branch after this branch
 #          left it
 #        - with --since, HEAD is no longer that commit
@@ -43,7 +47,7 @@ set -uo pipefail
 
 # Every git call below names its repository with -C. An inherited GIT_DIR (a
 # hook, `git rebase --exec`) would override that and point them all elsewhere.
-unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_NAMESPACE
 
 usage() {
   echo "usage: check-currency.sh <path-to-doc.md> [--since SHA]" >&2
@@ -220,15 +224,21 @@ command -v perl >/dev/null 2>&1 || notes+=("perl is not installed, so network ca
 fetch_quiet=(fetch --quiet --no-tags)
 fetch_help="$(g fetch -h 2>&1 || true)"
 grep -q -- "write-fetch-head" <<<"$fetch_help" && fetch_quiet+=(--no-write-fetch-head)
-# no_answer <remote>: what to say when a call produced no output before it
-# failed or was stopped at the limit. Over ssh the usual cause is not the
-# network: the ssh agent is waiting for an approval (a Touch ID prompt, a
-# locked key) that nobody is there to give, and the call simply hangs. Saying
-# so saves the operator from finding it out with three more commands.
-no_answer() {
-  local url
-  url="$(g remote get-url "$1" 2>/dev/null)" || url=""
-  local ssh=""
+# net_failure <remote> <exit> <output>: one line saying why a network call
+# failed. The exit status decides, not whether there was output: a call
+# stopped at the limit (124) may have printed a warning first, and that
+# warning alone would hide that the call hung. Over ssh a hang is usually not
+# the network: the ssh agent is waiting for an approval (a Touch ID prompt, a
+# locked key) that nobody is there to give. Saying so saves the operator from
+# finding it out with three more commands.
+net_failure() {
+  local r="$1" rc="$2" text="$3" url ssh="" line
+  line="$(first_line "$text")"
+  if [[ "$rc" != 124 ]]; then
+    echo "${line:-failed with no output (exit $rc)}"
+    return
+  fi
+  url="$(g remote get-url "$r" 2>/dev/null)" || url=""
   # ssh is a scheme, or the scp form host:path (a colon before any slash). A
   # URL with another scheme, or a local path, is not ssh even when it holds
   # an @ and a colon (https://user:pw@host:8443/x).
@@ -238,10 +248,11 @@ no_answer() {
     *:*) [[ "${url%%:*}" != */* ]] && ssh=1 ;;
   esac
   if [[ -n "$ssh" ]]; then
-    echo "no answer within ${net_timeout}s (an ssh remote that hangs is usually an ssh agent waiting on an approval nobody answered, not the network; the first line \`git ls-remote $1\` prints in a terminal names it)"
+    line="no answer within ${net_timeout}s (an ssh remote that hangs is usually an ssh agent waiting on an approval nobody answered, not the network; the first line \`git ls-remote $r\` prints in a terminal names it)${line:+; it had printed: $line}"
   else
-    echo "no answer within ${net_timeout}s"
+    line="no answer within ${net_timeout}s${line:+; it had printed: $line}"
   fi
+  echo "$line"
 }
 first_line() { head -n 1 <<<"$1"; }
 
@@ -290,8 +301,9 @@ t_isdef=()  # 1 when it is its remote's default branch
 t_remote=() # the remote's name (it may contain a slash, so it is not parsed back out)
 if [[ ${#remotes[@]} -gt 0 ]]; then
   for r in "${remotes[@]}"; do
-    if ! listing="$(net ls-remote --symref "$r" HEAD 'refs/heads/*' 2>&1)"; then
-      unknowns+=("could not fetch $r: $(first_line "${listing:-$(no_answer "$r")}")")
+    listing="$(net ls-remote --symref "$r" HEAD 'refs/heads/*' 2>&1)"; net_rc=$?
+    if [[ "$net_rc" -ne 0 ]]; then
+      unknowns+=("could not fetch $r: $(net_failure "$r" "$net_rc" "$listing")")
       continue
     fi
     dname="$(awk -F'\t' '$2 == "HEAD" && $1 ~ /^ref: refs\/heads\// { sub("^ref: refs/heads/", "", $1); print $1; exit }' <<<"$listing")"
@@ -330,8 +342,9 @@ if [[ ${#remotes[@]} -gt 0 ]]; then
     [[ ${#want[@]} -gt 0 ]] || continue
     refspecs=()
     for n in "${want[@]}"; do refspecs+=("+refs/heads/$n:$ref_ns/$r/$n"); done
-    if ! err="$(net "${fetch_quiet[@]}" "$r" "${refspecs[@]}" 2>&1)"; then
-      unknowns+=("could not fetch $r: $(first_line "${err:-$(no_answer "$r")}")")
+    err="$(net "${fetch_quiet[@]}" "$r" "${refspecs[@]}" 2>&1)"; net_rc=$?
+    if [[ "$net_rc" -ne 0 ]]; then
+      unknowns+=("could not fetch $r: $(net_failure "$r" "$net_rc" "$err")")
       continue
     fi
     for n in "${want[@]}"; do

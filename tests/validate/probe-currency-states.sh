@@ -14,7 +14,8 @@
 # Usage: tests/validate/probe-currency-states.sh [path/to/check-currency.sh]
 #        (default: this repository's copy). Local scratch repositories only.
 # Output: "<n> rc=<exit> <first line> | <label>", and FAIL lines for mismatches.
-# Exit:  0 every state gave the verdict its label names, 1 otherwise.
+# Exit:  0 every state gave the verdict its label names, 1 otherwise, 3 no
+#        such script. The check runs under the bash that runs this file.
 #
 # A label ends in the expected verdict in brackets: [want CURRENT],
 # [want STALE], [want UNVERIFIED], or [STALE by design: ...] for a checkout
@@ -25,9 +26,11 @@
 set -uo pipefail
 default_check="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/skills/validate/check-currency.sh"
 set -- "${1:-$default_check}"
+case "$1" in -h|--help) sed -n '/^# Usage:/,/^# Exit:/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
+[[ -f "$1" ]] || { echo "no such script: $1" >&2; exit 3; }
 CHECK=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_AUTHOR_NAME=a GIT_AUTHOR_EMAIL=a@x GIT_COMMITTER_NAME=a GIT_COMMITTER_EMAIL=a@x
-unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_NAMESPACE
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 W=$TMP/w; O=$TMP/o
 fresh() {
@@ -43,7 +46,7 @@ feat() { git -C "$W" checkout -q -b feature; c "$W" f.py f; git -C "$W" push -q 
 n=0
 bad=0
 r() {
-  n=$((n+1)); out=$(bash "$CHECK" "${2:-$W}/docs/plan.md" 2>&1); rc=$?
+  n=$((n+1)); out=$("${BASH:-bash}" "$CHECK" "${2:-$W}/docs/plan.md" 2>&1); rc=$?
   printf '%2d rc=%s %s | %s\n' "$n" "$rc" "$(head -n1 <<<"$out" | sed -E 's/[0-9a-f]{12}/SHA/g')" "$1"
   case "$1" in
     *"[want CURRENT]")     want=0 ;;
@@ -101,5 +104,10 @@ fresh; feat; mate feature; G pull -q "$TMP/origin.git" feature; c "$W" m.py M; G
 fresh; feat; mate feature; G pull -q; c "$W" m.py M; G push -q; tail -n +3 "$W/.git/logs/refs/remotes/origin/feature" > "$TMP/log" && cp "$TMP/log" "$W/.git/logs/refs/remotes/origin/feature"; G reset -q --hard HEAD~2; c "$W" again.py again; r "x8 feature: pulled T, pushed M, older reflog entries gone, dropped both [want STALE]"
 # x9: main, cloned, pushed own commit on top of history, then reset far back and recommitted
 fresh; c "$W" m.py M; G push -q; G reset -q --hard HEAD~2; c "$W" again.py again; r "x9 main: cloned, pushed M, then dropped M and a cloned commit c2 [want STALE]"
+# x10: the carve-out. A branch of another name that tracks the default branch is
+# not held to it commit for commit; the document decides, and behind_default
+# reports the distance. Git cannot tell this reset from a teammate's push.
+fresh; G checkout -q -b feature origin/main; G reset -q --hard HEAD~1; r "x10 feature tracking origin/main, one code commit behind it, document unchanged [want CURRENT]"
+fresh; mate main ../docs/plan.md; G checkout -q -b feature origin/main; r "x11 feature tracking origin/main, behind a commit that changed the document [want STALE]"
 
 exit "$bad"

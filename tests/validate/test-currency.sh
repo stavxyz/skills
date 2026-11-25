@@ -958,6 +958,19 @@ SSH
     2 "could not fetch origin: no answer within 2s (an ssh remote that hangs" \
     env HANG_MARK="$TMP/hang.mark" CHECK_CURRENCY_NET_TIMEOUT=2 "$CHECK" "$W/docs/plan.md"
 
+  # A call that printed a warning and then hung: the limit is still what the
+  # message reports, with the warning after it. The fake is named ssh so git
+  # runs it directly.
+  fresh
+  mkdir -p "$TMP/bin"
+  printf '#!/bin/sh\necho "** WARNING: a notice printed before the hang" >&2\nsleep 60\n' > "$TMP/bin/ssh"; chmod +x "$TMP/bin/ssh"
+  git -C "$W" remote set-url origin "git@example.invalid:x.git"
+  git -C "$W" config core.sshCommand "$TMP/bin/ssh"
+  check "a call that printed something and then hung still reports the hang" \
+    2 "no answer within 2s (an ssh remote that hangs" env CHECK_CURRENCY_NET_TIMEOUT=2 "$CHECK" "$W/docs/plan.md"
+  check "and keeps what it printed" \
+    2 "it had printed: ** WARNING: a notice printed before the hang" env CHECK_CURRENCY_NET_TIMEOUT=2 "$CHECK" "$W/docs/plan.md"
+
   # A remote that is not ssh gets the plain message, even with an @ and a
   # colon in its URL: an https remote that hangs is not an agent's doing.
   if command -v python3 >/dev/null 2>&1; then
@@ -978,6 +991,14 @@ time.sleep(60)' "$TMP/port" &
     fi
   fi
 fi
+
+# An inherited GIT_DIR (a hook, `git rebase --exec`) does not point the check
+# at another repository.
+fresh
+git init -q "$TMP/elsewhere"
+other_pushes main docs/plan.md "plan v2"
+check "an inherited GIT_DIR is ignored" \
+  1 "behind" env GIT_DIR="$TMP/elsewhere/.git" "$CHECK" "$W/docs/plan.md"
 
 # The check leaves no refs behind, and a leftover from a run that died does not
 # block a later branch whose name nests under it (feat, then feat/x).

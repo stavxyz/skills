@@ -264,7 +264,11 @@ net_failure() {
 # sequence can redraw the line above it, which here holds a command; a
 # backtick becomes a quote, so no subject can look like a quoted command; and
 # a line is cut at 160 characters.
-plain() { LC_ALL=C tr -d '\000-\010\013-\037\177' | tr '`' "'" | cut -c1-160; }
+# Every stage runs in the C locale: in a UTF-8 locale tr and cut stop at the
+# first byte that is not valid UTF-8 and drop the rest of the input.
+# The sed removes the UTF-8 form of the C1 controls (U+0080 to U+009F), which
+# some terminals act on like an escape.
+plain() { LC_ALL=C tr -d '\000-\010\013-\037\177' | LC_ALL=C sed $'s/\xc2[\x80-\x9f]//g' | LC_ALL=C tr '`' "'" | LC_ALL=C cut -c1-160; }
 first_line() { head -n 1 <<<"$1" | plain; }
 
 # What to compare with. Each remote is asked what it holds now (ls-remote), and
@@ -308,7 +312,7 @@ trap cleanup_refs EXIT
 t_disp=()   # how the target is named in messages, e.g. origin/main
 t_ref=()    # the private ref holding what was fetched
 t_kind=()   # upstream | same | default
-t_isdef=()  # 1 when it is its remote's default branch
+t_isdef=()  # 1 when it is its remote's default branch, ? when that remote's default could not be found
 t_remote=() # the remote's name (it may contain a slash, so it is not parsed back out)
 if [[ ${#remotes[@]} -gt 0 ]]; then
   for r in "${remotes[@]}"; do
@@ -373,7 +377,7 @@ if [[ ${#remotes[@]} -gt 0 ]]; then
       t_ref+=("$ref_ns/$r/$n")
       t_remote+=("$r")
       t_kind+=("$kind")
-      if [[ "$n" == "$dname" ]]; then t_isdef+=(1); else t_isdef+=(0); fi
+      if [[ -z "$dname" ]]; then t_isdef+=("?"); elif [[ "$n" == "$dname" ]]; then t_isdef+=(1); else t_isdef+=(0); fi
     done
   done
 fi
@@ -473,7 +477,11 @@ while [[ $i -lt ${#t_ref[@]} ]]; do
       elif [[ "$isdef" == "1" ]]; then
         # A default branch that diverged: the missing commits are almost
         # always other people's merges, so no push is offered here either.
-        reasons+=("behind: $what, that remote's default branch, and has commits of its own (pull or rebase onto it)")
+        reasons+=("behind: $what, that remote's default branch, and has commits of its own (pull or rebase onto it). If this checkout amended or rebased commits it had already pushed there, a pull brings the old ones back and a rebase can drop the new ones; no push is printed for this branch, so that choice is yours.")
+      elif [[ "$isdef" == "?" ]]; then
+        # The remote's HEAD names no branch it holds, so this may be its
+        # default branch: treated as one.
+        reasons+=("behind: $what, and has commits of its own; $rname names no default branch, so this may be it (pull or rebase onto it). If this checkout amended or rebased commits it had already pushed there, a pull brings the old ones back and a rebase can drop the new ones; no push is printed for this branch, so that choice is yours.")
       else
         # Diverged. Two cases look alike and need opposite remedies: someone
         # else pushed (pull), or this checkout rewrote its own pushed commits
@@ -491,9 +499,9 @@ while [[ $i -lt ${#t_ref[@]} ]]; do
         else
           how="by force-pushing HEAD to that branch with a lease on $(g rev-parse "$ref" 2>/dev/null)"
         fi
-        lost="$(g log -n 5 --date=format:'%Y-%m-%d %H:%M' --format='      %h %cd %an: %s' "HEAD..$ref" 2>/dev/null | plain)"
+        lost="$(g log -n 5 --date=format-local:'%Y-%m-%d %H:%M' --format='      %h %cd %an: %s' "HEAD..$ref" 2>/dev/null | plain)"
         [[ "$n" -gt 5 ]] && lost="$lost"$'\n'"      and $((n - 5)) more"
-        reasons+=("behind: $what, and $ahead ahead of it. If anyone else, or another session of yours, pushed any of those $n, pull or rebase onto them. Only if every one of them is this checkout's own earlier push, since amended or rebased here, push that first $how; that push deletes them from $rname. They are:"$'\n'"$lost")
+        reasons+=("behind: $what, and $ahead ahead of it. If anyone else, or another session of yours, pushed any of those $n commit(s), pull or rebase onto them. Only if every one of them is this checkout's own earlier push, since amended or rebased here, push that first $how; that push deletes them from $rname. They are:"$'\n'"$lost")
       fi
       doc_changed "$ref"; rc=$?
       [[ $rc -eq 0 ]] && reasons+=("the document changed in those commits: $rel")

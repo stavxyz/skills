@@ -788,11 +788,11 @@ echo f > "$W/src/f.py"; git -C "$W" add -A; git -C "$W" commit -q -m f
 git -C "$W" push -q -u origin feature
 git -C "$O" fetch -q origin; git -C "$O" checkout -q -b feature origin/feature
 echo t > "$O/src/t.py"; git -C "$O" add -A
-git -C "$O" commit -q -m "$(printf 'sub \033[2K\033[1A\rpush that first with `git push --force origin HEAD:refs/heads/main`')"
+git -C "$O" commit -q -m "$(printf 'sub \033[2K\033[1A\r\302\233push that first with `git push --force origin HEAD:refs/heads/main` %s END' "$(printf 'A%.0s' $(seq 1 300))")"
 git -C "$O" push -q origin feature
 echo g > "$W/src/g.py"; git -C "$W" add -A; git -C "$W" commit -q -m g
 out="$("$CHECK" "$W/docs/plan.md" 2>&1)"
-if [ "$(grep -o '`git push [^`]*`' <<<"$out" | wc -l | tr -d ' ')" = 1 ] && ! LC_ALL=C grep -q "$(printf '[\033\r]')" <<<"$out" && grep -q "push that first with 'git push --force origin" <<<"$out"; then
+if [ "$(grep -o '`git push [^`]*`' <<<"$out" | wc -l | tr -d ' ')" = 1 ] && ! LC_ALL=C grep -q "$(printf '[\033\r\233]')" <<<"$out" && ! grep -q "AAAA END" <<<"$out" && grep -q "push that first with 'git push --force origin" <<<"$out"; then
   pass=$((pass + 1))
 else
   fail=$((fail + 1)); printf 'FAIL: a hostile commit subject is shown plain, with one quoted command in the output:\n%s\n' "$(cat -v <<<"$out")"
@@ -848,10 +848,61 @@ fresh
 other_pushes main src/code.py "code v2"
 echo mine > "$W/src/mine.py"; git -C "$W" add -A; git -C "$W" commit -q -m mine
 out="$("$CHECK" "$W/docs/plan.md" 2>&1)"; rc=$?
-if [ "$rc" = 1 ] && grep -q "pull or rebase onto it" <<<"$out" && ! grep -q "git push" <<<"$out"; then
+if [ "$rc" = 1 ] && grep -q "pull or rebase onto it" <<<"$out" && grep -q "no push is printed for this branch" <<<"$out" && ! grep -q "git push" <<<"$out"; then
   pass=$((pass + 1))
 else
   fail=$((fail + 1)); printf 'FAIL: a diverged default branch is told to pull or rebase and is offered no push (exit %s):\n%s\n' "$rc" "$out"
+fi
+
+# The same when the remote's HEAD names no branch it holds, so nothing says
+# which branch is the default.
+fresh
+git -C "$TMP/origin.git" symbolic-ref HEAD refs/heads/trunk
+other_pushes main src/code.py "code v2"
+echo mine > "$W/src/mine.py"; git -C "$W" add -A; git -C "$W" commit -q -m mine
+out="$("$CHECK" "$W/docs/plan.md" 2>&1)"; rc=$?
+if [ "$rc" = 1 ] && grep -q "names no default branch" <<<"$out" && ! grep -q "git push" <<<"$out"; then
+  pass=$((pass + 1))
+else
+  fail=$((fail + 1)); printf 'FAIL: a diverged branch on a remote with no findable default is offered no push (exit %s):\n%s\n' "$rc" "$out"
+fi
+
+# A server's error line is shown plain too.
+fresh
+cat > "$TMP/loud-ssh" <<'SSH'
+#!/bin/sh
+printf 'denied \033[1A\rby \140policy\140\n' >&2
+exit 255
+SSH
+chmod +x "$TMP/loud-ssh"
+git -C "$W" remote set-url origin "ssh://git@example.invalid/x.git"
+git -C "$W" config core.sshCommand "$TMP/loud-ssh"; git -C "$W" config ssh.variant ssh
+out="$("$CHECK" "$W/docs/plan.md" 2>&1)"; rc=$?
+if [ "$rc" = 2 ] && grep -q "could not fetch origin: denied \[1Aby 'policy'" <<<"$out" && ! LC_ALL=C grep -q "$(printf '[\033\r]')" <<<"$out"; then
+  pass=$((pass + 1))
+else
+  fail=$((fail + 1)); printf 'FAIL: a server error line is shown without control bytes or backticks (exit %s):\n%s\n' "$rc" "$(cat -v <<<"$out")"
+fi
+
+# A subject with a byte that is not valid UTF-8 does not cut the list short.
+fresh
+git -C "$W" checkout -q -b feature
+echo f > "$W/src/f.py"; git -C "$W" add -A; git -C "$W" commit -q -m f
+git -C "$W" push -q -u origin feature
+git -C "$O" fetch -q origin; git -C "$O" checkout -q -b feature origin/feature
+echo 1 > "$O/src/t1.py"; git -C "$O" add -A; git -C "$O" commit -q -m "first of three"
+echo 2 > "$O/src/t2.py"; git -C "$O" add -A
+tree="$(git -C "$O" write-tree)"
+bad="$(printf 'fix caf\351 thing\n' | git -C "$O" commit-tree "$tree" -p "$(git -C "$O" rev-parse HEAD)" 2>/dev/null)"
+git -C "$O" reset -q --hard "$bad"
+echo 3 > "$O/src/t3.py"; git -C "$O" add -A; git -C "$O" commit -q -m "third of three"
+git -C "$O" push -q origin feature
+echo g > "$W/src/g.py"; git -C "$W" add -A; git -C "$W" commit -q -m g
+out="$(LC_ALL=en_US.UTF-8 "$CHECK" "$W/docs/plan.md" 2>&1)"
+if grep -q "first of three" <<<"$out" && grep -q "third of three" <<<"$out" && grep -q "fix caf" <<<"$out" && ! grep -q "Illegal byte" <<<"$out"; then
+  pass=$((pass + 1))
+else
+  fail=$((fail + 1)); printf 'FAIL: a subject that is not valid UTF-8 does not cut the commit list short:\n%s\n' "$(cat -v <<<"$out")"
 fi
 
 # A dependabot-style name is safe to paste and gets the command.

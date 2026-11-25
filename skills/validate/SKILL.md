@@ -59,6 +59,8 @@ Verify in order, exiting on the first failure:
    - Exit `3`, or any other exit code: report the script's message and exit.
    - The Bash call timing out (a fetch waiting on a network or an approval nobody answered): treat as exit `2`.
 
+   Give each of the three calls a Bash timeout of 120 seconds. The script limits every network call to 25 seconds and compares every remote before it prints, so its own verdict normally arrives well inside that. It fetches into refs of its own under `refs/check-currency/` and deletes them before it exits; it changes nothing else in the repository.
+
    Commits BEHIND is what the script measures. Commits ahead of the remote, a clean `git status -sb`, and the mtime check below all look like currency checks and detect none of this: a file that is stale because nobody pulled has not been touched.
 
 ## Detect kind
@@ -519,7 +521,7 @@ bash "$SKILL_DIR/check-currency.sh" "$ARGUMENTS" --since "$HEAD_SHA"
 
 On exit `1`, the run is not a bless, whatever the findings were. Report `⛔ validate: the base moved before the bless could be recorded.` with the script's reasons in place of the banner this run would otherwise print (blessed or blocked), do not write the `validated:` block, skip "Persist the spec file" (do not stage or commit anything), and skip "Auto-continue on clean bless". The edits already applied stay uncommitted in the working copy for the operator to carry across a pull. Exit `2`, or the Bash call timing out, sets `CURRENCY_UNVERIFIED=1`: a timeout is "could not tell", the same at all three calls, and never "the base moved". Any other result, including exit `3`, is handled as exit `1` with the script's own message. Only `0`, `2`, and a timeout may reach the banner and the block, and only `0` may write `base_current: true`.
 
-On exit `0`, keep the number from the script's `behind_default=<n>` line as `BEHIND_DEFAULT`, and clear `CURRENCY_UNVERIFIED` if an earlier call set it: this call shows `HEAD` is still the commit the run started on and that nothing on any remote is ahead of it now, so nothing was ahead of it earlier either. The flag stays set only when this last call is itself exit `2` or a timeout. On every other path `BEHIND_DEFAULT` is unset, and nothing below prints or records a number for it.
+On exit `0`, keep the number from the script's `behind_default=<n>` line as `BEHIND_DEFAULT`, and clear `CURRENCY_UNVERIFIED` if an earlier call set it: this call shows `HEAD` is still the commit the run started on, that nothing it must be level with is ahead of it now, and that the document is unchanged on every remote's default branch, so the same held earlier. The flag stays set only when this last call is itself exit `2` or a timeout. On every other path `BEHIND_DEFAULT` is unset, and nothing below prints or records a number for it.
 
 ### Print the structured banner
 

@@ -676,7 +676,7 @@ echo "f" > "$W/src/f.py"; git -C "$W" add -A; git -C "$W" commit -q -m f
 git -C "$W" push -q -u origin feature
 git -C "$W" commit -q --amend -m "f, reworded"
 check "a branch amended after its own push is STALE, and the message says to push first" \
-  1 "if this checkout amended or rebased the branch after pushing it, push that first" "$CHECK" "$W/docs/plan.md"
+  1 "if this checkout amended or rebased the branch after pushing it, push that first with \`git push --force-with-lease\`" "$CHECK" "$W/docs/plan.md"
 git -C "$W" push -q -f origin feature
 check "and current once the rewrite has been pushed" 0 "is not behind origin/feature" "$CHECK" "$W/docs/plan.md"
 git -C "$W" commit -q --amend -m "f, reworded again"
@@ -937,6 +937,46 @@ if command -v perl >/dev/null 2>&1; then
   git -C "$W" remote set-url origin "ssh://git@example.invalid$TMP/origin.git"
   check "an ssh remote that hangs is UNVERIFIED, and the message names the usual cause" \
     2 "an ssh agent waiting on an approval" env CHECK_CURRENCY_NET_TIMEOUT=2 "$CHECK" "$W/docs/plan.md"
+
+  # The same when the listing answers and the fetch is what hangs, over an
+  # scp-style address with no user (host:path).
+  fresh
+  cat > "$TMP/hang-later-ssh" <<'SSH'
+#!/bin/sh
+# Stands in for ssh: the first call runs the remote command, later ones hang.
+if [ -e "$HANG_MARK" ]; then sleep 60; fi
+: > "$HANG_MARK"
+for last; do :; done
+exec sh -c "$last"
+SSH
+  chmod +x "$TMP/hang-later-ssh"
+  git -C "$W" remote set-url origin "example.invalid:$TMP/origin.git"
+  git -C "$W" config core.sshCommand "$TMP/hang-later-ssh"
+  other_pushes main docs/plan.md "plan v2"
+  rm -f "$TMP/hang.mark"
+  check "a fetch that hangs over an scp-style address names the usual cause too" \
+    2 "could not fetch origin: no answer within 2s (an ssh remote that hangs" \
+    env HANG_MARK="$TMP/hang.mark" CHECK_CURRENCY_NET_TIMEOUT=2 "$CHECK" "$W/docs/plan.md"
+
+  # A remote that is not ssh gets the plain message, even with an @ and a
+  # colon in its URL: an https remote that hangs is not an agent's doing.
+  if command -v python3 >/dev/null 2>&1; then
+    fresh
+    python3 -c 'import socket,sys,time
+s=socket.socket(); s.bind(("127.0.0.1",0)); s.listen(8)
+open(sys.argv[1],"w").write(str(s.getsockname()[1]))
+time.sleep(60)' "$TMP/port" &
+    listener=$!
+    for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$TMP/port" ] && break; sleep 0.2; done
+    git -C "$W" remote set-url origin "http://user:pw@127.0.0.1:$(cat "$TMP/port")/x.git"
+    got_out="$(CHECK_CURRENCY_NET_TIMEOUT=2 "$CHECK" "$W/docs/plan.md" 2>&1)"; got_rc=$?
+    kill "$listener" 2>/dev/null; wait "$listener" 2>/dev/null
+    if [ "$got_rc" = 2 ] && grep -q "no answer within 2s" <<<"$got_out" && ! grep -q "ssh agent" <<<"$got_out"; then
+      pass=$((pass + 1))
+    else
+      fail=$((fail + 1)); printf 'FAIL: an http remote that hangs is UNVERIFIED without the ssh hint (exit %s):\n%s\n' "$got_rc" "$got_out"
+    fi
+  fi
 fi
 
 # The check leaves no refs behind, and a leftover from a run that died does not

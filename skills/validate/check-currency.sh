@@ -18,7 +18,7 @@
 #      A remote that should not count is excluded with
 #        git config --add validate.ignoreRemote <name>
 #   2  UNVERIFIED: currency could not be established: no remote, a remote did
-#      not answer within CHECK_CURRENCY_NET_TIMEOUT seconds (default 60) or
+#      not answer within CHECK_CURRENCY_NET_TIMEOUT seconds (default 25) or
 #      failed, a remote's default branch could not be found, a count failed,
 #      there is no common history, or the document may have been renamed
 #      beyond recognition. Never a pass: the caller records it as a caveat.
@@ -228,11 +228,20 @@ grep -q -- "write-fetch-head" <<<"$fetch_help" && fetch_quiet+=(--no-write-fetch
 no_answer() {
   local url
   url="$(g remote get-url "$1" 2>/dev/null)" || url=""
+  local ssh=""
+  # ssh is a scheme, or the scp form host:path (a colon before any slash). A
+  # URL with another scheme, or a local path, is not ssh even when it holds
+  # an @ and a colon (https://user:pw@host:8443/x).
   case "$url" in
-    ssh://*|git@*|*@*:*)
-      echo "no answer within ${net_timeout}s (an ssh remote that hangs is usually an ssh agent waiting on an approval nobody answered, not the network; \`git ls-remote $1\` in a terminal shows it)" ;;
-    *) echo "no answer within ${net_timeout}s" ;;
+    ssh://*|git+ssh://*|ssh+git://*) ssh=1 ;;
+    *://*|/*|./*|../*) ;;
+    *:*) [[ "${url%%:*}" != */* ]] && ssh=1 ;;
   esac
+  if [[ -n "$ssh" ]]; then
+    echo "no answer within ${net_timeout}s (an ssh remote that hangs is usually an ssh agent waiting on an approval nobody answered, not the network; the first line \`git ls-remote $1\` prints in a terminal names it)"
+  else
+    echo "no answer within ${net_timeout}s"
+  fi
 }
 first_line() { head -n 1 <<<"$1"; }
 
@@ -427,12 +436,12 @@ while [[ $i -lt ${#t_ref[@]} ]]; do
   case "$kind" in
     upstream|same)
       if [[ "$kind" == "upstream" ]]; then
-        reasons+=("behind: this branch is $n commit(s) behind $disp (pull it; or, if this checkout amended or rebased the branch after pushing it, push that first)")
+        reasons+=("behind: this branch is $n commit(s) behind $disp (pull it; or, if this checkout amended or rebased the branch after pushing it, push that first with \`git push --force-with-lease\`)")
       else
         if [[ "$isdef" == "1" ]]; then
           reasons+=("behind: branch $branch_short is $n commit(s) behind $disp, that remote's default branch (if it should not count, run: git config --add validate.ignoreRemote $rname)")
         else
-          reasons+=("behind: branch $branch_short is $n commit(s) behind $disp, its own copy on that remote (pull it; or, if this checkout amended or rebased the branch after pushing it, push that first)")
+          reasons+=("behind: branch $branch_short is $n commit(s) behind $disp, its own copy on that remote (pull it; or, if this checkout amended or rebased the branch after pushing it, push that first with \`git push --force-with-lease\`)")
         fi
       fi
       doc_changed "$ref"; rc=$?

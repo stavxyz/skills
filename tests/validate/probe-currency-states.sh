@@ -27,7 +27,7 @@ default_check="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/skills/valida
 set -- "${1:-$default_check}"
 CHECK=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_AUTHOR_NAME=a GIT_AUTHOR_EMAIL=a@x GIT_COMMITTER_NAME=a GIT_COMMITTER_EMAIL=a@x
-unset GIT_DIR GIT_WORK_TREE
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 W=$TMP/w; O=$TMP/o
 fresh() {

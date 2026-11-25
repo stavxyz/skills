@@ -1367,6 +1367,55 @@ git -C "$W" config diff.ignoreSubmodules all
 check "and still STALE when the repository hides submodule changes from diff" \
   1 "vendor/a" "$CHECK" "$W/docs/plan.md"
 
+# The moved-and-rewritten guard must not swallow other answers. The branch
+# here deletes an unrelated file that the default branch then changes.
+guard_fixture() {  # guard_fixture <plan body>
+  fresh
+  echo keep > "$W/src/keep.py"; echo old > "$W/src/old.py"
+  printf '%b' "$1" > "$W/docs/plan.md"
+  git -C "$W" add -A; git -C "$W" commit -q -m "base"; git -C "$W" push -q origin main
+  git -C "$W" checkout -q -b feature
+  git -C "$W" rm -q src/old.py; echo new > "$W/src/new.py"
+  git -C "$W" add -A; git -C "$W" commit -q -m "delete old, add new"
+  other_pushes main src/old.py "old v2"
+}
+guard_fixture 'See `src/new.py:1` and `src/keep.py:1`.\n'
+other_pushes main src/keep.py "keep v2"
+check "a cited file that changed is STALE even when another cited file is new here" \
+  1 "file(s) the document cites changed on origin/main after this branch left it (2 commit(s) behind): src/keep.py" "$CHECK" "$W/docs/plan.md"
+guard_fixture 'See `src/added.py:1`.\n'
+other_pushes main src/added.py "added on main"
+check "a cited file only the default branch added is STALE, not called new here" \
+  1 "src/added.py" "$CHECK" "$W/docs/plan.md"
+guard_fixture 'See `src/keep.py:1` and a typo `src/nope.py:2`.\n'
+check "a cited path that exists nowhere does not trip the guard" \
+  0 "and so are the files it cites" "$CHECK" "$W/docs/plan.md"
+guard_fixture 'See `src/keep.py:1`, `../other/x.py:1`, and `/usr/lib/python3/os.py:1`.\n'
+check "citations that point outside the repository do not break the comparison" \
+  0 "and so are the files it cites" "$CHECK" "$W/docs/plan.md"
+fresh
+git init -q "$TMP/sub-g"; echo x > "$TMP/sub-g/x.py"; git -C "$TMP/sub-g" add -A; git -C "$TMP/sub-g" commit -q -m sub
+git -C "$W" -c protocol.file.allow=always submodule --quiet add "$TMP/sub-g" vendor/g 2>/dev/null
+echo old > "$W/src/old.py"; printf 'See `vendor/g/x.py:1`.\n' > "$W/docs/plan.md"
+git -C "$W" add -A; git -C "$W" commit -q -m "base with a submodule"; git -C "$W" push -q origin main
+git -C "$W" checkout -q -b feature; git -C "$W" rm -q src/old.py; git -C "$W" commit -q -m "delete old"
+other_pushes main src/old.py "old v2"
+check "a cited submodule that already existed is not called new here" \
+  0 "and so are the files it cites" "$CHECK" "$W/docs/plan.md"
+
+# In the arm where the document's own change cannot be told, a lister failure
+# is reported too.
+fresh
+printf 'one\ntwo\nthree\nfour\n' > "$O/docs/plan.md"; git -C "$O" add -A; git -C "$O" commit -q -m long; git -C "$O" push -q origin main
+git -C "$W" pull -q --ff-only origin main
+git -C "$W" checkout -q -b feature
+git -C "$W" rm -q docs/plan.md; mkdir -p "$W/docs"; printf 'uno\ndos\ntres\nfour\n' > "$W/docs/plan-v2.md"
+git -C "$W" add -A; git -C "$W" commit -q -m "move and rewrite"
+other_pushes main docs/plan.md "$(printf 'one\ntwo\nthree\nfour\nfive')"
+mkdir -p "$TMP/nopy2"; for t in git bash sh awk sed grep head sort tr cut cat dirname basename perl mktemp rm date wc comm env sleep tail; do p="$(command -v "$t" 2>/dev/null)" && ln -sf "$p" "$TMP/nopy2/$t"; done
+check "when neither the document nor the cited files can be told, both reasons print" \
+  2 "could not tell whether a file the document cites changed on origin/main (1 commit(s) behind): python3" env PATH="$TMP/nopy2" "$CHECK" "$W/docs/plan-v2.md"
+
 # The lister cannot run: the answer is not known, so it is not CURRENT.
 cite_fixture
 other_pushes main src/code.py "code v2"

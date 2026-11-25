@@ -92,6 +92,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import posixpath
 import os
 import re
 import subprocess
@@ -545,8 +546,11 @@ def main() -> int:
         action="store_true",
         help="print the tracked files the document cites, one repository-relative "
              "path per line, and check nothing. A citation whose path resolves "
-             "to no tracked file is listed as written when it has a directory part (a bare name is left out), an ambiguous bare filename lists "
-             "every file it could mean, and a file inside a "
+             "to no tracked file is listed as written when it has a directory part "
+             "or a leading ./ (a bare name, a partial path that would only match "
+             "by suffix, and a path outside the repository are left out), an "
+             "ambiguous bare filename lists every file it could mean, and a file "
+             "inside a "
              "submodule is listed as the submodule's mount point. check-currency.sh "
              "uses this to see whether a cited file changed on the default branch.",
     )
@@ -613,9 +617,13 @@ def main() -> int:
                 # written: it may be a file the default branch has added,
                 # which a diff of that path will show. A bare name that
                 # matches nothing says too little to compare.
-                names = [normalise(cite.path, repo)[0]]
-                under = any(names[0] == m or names[0].startswith(m + "/") for m in mounts)
-                if not under and "/" not in names[0]:
+                written, rooted = normalise(cite.path, repo)
+                written = posixpath.normpath(written)
+                if written.startswith(("/", "../")) or written in ("..", "."):
+                    continue  # outside this repository: nothing here to compare
+                names = [written]
+                under = any(written == m or written.startswith(m + "/") for m in mounts)
+                if not under and not rooted and "/" not in written:
                     continue
             for name in names:
                 inside = [m for m in mounts if name == m or name.startswith(m + "/")]

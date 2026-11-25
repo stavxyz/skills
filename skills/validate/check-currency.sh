@@ -486,7 +486,7 @@ cited_changed() {
   [[ ${#cited[@]} -gt 0 ]] || return 0
   bases="$(g merge-base --all HEAD "$ref" 2>/dev/null)" || { cited_err="no common history"; return 2; }
   [[ -n "$bases" ]] || { cited_err="no common history"; return 2; }
-  local deleted
+  local deleted unsure=""
   for mb in $bases; do
     specs=()
     deleted=()
@@ -506,21 +506,29 @@ cited_changed() {
         *)     IFS= read -r -d '' a || break ;;
       esac
     done < <(g diff -M -z --name-status "$mb" HEAD 2>/dev/null)
-    # A cited file that is new on this branch, while a file this branch
-    # deleted changed on the other side: it may be that file, moved and
-    # rewritten past what git calls a rename. Not known, so not "unchanged".
-    if [[ ${#deleted[@]} -gt 0 ]]; then
+    # A cited file that is new on this branch (in HEAD, not at the merge base),
+    # while a file this branch deleted changed on the other side: it may be
+    # that file, moved and rewritten past what git calls a rename. Not known,
+    # so not "unchanged". ls-tree, not cat-file: a submodule's entry is a path
+    # whose object is not in this repository. A cited path that is in neither
+    # (a typo, a file only the default branch has) is not new here.
+    if [[ -z "$unsure" && ${#deleted[@]} -gt 0 ]] && ! g diff --ignore-submodules=none --quiet "$mb" "$ref" -- "${deleted[@]}" 2>/dev/null; then
       for p in "${cited[@]}"; do
-        if ! g cat-file -e "$mb:$p" 2>/dev/null && ! g diff --quiet "$mb" "$ref" -- "${deleted[@]}" 2>/dev/null; then
-          cited_err="$p is new on this branch, and a file this branch deleted changed there; it may be the same file, moved and rewritten (rebasing settles it)"
-          return 2
+        if [[ -z "$(g ls-tree --name-only "$mb" -- ":(literal)$p" 2>/dev/null)" && -n "$(g ls-tree --name-only HEAD -- ":(literal)$p" 2>/dev/null)" ]]; then
+          unsure="$p is new on this branch, and a file this branch deleted changed there; it may be the same file, moved and rewritten (rebasing settles it)"
+          break
         fi
       done
     fi
     out="$(g -c core.quotePath=false diff --ignore-submodules=none --name-only "$mb" "$ref" -- "${specs[@]}" 2>/dev/null)" || { cited_err="git diff failed"; return 2; }
     [[ -n "$out" ]] && cited_hit+="${cited_hit:+$'\n'}$out"
   done
-  [[ -n "$cited_hit" ]] && cited_hit="$(sort -u <<<"$cited_hit" | plain)"
+  # A found change is the answer even when something else could not be told.
+  if [[ -n "$cited_hit" ]]; then
+    cited_hit="$(sort -u <<<"$cited_hit" | plain)"
+    return 0
+  fi
+  [[ -z "$unsure" ]] || { cited_err="$unsure"; return 2; }
   return 0
 }
 

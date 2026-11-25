@@ -648,7 +648,7 @@ git -C "$W" push -q origin feature
 git -C "$O" fetch -q origin; git -C "$O" checkout -q -b feature origin/feature
 other_pushes feature docs/plan.md "plan from a teammate"
 out=$("$CHECK" "$W/docs/plan.md" 2>&1)
-if grep -q "its own copy on that remote (pull it" <<<"$out" && ! grep -q "ignoreRemote" <<<"$out"; then
+if grep -q "its own copy on that remote, and has no commit of its own to push (pull it)" <<<"$out" && ! grep -q "ignoreRemote" <<<"$out"; then
   pass=$((pass + 1))
 else
   fail=$((fail + 1)); printf 'FAIL: a stale own-branch copy should say pull, and not offer ignoreRemote:\n%s\n' "$out"
@@ -676,7 +676,9 @@ echo "f" > "$W/src/f.py"; git -C "$W" add -A; git -C "$W" commit -q -m f
 git -C "$W" push -q -u origin feature
 git -C "$W" commit -q --amend -m "f, reworded"
 check "a branch amended after its own push is STALE, and the message says to push first" \
-  1 "if this checkout amended or rebased the branch after pushing it, push that first with \`git push --force-with-lease=" "$CHECK" "$W/docs/plan.md"
+  1 "push that first with \`git push --force-with-lease=refs/heads/feature:" "$CHECK" "$W/docs/plan.md"
+check "and it lists the commit the push would delete, with its author" \
+  1 "They are:" "$CHECK" "$W/docs/plan.md"
 # The command the message prints is the remedy: run as printed, it pushes the
 # rewrite and the check then passes. Also for a branch pushed without -u, where
 # a bare `git push --force-with-lease` has no upstream to push to.
@@ -684,7 +686,8 @@ run_printed_push() {
   local cmd
   cmd="$("$CHECK" "$W/docs/plan.md" 2>&1 | sed -n 's/.*push that first with `\(git push [^`]*\)`.*/\1/p' | head -n 1)"
   [ -n "$cmd" ] || { echo "no push command printed"; return 1; }
-  (cd "$W" && eval "$cmd") >/dev/null 2>&1 || { echo "the printed command failed: $cmd"; return 1; }
+  local pushed
+  pushed="$(cd "$W" && eval "$cmd" 2>&1)" || { echo "the printed command failed: $cmd: $pushed"; return 1; }
 }
 if msg="$(run_printed_push)"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL: the printed push command works with an upstream: $msg"; fi
 check "after the printed push the branch is CURRENT" 0 "is not behind origin/feature" "$CHECK" "$W/docs/plan.md"
@@ -738,6 +741,74 @@ git -C "$W" push -q origin feature
 git -C "$W" commit -q --amend -m "f, reworded"
 if msg="$(run_printed_push)"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL: the printed push command works without an upstream: $msg"; fi
 check "after the printed push a branch with no upstream is CURRENT" 0 "CURRENT" "$CHECK" "$W/docs/plan.md"
+
+# And for a branch whose upstream has another name: the command names the
+# remote's branch, not the local one.
+fresh
+git -C "$W" checkout -q -b feature
+echo f > "$W/src/f.py"; git -C "$W" add -A; git -C "$W" commit -q -m f
+git -C "$W" push -q -u origin feature:review/feature
+git -C "$W" commit -q --amend -m "f, reworded"
+if msg="$(run_printed_push)"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL: the printed push command works with an upstream of another name: $msg"; fi
+check "after the printed push a branch with an upstream of another name is CURRENT" 0 "is not behind origin/review/feature" "$CHECK" "$W/docs/plan.md"
+
+# A branch that is only behind (a teammate pushed, nothing local to push) is
+# never offered a push: the command would delete the teammate's commits.
+fresh
+other_pushes main src/code.py "code v2"
+out="$("$CHECK" "$W/docs/plan.md" 2>&1)"; rc=$?
+if [ "$rc" = 1 ] && grep -q "has no commit of its own to push (pull it)" <<<"$out" && ! grep -q "git push" <<<"$out"; then
+  pass=$((pass + 1))
+else
+  fail=$((fail + 1)); printf 'FAIL: a branch that is only behind is told to pull and is offered no push (exit %s):\n%s\n' "$rc" "$out"
+fi
+
+# Diverged because a teammate pushed: the reason names the teammate's commit
+# and its author, which is what tells this apart from one's own earlier push.
+fresh
+git -C "$W" checkout -q -b feature
+echo f > "$W/src/f.py"; git -C "$W" add -A; git -C "$W" commit -q -m f
+git -C "$W" push -q -u origin feature
+git -C "$O" fetch -q origin; git -C "$O" checkout -q -b feature origin/feature
+echo t > "$O/src/t.py"; git -C "$O" add -A
+GIT_AUTHOR_NAME="Tea Mate" git -C "$O" commit -q -m "teammate work"; git -C "$O" push -q origin feature
+echo g > "$W/src/g.py"; git -C "$W" add -A; git -C "$W" commit -q -m g
+check "a diverged branch lists the remote's commits with their authors" \
+  1 "Tea Mate: teammate work" "$CHECK" "$W/docs/plan.md"
+check "and says the push deletes them" \
+  1 "that push deletes them from origin" "$CHECK" "$W/docs/plan.md"
+# The lease is on what the check saw: a push that lands afterwards makes the
+# printed command fail instead of overwriting it.
+cmd="$("$CHECK" "$W/docs/plan.md" 2>&1 | sed -n 's/.*push that first with `\(git push [^`]*\)`.*/\1/p' | head -n 1)"
+echo t2 > "$O/src/t2.py"; git -C "$O" add -A; git -C "$O" commit -q -m "later"; git -C "$O" push -q origin feature
+if [ -n "$cmd" ] && ! (cd "$W" && eval "$cmd") >/dev/null 2>&1; then
+  pass=$((pass + 1))
+else
+  fail=$((fail + 1)); echo "FAIL: the printed push is refused when the remote moved after the check: $cmd"
+fi
+
+# A tag with the branch's name on the remote does not make the command
+# ambiguous, and the full sha in the lease does not need the object locally.
+fresh
+git -C "$W" checkout -q -b feature
+echo f > "$W/src/f.py"; git -C "$W" add -A; git -C "$W" commit -q -m f
+git -C "$W" push -q origin feature
+git -C "$W" tag feature; git -C "$W" push -q origin refs/tags/feature
+git -C "$W" commit -q --amend -m "f, reworded"
+if msg="$(run_printed_push)"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL: the printed push works with a tag of the same name: $msg"; fi
+
+# A branch name that is legal in git but not safe to paste gets no command.
+fresh
+git -C "$W" checkout -q -b 'x;echo_INJECTED>inj'
+echo f > "$W/src/f.py"; git -C "$W" add -A; git -C "$W" commit -q -m f
+git -C "$W" push -q origin 'x;echo_INJECTED>inj'
+git -C "$W" commit -q --amend -m "f, reworded"
+out="$("$CHECK" "$W/docs/plan.md" 2>&1)"; rc=$?
+if [ "$rc" = 1 ] && grep -q "by force-pushing HEAD to that branch with a lease on" <<<"$out" && ! grep -q '`git push' <<<"$out"; then
+  pass=$((pass + 1))
+else
+  fail=$((fail + 1)); printf 'FAIL: an unsafe branch name gets words, not a command (exit %s):\n%s\n' "$rc" "$out"
+fi
 
 # Amending a commit that itself edited the document, after pushing it.
 fresh
@@ -991,6 +1062,23 @@ SSH
     2 "no answer within 2s (an ssh remote that hangs" env CHECK_CURRENCY_NET_TIMEOUT=2 "$CHECK" "$W/docs/plan.md"
   check "and keeps what it printed" \
     2 "it had printed: ** WARNING: a notice printed before the hang" env CHECK_CURRENCY_NET_TIMEOUT=2 "$CHECK" "$W/docs/plan.md"
+
+  # An IPv6 scp address is ssh although it holds "::"; a remote helper
+  # address (ext::...) is not.
+  fresh
+  git -C "$W" remote set-url origin "[::1]:x.git"
+  git -C "$W" config core.sshCommand "$TMP/hang-ssh"
+  check "an IPv6 scp address that hangs gets the ssh hint" \
+    2 "an ssh agent waiting on an approval" env CHECK_CURRENCY_NET_TIMEOUT=2 "$CHECK" "$W/docs/plan.md"
+  fresh
+  git -C "$W" remote set-url origin "ext::sleep 60"
+  git -C "$W" config protocol.ext.allow always
+  out="$(CHECK_CURRENCY_NET_TIMEOUT=2 "$CHECK" "$W/docs/plan.md" 2>&1)"; rc=$?
+  if [ "$rc" = 2 ] && grep -q "no answer within 2s" <<<"$out" && ! grep -q "ssh agent" <<<"$out"; then
+    pass=$((pass + 1))
+  else
+    fail=$((fail + 1)); printf 'FAIL: a remote helper address that hangs is UNVERIFIED without the ssh hint (exit %s):\n%s\n' "$rc" "$out"
+  fi
 
   # A remote that is not ssh gets the plain message, even with an @ and a
   # colon in its URL: an https remote that hangs is not an agent's doing.

@@ -242,11 +242,16 @@ net_failure() {
   # ssh is a scheme, or the scp form host:path (a colon before any slash). A
   # URL with another scheme, or a local path, is not ssh even when it holds
   # an @ and a colon (https://user:pw@host:8443/x).
-  case "$url" in
-    ssh://*|git+ssh://*|ssh+git://*) ssh=1 ;;
-    *://*|/*|./*|../*|*::*) ;;   # *::* is a remote helper (ext::, a custom one)
-    *:*) [[ "${url%%:*}" != */* ]] && ssh=1 ;;
-  esac
+  # A remote helper address (ext::..., name::...) is a helper name, then two
+  # colons. An IPv6 scp address ([::1]:path) also holds "::" but starts with a
+  # bracket, so the name is required.
+  if [[ ! "$url" =~ ^[A-Za-z0-9][A-Za-z0-9+.-]*:: ]]; then
+    case "$url" in
+      ssh://*|git+ssh://*|ssh+git://*) ssh=1 ;;
+      *://*|/*|./*|../*) ;;
+      *:*) [[ "${url%%:*}" != */* ]] && ssh=1 ;;
+    esac
+  fi
   if [[ -n "$ssh" ]]; then
     line="no answer within ${net_timeout}s (an ssh remote that hangs is usually an ssh agent waiting on an approval nobody answered, not the network; the first line \`git ls-remote $r\` prints in a terminal names it)${line:+; it had printed: $line}"
   else
@@ -445,22 +450,39 @@ while [[ $i -lt ${#t_ref[@]} ]]; do
   # leaves no entry in the tracking ref's reflog, and another worktree's push
   # is logged like this one's. Each rule tried on that evidence called some
   # checkout current that had dropped another session's commit. So the answer
-  # is STALE, and the remedy is in the message: push the rewrite first.
+  # is STALE, and the message gives both remedies and what the push would delete.
   case "$kind" in
     upstream|same)
-      # The whole command, since a bare `git push --force-with-lease` fails
-      # when the branch has no upstream or one of another name, and protects
-      # nothing after a fetch. The lease names what this check saw there.
-      rb="${disp#"$rname/"}"
-      push_cmd="git push --force-with-lease=$rb:$(g rev-parse --short=12 "$ref" 2>/dev/null) $rname HEAD:$rb"
       if [[ "$kind" == "upstream" ]]; then
-        reasons+=("behind: this branch is $n commit(s) behind $disp (pull it; or, if this checkout amended or rebased the branch after pushing it, push that first with \`$push_cmd\`)")
+        what="this branch is $n commit(s) behind $disp"
       else
-        if [[ "$isdef" == "1" ]]; then
-          reasons+=("behind: branch $branch_short is $n commit(s) behind $disp, that remote's default branch (if it should not count, run: git config --add validate.ignoreRemote $rname)")
+        what="branch $branch_short is $n commit(s) behind $disp, its own copy on that remote"
+      fi
+      if [[ "$kind" == "same" && "$isdef" == "1" ]]; then
+        reasons+=("behind: branch $branch_short is $n commit(s) behind $disp, that remote's default branch (if it should not count, run: git config --add validate.ignoreRemote $rname)")
+      elif g merge-base --is-ancestor HEAD "$ref" 2>/dev/null; then
+        # Nothing here that the remote lacks, so no amend or rebase made this:
+        # the only remedy is a pull, and no push is offered.
+        reasons+=("behind: $what, and has no commit of its own to push (pull it)")
+      else
+        # Diverged. Two cases look alike and need opposite remedies: someone
+        # else pushed (pull), or this checkout rewrote its own pushed commits
+        # (force-push). The push deletes the listed commits, so the message
+        # shows them with their authors and leaves the choice to the reader.
+        ahead="$(g rev-list --count "$ref..HEAD" 2>/dev/null)" || ahead="?"
+        rb="${disp#"$rname/"}"
+        # A command is printed only for names that are safe to paste into a
+        # shell; a branch name may legally hold ; or $( ). Full ref names,
+        # since a tag of the same name makes the short one ambiguous, and the
+        # full sha, since an abbreviation needs the object to still be here.
+        if [[ "$rname$rb" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+          how="with \`git push --force-with-lease=refs/heads/$rb:$(g rev-parse "$ref" 2>/dev/null) $rname HEAD:refs/heads/$rb\`"
         else
-          reasons+=("behind: branch $branch_short is $n commit(s) behind $disp, its own copy on that remote (pull it; or, if this checkout amended or rebased the branch after pushing it, push that first with \`$push_cmd\`)")
+          how="by force-pushing HEAD to that branch with a lease on $(g rev-parse "$ref" 2>/dev/null)"
         fi
+        lost="$(g log -n 5 --format='      %h %an: %s' "HEAD..$ref" 2>/dev/null)"
+        [[ "$n" -gt 5 ]] && lost="$lost"$'\n'"      and $((n - 5)) more"
+        reasons+=("behind: $what, and $ahead ahead of it. If anyone else pushed those $n commit(s), pull or rebase onto them. Only if every one of them is this checkout's own earlier push, since amended or rebased here, push that first $how; that push deletes them from $rname. They are:"$'\n'"$lost")
       fi
       doc_changed "$ref"; rc=$?
       [[ $rc -eq 0 ]] && reasons+=("the document changed in those commits: $rel")

@@ -2,10 +2,18 @@
 # probe-merge-gate-live.sh: run merge-gate.sh, read-only, against real pull
 # requests, and check each answer against GitHub's own data.
 #
-# test-merge-gate.sh covers the gate's decisions with a stubbed gh. This is the
-# check that those decisions hold against the real API: that a promotion PR
-# behind its base by merge commits reads READY, that a behind feature PR reads
-# NOT READY (exit 1) and never UNKNOWN, and that no READY is wrong.
+# test-merge-gate.sh covers the gate's decisions with a stubbed gh. This runs
+# the gate against the real API and checks two things: that it never answers
+# UNKNOWN or fails (exit 2 or 3) for a real PR, and that every READY is
+# confirmed by a second read of GitHub's data. It prints each verdict so a
+# person can see that a promotion PR behind its base by merge commits reads
+# READY and a behind feature PR reads NOT READY; it does not know which a PR
+# should be, so it cannot fail on a wrong NOT READY.
+#
+# The second read uses the same endpoints the gate uses. It catches a race or
+# a slip in how the gate handles the answers. It cannot catch the gate's rule
+# being wrong: for that, compare `git merge-tree --write-tree <base> <head>`
+# with the head's tree in a clone, as land-pr's step 2 does.
 #
 # Usage:
 #   tests/land-pr/probe-merge-gate-live.sh [--script PATH] <owner/repo#N>...
@@ -15,17 +23,19 @@
 #             an installed plugin's copy to check what is deployed)
 #   --search  find open PRs shaped like promotions (head develop or dev, base
 #             main or master) with `gh search prs`, up to --limit (default 10)
+#             for each of three head and base pairs
 #
 # It only reads: `gh pr view`, `gh api` GETs, and `gh search prs`. It merges
 # nothing and writes nothing. Each PR is gated with its current head as --sha.
 #
-# For every READY it re-derives the claim: when the gate says the head is
-# behind by commits that change nothing, the PR's test merge must have the
-# base's tip and the head as its parents and the head's tree as its tree; when
-# the gate says behind 0, the compare API must agree.
+# For every READY it reads again: when the gate says the head is behind by
+# commits that change nothing, the PR's test merge must have the base's tip
+# and the head as its parents and the head's tree as its tree; when the gate
+# says behind 0, the compare API must agree.
 #
-# Exit: 0 every answer checked out, 1 a READY could not be confirmed or the
-# gate returned 2 or 3 for some PR, 3 usage.
+# Exit: 0 every answer checked out; 1 a READY could not be confirmed, the gate
+# returned 2 or 3 for some PR, a target could not be read, or nothing was
+# probed; 3 usage.
 
 set -uo pipefail
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR
@@ -35,12 +45,13 @@ script="$ROOT/skills/land-pr/merge-gate.sh"
 search=""
 limit=10
 targets=()
-usage() { sed -n '11,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2; exit 3; }
+usage() { sed -n '/^# Usage:/,/^#   --search/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2; exit 3; }
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --script) [[ $# -ge 2 ]] || usage; script="$2"; shift 2 ;;
     --limit)  [[ $# -ge 2 ]] || usage; limit="$2"; shift 2 ;;
     --search) search=1; shift ;;
+    -h|--help) sed -n '/^# Usage:/,/^# Exit:/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*) usage ;;
     *) targets+=("$1"); shift ;;
   esac
@@ -51,22 +62,28 @@ script="$(cd "$(dirname "$script")" && pwd)/$(basename "$script")"
 
 if [[ -n "$search" ]]; then
   for pair in develop:main dev:main develop:master; do
-    while IFS= read -r t; do [[ -n "$t" ]] && targets+=("$t"); done < <(
-      gh search prs --state open --head "${pair%%:*}" --base "${pair##*:}" --limit "$limit" \
-        --json number,repository --jq '.[] | "\(.repository.nameWithOwner)#\(.number)"' 2>/dev/null)
+    if ! found="$(gh search prs --state open --head "${pair%%:*}" --base "${pair##*:}" --limit "$limit" \
+          --json number,repository --jq '.[] | "\(.repository.nameWithOwner)#\(.number)"')"; then
+      echo "gh search failed (see above); nothing was probed" >&2
+      exit 1
+    fi
+    while IFS= read -r t; do [[ -n "$t" ]] && targets+=("$t"); done <<<"$found"
   done
+  [[ ${#targets[@]} -gt 0 ]] || { echo "the search found no open PRs; nothing was probed" >&2; exit 1; }
 fi
 [[ ${#targets[@]} -gt 0 ]] || usage
 
 bad=0
+checked=0
 seen=" "
 for t in "${targets[@]}"; do
   case "$seen" in *" $t "*) continue ;; esac   # the searches overlap
   seen="$seen$t "
   repo="${t%%#*}"; n="${t##*#}"
-  if [[ "$repo" == "$t" || ! "$n" =~ ^[0-9]+$ ]]; then echo "skip: not owner/repo#N: $t"; continue; fi
+  if [[ "$repo" == "$t" || ! "$n" =~ ^[0-9]+$ ]]; then echo "not owner/repo#N: $t" >&2; usage; fi
   head="$(GH_REPO="$repo" gh pr view "$n" --json headRefOid --jq .headRefOid 2>/dev/null)" || head=""
-  if [[ -z "$head" ]]; then echo "skip: cannot read $t"; continue; fi
+  if [[ -z "$head" ]]; then bad=1; echo "FAIL: cannot read $t"; continue; fi
+  checked=$((checked + 1))
   out="$(GH_REPO="$repo" bash "$script" "$n" --sha "$head" --retries 1 --interval 5 2>&1)"; rc=$?
   line="$(grep -m1 -E '^(READY|NOT READY|UNKNOWN|ALREADY MERGED|CLOSED)' <<<"$out" || head -n 1 <<<"$out")"
   case "$rc" in
@@ -91,4 +108,5 @@ for t in "${targets[@]}"; do
     *)     bad=1; echo "FAIL $t: exit $rc: $line" ;;
   esac
 done
+[[ "$checked" -gt 0 ]] || { echo "nothing was probed" >&2; exit 1; }
 exit "$bad"

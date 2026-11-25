@@ -33,7 +33,8 @@
 # and the head as its parents and the head's tree as its tree; when the gate
 # says behind 0, the compare API must agree.
 #
-# Exit: 0 every answer checked out; 1 a READY could not be confirmed, the gate
+# Exit: 0 every answer checked out; 1 a READY could not be confirmed on a PR
+# that stayed open on the same head, the gate
 # returned 2 or 3 for some PR, a target could not be read, or nothing was
 # probed; 3 usage.
 
@@ -80,6 +81,15 @@ bad=0
 for t in "${targets[@]}"; do
   if [[ ! "$t" =~ ^[^#/]+/[^#/]+#[0-9]+$ ]]; then echo "not owner/repo#N: $t" >&2; usage; fi
 done
+# changed <repo> <n> <head>: true when the PR is no longer open on that head.
+# Merged, closed, or pushed to between the gate's read and the second read:
+# the second read then describes a different PR state and proves nothing.
+# A re-read that fails is not a change: the caller then reports the mismatch.
+changed() {
+  local now
+  now="$(GH_REPO="$1" gh pr view "$2" --json state,headRefOid --jq '.state + " " + .headRefOid' 2>/dev/null)" || return 1
+  [[ -n "$now" && "$now" != "OPEN $3" ]]
+}
 seen=" "
 for t in "${targets[@]}"; do
   case "$seen" in *" $t "*) continue ;; esac   # the searches overlap
@@ -99,16 +109,20 @@ for t in "${targets[@]}"; do
         want="$(GH_REPO="$repo" gh api "repos/$repo/git/commits/$head" --jq .tree.sha 2>/dev/null) $tip,$head"
         if [[ -n "$tm" && "$got" == "$want" ]]; then
           echo "ok   $t: READY while behind; the test merge has the head's tree"
-        elif [[ "$(GH_REPO="$repo" gh pr view "$n" --json state,headRefOid --jq '.state + " " + .headRefOid')" != "OPEN $head" ]]; then
-          # Merged, closed, or pushed to between the gate's read and this one:
-          # the second read describes a different PR state, so it proves nothing.
+        elif changed "$repo" "$n" "$head"; then
           echo "ok   $t: READY, then the PR changed during the probe; run it again for this PR"
         else
           bad=1; echo "FAIL $t: READY while behind, but the test merge is '$got', wanted '$want'"
         fi
       else
         behind="$(GH_REPO="$repo" gh api "repos/$repo/compare/$base...$head" --jq .behind_by 2>/dev/null)"
-        if [[ "$behind" == "0" ]]; then echo "ok   $t: READY, behind 0"; else bad=1; echo "FAIL $t: READY, but the compare API says behind '$behind'"; fi
+        if [[ "$behind" == "0" ]]; then
+          echo "ok   $t: READY, behind 0"
+        elif changed "$repo" "$n" "$head"; then
+          echo "ok   $t: READY, then the PR changed during the probe; run it again for this PR"
+        else
+          bad=1; echo "FAIL $t: READY, but the compare API says behind '$behind'"
+        fi
       fi ;;
     1)     echo "ok   $t: NOT READY: $(sed -n '2p' <<<"$out" | sed 's/^ *//' | cut -c1-110)" ;;
     4|5)   echo "ok   $t: $(cut -c1-110 <<<"$line")" ;;

@@ -592,6 +592,12 @@ commit "$R" 05 d.txt "polish: follow-up
 Fixes the retry count added in $s2.
 "
 json "[{\"old\": \"retries twice\", \"new\": \"retries three times\"}, {\"old\": \"added in $s2\", \"new\": \"added earlier\"}]"
+rw --base base --replace "$tmp/replace.json" --dry-run
+if grep -qF "mention(s) of a sha" <<<"$out"; then
+  bad "the dry run does not list a citation the run would remove" "$out"
+else
+  ok
+fi
 rw --base base --replace "$tmp/replace.json"
 check "a run that also removes the citation rewrites" 0
 if grep -qF "mention(s) of a sha" <<<"$out"; then

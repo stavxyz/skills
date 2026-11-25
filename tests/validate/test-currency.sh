@@ -677,6 +677,52 @@ other_pushes feature src/code.py "code from a teammate"
 check "but another session's push on top of it is STALE" \
   1 "behind origin/feature" "$CHECK" "$W/docs/plan.md"
 
+# The remote's tip is in the local reflog for the opposite reason: this
+# checkout was AT that tip and was then reset back (or pulled and reset). It
+# is plainly behind, and the reflog must not excuse it.
+fresh
+other_pushes main src/code.py "code v2"
+git -C "$W" pull -q --ff-only origin main
+git -C "$W" reset -q --hard HEAD~1
+check "a checkout reset back from the remote's tip is STALE, whatever its reflog holds" \
+  1 "behind origin/main" "$CHECK" "$W/docs/plan.md"
+
+fresh
+git -C "$W" checkout -q -b feature
+echo "f" > "$W/src/f.py"; git -C "$W" add -A; git -C "$W" commit -q -m f
+git -C "$W" push -q -u origin feature
+git -C "$O" fetch -q origin; git -C "$O" checkout -q -b feature origin/feature
+other_pushes feature docs/plan.md "plan from a teammate"
+git -C "$W" pull -q --ff-only origin feature
+git -C "$W" reset -q --hard HEAD~1
+check "a feature branch reset back past a teammate's push is STALE" \
+  1 "the document changed in those commits" "$CHECK" "$W/docs/plan.md"
+
+# Diverged, with the remote tip in the reflog, but the rewrite dropped a
+# teammate's change to the document: pulled their commit, reset it away, and
+# committed something else.
+fresh
+git -C "$W" checkout -q -b feature
+echo "f" > "$W/src/f.py"; git -C "$W" add -A; git -C "$W" commit -q -m f
+git -C "$W" push -q -u origin feature
+git -C "$O" fetch -q origin; git -C "$O" checkout -q -b feature origin/feature
+other_pushes feature docs/plan.md "plan from a teammate"
+git -C "$W" pull -q --ff-only origin feature
+git -C "$W" reset -q --hard HEAD~1
+echo "mine" > "$W/src/mine.py"; git -C "$W" add -A; git -C "$W" commit -q -m mine
+check "a rewrite that dropped a teammate's change to the document is STALE" \
+  1 "the document changed in those commits" "$CHECK" "$W/docs/plan.md"
+
+# Amending a commit that itself edited the document, after pushing it: the
+# document here and there is the same file content, so it is still current.
+fresh
+git -C "$W" checkout -q -b feature
+echo "plan, my edit" > "$W/docs/plan.md"; git -C "$W" add -A; git -C "$W" commit -q -m "edit plan"
+git -C "$W" push -q -u origin feature
+git -C "$W" commit -q --amend -m "edit plan, reworded"
+check "amending a pushed commit that edited the document is still current" \
+  0 "holds an earlier push of this branch" "$CHECK" "$W/docs/plan.md"
+
 # The upstream's remote is not a configured remote.
 fresh
 git -C "$W" checkout -q -b feature

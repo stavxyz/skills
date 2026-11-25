@@ -399,16 +399,31 @@ while [[ $i -lt ${#t_ref[@]} ]]; do
   [[ "$n" -gt 0 ]] || continue
   if [[ "$kind" != "default" && -n "$branch_short" ]]; then
     # The remote's copy of this branch is an earlier state of this very
-    # checkout when its tip appears in the local branch's reflog: it was
-    # pushed from here and then amended or rebased here. Nobody else has
-    # pushed anything newer, so that is not staleness.
+    # checkout when the branch was pushed from here and then amended or
+    # rebased here. That is not staleness, and three things together show it:
+    #  - its tip is in the local branch's reflog (this checkout once had it);
+    #  - this checkout has diverged from it. A checkout that is merely behind
+    #    it (it was at that tip and was reset back, or pulled and reset) has
+    #    the same reflog entry and is plainly stale;
+    #  - the document there is the document here, or did not change on that
+    #    side at all. Otherwise the rewrite dropped a change to the document,
+    #    possibly another session's, and validate would be editing without it.
     tip="$(g rev-parse --verify --quiet "$ref^{commit}")" || tip=""
     # Captured first, not piped: with pipefail, grep -q leaving early would make
     # the pipeline read as a failure.
     seen="$(g reflog show --format=%H "refs/heads/$branch_short" 2>/dev/null || true)"
-    if [[ -n "$tip" ]] && grep -qxF -- "$tip" <<<"$seen"; then
-      notes+=("$disp holds an earlier push of this branch, since rewritten here ($n commit(s) not in this checkout)")
-      continue
+    if [[ -n "$tip" ]] && grep -qxF -- "$tip" <<<"$seen" && ! g merge-base --is-ancestor HEAD "$tip" 2>/dev/null; then
+      here="$(g rev-parse --verify --quiet "HEAD:$rel" 2>/dev/null)" || here=""
+      there="$(g rev-parse --verify --quiet "$tip:$rel" 2>/dev/null)" || there=""
+      same_doc=""
+      [[ -n "$here" && "$here" == "$there" ]] && same_doc=1
+      if [[ -z "$same_doc" ]]; then
+        doc_changed "$ref"; [[ $? -eq 1 ]] && same_doc=1
+      fi
+      if [[ -n "$same_doc" ]]; then
+        notes+=("$disp holds an earlier push of this branch, since rewritten here ($n commit(s) not in this checkout)")
+        continue
+      fi
     fi
   fi
   case "$kind" in

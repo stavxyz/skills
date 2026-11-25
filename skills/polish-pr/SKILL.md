@@ -149,7 +149,9 @@ load-bearing direction. `<BASE_REMOTE>/<BASE_BRANCH>..HEAD` (commits ahead) and
 look-alike checks that do NOT detect staleness — do not substitute them.
 
 
-Run **two reviews in parallel** — one from each system — then address **ALL** findings at every severity level: critical, important, medium, low, nitpicks, test gaps, and suggestions.
+Before dispatching the reviewers, re-derive every number in the PR description from its source (a count, a rate, a duration, a test total): re-run the query or command that produced it, and correct or remove any figure you cannot reproduce. A reviewer reads the diff and takes the description's numbers on trust. Do it again before the verdict: the fix loop changes test totals and counts.
+
+Run **two reviews in parallel**, one from each system (two reviewers per system when the change is large; see below), then address **ALL** findings at every severity level: critical, important, medium, low, nitpicks, test gaps, and suggestions.
 
 **Reviewer A — pr-review-toolkit:**
 - Prefer the `pr-review-toolkit:code-reviewer` subagent (Task tool, subagent_type=`pr-review-toolkit:code-reviewer`).
@@ -159,9 +161,13 @@ Run **two reviews in parallel** — one from each system — then address **ALL*
 - On superpowers 5.1.0+: invoke the `superpowers:requesting-code-review` skill via the Skill tool. The skill's content directs you to dispatch a `general-purpose` subagent using the prompt template at `code-reviewer.md` inside that skill's directory. Fill in the template's placeholders with PR-specific context and dispatch the subagent in parallel with Reviewer A.
 - On superpowers ≤ 5.0.7 (deprecated): use the `superpowers:code-reviewer` subagent directly via the Task tool.
 
-The two reviews must be dispatched **in parallel** (single message, multiple Task tool uses) so they run concurrently.
+All reviews must be dispatched **in parallel** (single message, multiple Task tool uses, in the background where the harness offers the choice) so they run concurrently and the controller is free while they do.
 
-### Append the repeated-pattern sweep instruction to every reviewer dispatch
+Give each reviewer the change once: the git range, or the files, not both, and never a patch file that repeats code it can read from the repository. A reviewer handed the same code twice over has gone silent on it. When the change is large (over about 2,000 changed lines, insertions plus deletions, by `git diff --shortstat <BASE_REMOTE>/<BASE_BRANCH>...HEAD`, or files of that length that must be read whole), give each system two reviewers split by question (for example, state and exit paths; reporting and tests), each with the whole range to read. Every reviewer counts toward its system's review, and all of them report before the fix loop ends.
+
+A reviewer that has written nothing for 15 minutes is stuck, and nothing notifies you of that. So when you first dispatch, also start one background `sleep 900`. When it finishes, and whenever another reviewer reports, look at the modification time of each running reviewer's output file (the dispatch result names it), not at its content. If a reviewer is still running when the timer finishes, start another `sleep 900`, and keep one running until the last reviewer, replacements included, reports. Neither the look nor the timer is the polling and chained sleeps the CI section forbids; that rule is about the checks watcher. Stop a reviewer whose file is more than 15 minutes old (the `TaskStop` tool in Claude Code, or your harness's equivalent), and split its brief between two new reviewers of the same system that together cover everything the stopped one was given, so no part of the change loses that system's review.
+
+### Append these two blocks to every reviewer dispatch
 
 Polish-pr's controller does NOT own the reviewer prompt templates (they live inside `pr-review-toolkit` and `superpowers:requesting-code-review`). It DOES own the prompt envelope it sends to each reviewer. When dispatching either reviewer, append the block below (copy it exactly as written) to the prompt envelope:
 
@@ -171,7 +177,15 @@ Polish-pr's controller does NOT own the reviewer prompt templates (they live ins
 
 Why this exists: a polish-pr v2 run caught a mount-point anti-pattern at one task site but missed three other sites in the same diff with the identical bug. The surgical fix shipped, the siblings did not, and a follow-up validate caught the rest. The sweep instruction makes the reviewer responsible for enumerating every instance up front so the operator's first round of edits covers all of them.
 
-Apply this to both Reviewer A and Reviewer B, in whatever form each is dispatched — the `pr-review-toolkit:code-reviewer` Task prompt, the `general-purpose` subagent prompt you assemble from `superpowers:requesting-code-review`'s template, or (deprecated path) the `superpowers:code-reviewer` Task prompt. It composes with whatever finding format their internal templates already prescribe — it asks the reviewer to multiply findings, not to change the format.
+Apply the sweep block to every reviewer of both systems, in whatever form each is dispatched: the `pr-review-toolkit:code-reviewer` Task prompt, the `general-purpose` subagent prompt you assemble from `superpowers:requesting-code-review`'s template, or (deprecated path) the `superpowers:code-reviewer` Task prompt. It composes with whatever finding format their internal templates already prescribe: it asks the reviewer to multiply findings, not to change the format.
+
+Append this second block to every reviewer dispatch as well, copied exactly:
+
+> **Probe without side effects (REQUIRED).** You may run tests and try mutations to check a claim, but nothing you run may reach a real service: a job queue, a database that is not a scratch one, a message bus, a webhook, a mail or payment API, or a deploy. Code under review often connects to whatever is listening on its default local address. Before running it, mutated or not, point its connections at a fake or an in-memory stand-in, or patch the client, and say in your report what you ran and what you stubbed. The project's own test suite counts as isolated only once you have checked where it connects. If you cannot isolate something, do not run it: reason from the source and say so.
+
+A report that does not say what was run and what was stubbed is incomplete: ask that reviewer for it before acting on its findings.
+
+Why this exists: a reviewer probing tests with in-memory mutations pushed four real jobs onto a job server that happened to be running on the developer's machine, because the code under test connected to its default address.
 
 ## Default disposition: address every finding in this PR
 
@@ -218,6 +232,8 @@ python3 "$CLAUDE_PLUGIN_ROOT/skills/polish-pr/reword-commits.py" \
   --replace <file.json> --dry-run
 ```
 
+When a later message in the range cites one of the rewritten commits by sha, the helper lists it ("cites 1a2b3c4 (now 5d6e7f8)"): every commit from the first changed one onward gets a new sha, so before pushing, run the helper again with `--replace` entries for the listed mentions, and repeat until it lists none (a message that cites a commit fixed in the second pass needs a third).
+
 The helper changes messages, not content: every commit keeps its tree, author, and author date, the committer becomes whoever runs it, and signatures are made again only when `commit.gpgsign` is set. Push with the command it prints, as in Step 3 of the attribution sweep below, which also says what a refused push means.
 
 Any GitHub issues closed by this PR should be referred to in the PR description so that they automatically close when the PR gets merged. Once the PR is created/updated, monitor CI checks in the background to ensure they pass.
@@ -258,7 +274,7 @@ about 100s at the default 20s interval. A repo that genuinely has no CI pays
 that wait on every run, this one included, since it has no CI of its own.
 `tests/polish-pr/test-wait-for-checks.sh` locks the verdicts in.
 
-Run it with `run_in_background: true` so the harness notifies you on completion instead of blocking the conversation. Do not poll, do not chain sleeps — wait for the completion notification, then read the output file. When it exits 0, proceed to the verdict; on non-zero, surface the failed-check list to the user before doing anything else.
+Run it with `run_in_background: true` so the harness notifies you on completion instead of blocking the conversation. Do not poll, do not chain sleeps: wait for the completion notification, then read the output file. When it exits 0, proceed to the verdict; on non-zero, surface the failed-check list to the user before doing anything else. **When no step ran.** If a failed job has no steps at all, or the failed run lists no jobs, nothing was tested and there is no log to read (`gh run view <run-id> --log-failed` prints "log not found"). Elapsed time does not tell this apart from a setup step that failed at once, which has a log and is an ordinary failure. Look: `GH_REPO=<owner>/<repo> gh run list --commit <head sha> --json databaseId,name,conclusion` lists the head's runs with their ids, and `GH_REPO=<owner>/<repo> gh run view <run-id> --json jobs --jq '.jobs[] | [.databaseId, .name, .conclusion, (.steps | length)] | @tsv'` lists one run's jobs with their step counts. For a failed job with zero steps, the reason is in its check run's annotations: `GH_REPO=<owner>/<repo> gh api "repos/{owner}/{repo}/check-runs/<databaseId>/annotations" --jq '.[].message'`. A job the host refused to start (a billing or spending limit is the case this was written for) is not a failing test, and no change to the PR fixes it. Re-run once in case it was momentary: `GH_REPO=<owner>/<repo> gh run rerun <run-id> --failed`, then the watcher again. If the jobs start this time, judge that run like any other. If they are refused again, report the annotation's words and stop, because it is the owner's to fix. For a run with no jobs there is no annotation: `GH_REPO=<owner>/<repo> gh run view <run-id>` prints gh's guess at the reason (a workflow file error, for example). If this PR's diff touches that run's workflow file (`GH_REPO=<owner>/<repo> gh api "repos/{owner}/{repo}/actions/runs/<run-id>" --jq .path`) or a workflow it calls, treat it as a bug in the PR and fix it, which means another review round. Otherwise re-run it once the same way (if gh will not re-run a run that has no jobs, skip the re-run), and if the re-run was skipped or its run is jobless too, report gh's line, as a guess, and stop.
 
 ## Mandatory attribution sweep — DO THIS, do not skip
 
@@ -378,7 +394,9 @@ polish-pr verdict: NOT BLESSED: <each unmet condition, by number>
 The verdict is BLESSED only when all six hold. Check each one; do not infer any
 of them from the others.
 
-1. Both reviewers ran to completion, and every finding is fixed in the PR. A
+1. Every reviewer dispatched, or its replacement, ran to completion and said
+   what it ran and what it stubbed; both systems covered the whole change; and
+   every finding is fixed in the PR. A
    deferral the user approved (with its TODO and issue) counts as handled. A
    deferral or a question still waiting on the user does not.
 2. Every commit made after the reviewers ran is a fix for a named finding, a
@@ -389,7 +407,8 @@ of them from the others.
 4. `wait-for-pr-checks.sh` exited 0 on the final push.
 5. The attribution sweep (Step 2) is empty.
 6. Every automatable open-PR item in the test plan was executed, passed, and is
-   recorded in the PR description.
+   recorded in the PR description, and every number the description states was
+   re-derived from its source after the last fix.
 
 The sha in the verdict is the PR's head at that moment: `git rev-parse HEAD`,
 which must equal `GH_REPO=<owner>/<repo> gh pr view <PR_NUMBER> --json headRefOid --jq .headRefOid`.

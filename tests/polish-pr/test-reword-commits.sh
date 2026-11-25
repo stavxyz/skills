@@ -550,6 +550,102 @@ else
   bad "the new root has no parent and keeps its tree" "$(git -C "$R" log --format='%h %p %s' fresh)"
 fi
 
+# --- a later message that cites a rewritten commit by sha ---------------------
+# Every commit from the first changed one onward gets a new sha, so a message
+# that names one of them is left citing a commit that is no longer on the
+# branch. The helper cannot fix that in the same pass (the new sha is not known
+# until the commit is made), so it lists each one.
+mkrepo
+read -r c1 c2 c3 < <(shas | tr '\n' ' ')
+s2=$(git -C "$R" rev-parse --short "$c2")
+s1=$(git -C "$R" rev-parse --short "$c1")
+commit "$R" 05 d.txt "polish: follow-up
+
+Fixes the retry count added in $s2, and the widget from $s1.
+"
+json '[{"old": "retries twice", "new": "retries three times"}]'
+rw --base base --replace "$tmp/replace.json" --dry-run
+check "--dry-run names a later message that cites a commit about to be rewritten" 0 "cites $s2"
+if grep -qF "cites $s1" <<<"$out"; then
+  bad "a cited commit older than the first changed one keeps its sha and is not listed" "$out"
+else
+  ok
+fi
+rw --base base --replace "$tmp/replace.json"
+check "the rewrite lists the stale mention" 0 "mention(s) of a sha this rewrite replaces"
+new2=$(git -C "$R" rev-parse --short HEAD~2)
+check "and says what the cited commit is now" 0 "cites $s2 (now $new2)"
+# The citing commit was recreated too, so it is named by its new sha.
+if grep -q "^  $(git -C "$R" rev-parse --short HEAD) \"polish: follow-up\" cites" <<<"$out"; then
+  ok
+else
+  bad "the citing commit is named by its new sha" "$out"
+fi
+
+# The scan reads the messages as they will be: a citation that the same run
+# removes is not listed.
+mkrepo
+read -r c1 c2 c3 < <(shas | tr '\n' ' ')
+s2=$(git -C "$R" rev-parse --short "$c2")
+commit "$R" 05 d.txt "polish: follow-up
+
+Fixes the retry count added in $s2.
+"
+json "[{\"old\": \"retries twice\", \"new\": \"retries three times\"}, {\"old\": \"added in $s2\", \"new\": \"added earlier\"}]"
+rw --base base --replace "$tmp/replace.json" --dry-run
+check "the dry run of a run that removes the citation runs" 0 "dry run:"
+if grep -qF "mention(s) of a sha" <<<"$out"; then
+  bad "the dry run does not list a citation the run would remove" "$out"
+else
+  ok
+fi
+rw --base base --replace "$tmp/replace.json"
+check "a run that also removes the citation rewrites" 0
+if grep -qF "mention(s) of a sha" <<<"$out"; then
+  bad "a citation removed by the same run is not listed" "$out"
+else
+  ok
+fi
+
+# A sha is cited as git accepts it: uppercase counts. A hex run glued inside a
+# longer word, or shorter than git's seven characters, is not a citation.
+mkrepo
+read -r c1 c2 c3 < <(shas | tr '\n' ' ')
+s2=$(git -C "$R" rev-parse --short=7 "$c2")
+upper=$(printf '%s' "$s2" | tr 'a-f' 'A-F')
+commit "$R" 05 d.txt "polish: follow-up
+
+See $upper.
+"
+json '[{"old": "retries twice", "new": "retries three times"}]'
+rw --base base --replace "$tmp/replace.json" --dry-run
+check "an uppercase sha is listed" 0 "cites $upper"
+
+mkrepo
+read -r c1 c2 c3 < <(shas | tr '\n' ' ')
+s2=$(git -C "$R" rev-parse --short=7 "$c2")
+commit "$R" 05 d.txt "polish: follow-up
+
+See x${s2}z and ${c2:0:5} for more.
+"
+json '[{"old": "retries twice", "new": "retries three times"}]'
+rw --base base --replace "$tmp/replace.json" --dry-run
+check "the dry run still exits 0" 0
+if grep -qF "mention(s) of a sha" <<<"$out"; then
+  bad "a glued hex run and a five-character prefix are not citations" "$out"
+else
+  ok
+fi
+
+mkrepo
+json '[{"old": "retries twice", "new": "retries three times"}]'
+rw --base base --replace "$tmp/replace.json"
+if grep -qF "mention(s) of a sha" <<<"$out"; then
+  bad "no note is printed when no message cites a rewritten commit" "$out"
+else
+  ok
+fi
+
 if [ "$fail" -eq 0 ]; then
   printf 'ok: %d reword-commits cases passed\n' "$pass"
   exit 0

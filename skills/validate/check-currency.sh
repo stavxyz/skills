@@ -437,7 +437,7 @@ doc_changed() {
         D)     IFS= read -r -d '' a || break; deleted+=(":(literal)$a") ;;
         *)     IFS= read -r -d '' a || break ;;
       esac
-    done < <(g diff -M -z --name-status "$mb" HEAD 2>/dev/null)
+    done < <(g diff --ignore-submodules=none -M -z --name-status "$mb" HEAD 2>/dev/null)
     if [[ -n "$old" ]]; then
       g diff --quiet "$mb" "$ref" -- ":(literal)$rel" ":(literal)$old" 2>/dev/null; rc=$?
     else
@@ -460,7 +460,9 @@ doc_changed() {
 # cited_changed <ref>: sets $cited_hit to the files the document cites that
 # differ between where this branch left <ref> and <ref> itself, newline
 # separated. Returns 0 when the question was answered (the list may be empty),
-# 2 when it could not be, with the reason in $cited_err: the citation lister is missing or failed, or there
+# 2 when it could not be, with the reason in $cited_err (also: a git diff
+# failed, or a cited file is new on this branch while a file the branch
+# deleted changed on the other side): the citation lister is missing or failed, or there
 # is no common history. The cited files are listed once, by the sibling
 # check-citations.py, from the document as it is in this checkout.
 cited_state=""   # "", ok, or failed
@@ -505,7 +507,7 @@ cited_changed() {
         D)     IFS= read -r -d '' a || break; deleted+=(":(literal)$a") ;;
         *)     IFS= read -r -d '' a || break ;;
       esac
-    done < <(g diff -M -z --name-status "$mb" HEAD 2>/dev/null)
+    done < <(g diff --ignore-submodules=none -M -z --name-status "$mb" HEAD 2>/dev/null)
     # A cited file that is new on this branch (in HEAD, not at the merge base),
     # while a file this branch deleted changed on the other side: it may be
     # that file, moved and rewritten past what git calls a rename. Not known,

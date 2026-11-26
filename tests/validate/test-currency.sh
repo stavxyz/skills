@@ -1366,6 +1366,17 @@ check "a bump of the submodule holding a cited file is STALE" \
 git -C "$W" config diff.ignoreSubmodules all
 check "and still STALE when the repository hides submodule changes from diff" \
   1 "vendor/a" "$CHECK" "$W/docs/plan.md"
+# The branch renames the cited submodule: its old name on the default branch
+# is still compared, also with submodule changes hidden from diff.
+git -C "$W" config --unset diff.ignoreSubmodules
+git -C "$W" mv vendor/a vendor/a2
+printf 'The plan.\n\nSee `vendor/a2/x.py:1`.\n' > "$W/docs/plan.md"
+git -C "$W" add -A; git -C "$W" commit -q -m "rename the cited submodule"
+check "a cited submodule this branch renamed, bumped on the default branch, is STALE" \
+  1 "file(s) the document cites changed on origin/main" "$CHECK" "$W/docs/plan.md"
+git -C "$W" config diff.ignoreSubmodules all
+check "and still STALE with submodule changes hidden from diff" \
+  1 "file(s) the document cites changed on origin/main" "$CHECK" "$W/docs/plan.md"
 
 # The moved-and-rewritten guard must not swallow other answers. The branch
 # here deletes an unrelated file that the default branch then changes.
@@ -1385,7 +1396,7 @@ check "a cited file that changed is STALE even when another cited file is new he
   1 "file(s) the document cites changed on origin/main after this branch left it (2 commit(s) behind): src/keep.py" "$CHECK" "$W/docs/plan.md"
 guard_fixture 'See `src/added.py:1`.\n'
 other_pushes main src/added.py "added on main"
-check "a cited file only the default branch added is STALE, not called new here" \
+check "a cited file only the default branch added is STALE when the branch also deleted a file" \
   1 "src/added.py" "$CHECK" "$W/docs/plan.md"
 guard_fixture 'See `src/keep.py:1` and a typo `src/nope.py:2`.\n'
 check "a cited path that exists nowhere does not trip the guard" \

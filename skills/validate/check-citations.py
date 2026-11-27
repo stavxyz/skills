@@ -86,11 +86,13 @@ every run; `--strict` and `--no-strict` override it for one invocation.
 
 Usage:
     check-citations.py <document.md> [--repo-root DIR] [--strict|--no-strict]
+    check-citations.py <document.md> [--repo-root DIR] --paths
 """
 
 from __future__ import annotations
 
 import argparse
+import posixpath
 import os
 import re
 import subprocess
@@ -539,6 +541,20 @@ def main() -> int:
                        # arguments keeps that from turning the gate on.
         help="force non-strict for this run, overriding CHECK_CITATIONS_STRICT",
     )
+    ap.add_argument(
+        "--paths",
+        action="store_true",
+        help="print the tracked files the document cites, one repository-relative "
+             "path per line, and check nothing. A citation whose path resolves "
+             "to no tracked file is listed as written when it has a directory part "
+             "or a leading ./ (a bare name and a path outside the repository are "
+             "left out; a partial path is compared only as written, so a file the "
+             "default branch adds under a longer path is not seen), an "
+             "ambiguous bare filename lists every file it could mean, and a file "
+             "inside a "
+             "submodule is listed as the submodule's mount point. check-currency.sh "
+             "uses this to see whether a cited file changed on the default branch.",
+    )
     args = ap.parse_args()
 
     # Precedence: an explicit flag, else the environment, else off. The env var
@@ -571,6 +587,51 @@ def main() -> int:
     except RuntimeError as exc:
         print(f"check-citations: {exc}", file=sys.stderr)
         return 2
+
+    if args.paths:
+        # A file inside a submodule is listed as the submodule's mount point:
+        # the superproject's history records the submodule only as that one
+        # entry, so a diff of the superproject can see the mount point move
+        # and can never see a path beneath it.
+        staged = subprocess.run(
+            ["git", "-C", str(repo), "ls-files", "--stage", "-z"],
+            capture_output=True, text=True, check=False,
+        )
+        if staged.returncode != 0:
+            # gitlinks() answers "none" when this fails, and submodule files
+            # would then be listed by paths the superproject can never show.
+            print("check-citations: git ls-files --stage failed", file=sys.stderr)
+            return 2
+        mounts = gitlinks(repo)
+        cited: set[str] = set()
+        for cite in citations(doc):
+            # An ambiguous bare filename names one of several files and the
+            # checker cannot say which, so all of them are listed: a change to
+            # any is a change to what the document may be citing.
+            target, candidates = resolve(cite.path, repo)
+            names = [target.relative_to(repo).as_posix()] if target is not None else candidates
+            if not names:
+                # No tracked file, but the path may point into a submodule
+                # that is not checked out here: the mount point still stands
+                # for it.
+                # Otherwise a path with a directory in it is listed as
+                # written: it may be a file the default branch has added,
+                # which a diff of that path will show. A bare name that
+                # matches nothing says too little to compare.
+                written, rooted = normalise(cite.path, repo)
+                written = posixpath.normpath(written)
+                if written.startswith(("/", "../")) or written in ("..", "."):
+                    continue  # outside this repository: nothing here to compare
+                names = [written]
+                under = any(written == m or written.startswith(m + "/") for m in mounts)
+                if not under and not rooted and "/" not in written:
+                    continue
+            for name in names:
+                inside = [m for m in mounts if name == m or name.startswith(m + "/")]
+                cited.add(max(inside, key=len) if inside else name)
+        for name in sorted(cited):
+            print(name)
+        return 0
 
     tally = {"ok": 0, "unverifiable": 0, "broken": 0}
     blocks: list[str] = []

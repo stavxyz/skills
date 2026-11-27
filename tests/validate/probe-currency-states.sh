@@ -109,5 +109,10 @@ fresh; c "$W" m.py M; G push -q; G reset -q --hard HEAD~2; c "$W" again.py again
 # reports the distance. Git cannot tell this reset from a teammate's push.
 fresh; G checkout -q -b feature origin/main; G reset -q --hard HEAD~1; r "x10 feature tracking origin/main, one code commit behind it, document unchanged [want CURRENT]"
 fresh; mate main ../docs/plan.md; G checkout -q -b feature origin/main; r "x11 feature tracking origin/main, behind a commit that changed the document [want STALE]"
+# x12, x13: a feature branch behind the default branch by a code-only commit. The
+# document decides, and so do the files it cites.
+cited() { printf 'See `src/code.py:1`.\n' > "$W/docs/plan.md"; G add -A; G commit -qm "plan cites code"; G push -q origin main; G checkout -q -b feature; c "$W" f.py f; }
+fresh; cited; mate main code.py; r "x12 feature behind main by a commit that changed a file the document cites [want STALE]"
+fresh; cited; mate main other.py; r "x13 feature behind main by a commit that changed an uncited file [want CURRENT]"
 
 exit "$bad"

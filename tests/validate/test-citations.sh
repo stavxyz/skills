@@ -732,6 +732,42 @@ report "the [manual] guard is numbered before claim verification" \
   "yes" \
   "$([ -n "$guard" ] && [ -n "$verify" ] && [ "$guard" -lt "$verify" ] && echo yes || echo no)"
 
+# --- --paths: the files a document cites, for check-currency.sh -------------
+PR="$TMP/paths-repo"
+mkdir -p "$PR/src/deep" "$PR/docs"
+git -C "$PR" init -q
+printf 'a\nb\n' > "$PR/src/one.py"; printf 'x\n' > "$PR/src/deep/two.py"
+printf 'r\n' > "$PR/README.md"; printf 'r\n' > "$PR/src/README.md"
+cat > "$PR/docs/plan.md" <<'DOC'
+See `src/one.py:1` and `src/one.py:2`, then `two.py:1`.
+An ambiguous `README.md:1` lists both files; a missing `gone.py:3` is left out,
+and a missing `src/later.py:1` is listed as written, as is `./rooted.py:1`.
+Outside the repository: `../other/x.py:1` and `/usr/lib/python3/os.py:1`.
+DOC
+git -C "$PR" add -A
+git -C "$PR" -c user.name=t -c user.email=t@example.com commit -q -m init
+paths_out="$(python3 "$CHECKER" "$PR/docs/plan.md" --repo-root "$PR" --paths)"; paths_rc=$?
+report "--paths exits 0" 0 "$paths_rc"
+report "--paths lists each file once, every candidate of an ambiguous name, sorted" "README.md
+rooted.py
+src/README.md
+src/deep/two.py
+src/later.py
+src/one.py" "$paths_out"
+lacks "--paths prints no findings" "$paths_out" "###"
+lacks "--paths leaves out a path outside the repository" "$paths_out" "os.py"
+# A file inside a submodule is listed as the submodule's mount point.
+SM="$TMP/paths-sub"; mkdir -p "$SM"; git -C "$SM" init -q
+printf 'x\n' > "$SM/x.py"; git -C "$SM" add -A; git -C "$SM" -c user.name=t -c user.email=t@example.com commit -q -m sub
+git -C "$PR" -c protocol.file.allow=always submodule --quiet add "$SM" vendor/sub 2>/dev/null
+git -C "$PR" -c user.name=t -c user.email=t@example.com commit -q -m "add submodule"
+printf 'See `vendor/sub/x.py:1`.\n' > "$PR/docs/sub.md"
+report "--paths lists a file inside a submodule as the mount point" "vendor/sub" \
+  "$(python3 "$CHECKER" "$PR/docs/sub.md" --repo-root "$PR" --paths)"
+git -C "$PR" submodule --quiet deinit -f vendor/sub
+report "--paths lists the mount point when the submodule is not checked out" "vendor/sub" \
+  "$(python3 "$CHECKER" "$PR/docs/sub.md" --repo-root "$PR" --paths)"
+
 # --- the checker's own docs are not exempt --------------------------------
 # Counts the per-document tally lines as well as summing them: a crashing
 # checker prints nothing, `sed` matches nothing, and `awk` would sum an empty
@@ -749,7 +785,7 @@ report "skills/validate/*.md carry no broken citations" \
 # A conditional case (the submodule one) means "0 failed" could otherwise hide
 # a silently smaller run. Counted outside `report` so this check cannot count
 # itself; bump it deliberately when you add an assertion.
-EXPECTED_ASSERTIONS=120
+EXPECTED_ASSERTIONS=126
 ran=$((pass + fail))
 if [ "$ran" -ne "$EXPECTED_ASSERTIONS" ]; then
   fail=$((fail + 1))
